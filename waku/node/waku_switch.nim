@@ -19,7 +19,8 @@ import
   libp2p/transports/[transport, tcptransport, wstransport],
   libp2p/peeraddrpolicy
 
-# override nim-libp2p default value (which is also 1)
+# override nim-libp2p default values (which are also 50 & 1)
+const MaxConnections* = 50
 const MaxConnectionsPerPeer* = 1
 
 proc withWsTransport*(b: SwitchBuilder): SwitchBuilder =
@@ -67,8 +68,8 @@ proc newWakuSwitch*(
     inTimeout: Duration = 5.minutes,
     outTimeout: Duration = 5.minutes,
     maxConnections = MaxConnections,
-    maxIn = -1,
-    maxOut = -1,
+    maxIn = int.high,
+    maxOut = int.high,
     maxConnsPerPeer = MaxConnectionsPerPeer,
     nameResolver: NameResolver = nil,
     sendSignedPeerRecord = false,
@@ -90,8 +91,7 @@ proc newWakuSwitch*(
     .new()
     .withRng(rng)
     .withMaxConnections(maxConnections)
-    .withMaxIn(maxIn)
-    .withMaxOut(maxOut)
+    .withMaxInOut(maxIn, maxOut)
     .withMaxConnsPerPeer(maxConnsPerPeer)
     .withYamux()
     .withMplex(inTimeout, outTimeout)
