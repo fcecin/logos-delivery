@@ -347,7 +347,13 @@ proc processInput(rfd: AsyncFD, rng: ref HmacDrbgContext) {.async.} =
         continue
       kadBootstrapPeers.add((peerId, @[ma]))
 
-  node.wakuKademlia = WakuKademlia.new(node.switch, node.peerManager, kadBootstrapPeers)
+  node.wakuKademlia = WakuKademlia.new(
+    switch = node.switch,
+    peerManager = node.peerManager,
+    bootstrapNodes = kadBootstrapPeers,
+    xprPublishing = false,
+    disableBootstrapping = true,
+  )
 
   let catchRes = catch:
     node.switch.mount(node.wakuKademlia.protocol)

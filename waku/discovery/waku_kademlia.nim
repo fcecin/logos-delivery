@@ -166,7 +166,8 @@ proc new*(
     bootstrapNodes: seq[(PeerId, seq[MultiAddress])] = @[],
     providedServices: seq[ServiceInfo] = @[],
     loopInterval: Duration = DefaultKademliaDiscoveryInterval,
-    xprPublishing: bool = false,
+    xprPublishing: bool = true,
+    disableBootstrapping: bool = false,
 ): T =
   if bootstrapNodes.len == 0:
     debug "creating kademlia discovery as seed node (no bootstrap nodes)"
@@ -174,8 +175,11 @@ proc new*(
   let kademlia = ServiceDiscovery.new(
     switch,
     bootstrapNodes = bootstrapNodes,
-    config =
-      KadDHTConfig.new(validator = ExtEntryValidator(), selector = ExtEntrySelector()),
+    config = KadDHTConfig.new(
+      validator = ExtEntryValidator(),
+      selector = ExtEntrySelector(),
+      disableBootstrapping = disableBootstrapping,
+    ),
     services = providedServices,
     xprPublishing = xprPublishing,
   )

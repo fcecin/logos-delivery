@@ -23,11 +23,11 @@ import
 const MaxConnections* = 50
 const MaxConnectionsPerPeer* = 1
 
-proc withWsTransport*(b: SwitchBuilder): SwitchBuilder =
+#[ proc withWsTransport*(b: SwitchBuilder): SwitchBuilder =
   b.withTransport(
     proc(upgr: Upgrade, privateKey: crypto.PrivateKey): Transport =
       WsTransport.new(upgr)
-  )
+  ) ]#
 
 proc getSecureKey(path: string): TLSPrivateKey {.raises: [Defect, IOError].} =
   trace "Key path is.", path = path
@@ -47,7 +47,7 @@ proc getSecureCert(path: string): TLSCertificate {.raises: [Defect, IOError].} =
   except TLSStreamProtocolError as exc:
     info "exception raised from getSecureCert", err = exc.msg
 
-proc withWssTransport*(
+#[ proc withWssTransport*(
     b: SwitchBuilder, secureKeyPath: string, secureCertPath: string
 ): SwitchBuilder {.raises: [Defect, IOError].} =
   let key: TLSPrivateKey = getSecureKey(secureKeyPath)
@@ -56,7 +56,7 @@ proc withWssTransport*(
     tlsPrivateKey = key,
     tlsCertificate = cert,
     {TLSFlags.NoVerifyHost, TLSFlags.NoVerifyServerName}, # THIS IS INSECURE, NO?
-  )
+  ) ]#
 
 proc newWakuSwitch*(
     privKey = none(crypto.PrivateKey),
@@ -115,10 +115,10 @@ proc newWakuSwitch*(
   if wsAddress.isSome():
     b = b.withAddresses(@[wsAddress.get(), address])
 
-    if wssEnabled:
+    #[ if wssEnabled:
       b = b.withWssTransport(secureKeyPath, secureCertPath)
     else:
-      b = b.withWsTransport()
+      b = b.withWsTransport() ]#
   else:
     b = b.withAddress(address)
 

@@ -27,7 +27,7 @@ requires "nim >= 2.2.4",
   "toml_serialization",
   "faststreams",
   # Networking & P2P
-  "https://github.com/vacp2p/nim-libp2p.git#9b6fedca059f3c054582407be9268e2999c7d05d",
+  "https://github.com/vacp2p/nim-libp2p.git#df777fc66cc100191dbefd3c222a4472b4d3b924",
   "eth",
   "nat_traversal",
   "dnsdisc",
