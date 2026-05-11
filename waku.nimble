@@ -61,6 +61,8 @@ requires "nim >= 2.2.4",
 # Packages not on nimble (use git URLs)
 requires "https://github.com/logos-messaging/nim-ffi"
 
+requires "https://github.com/logos-messaging/nim-sds.git#2e9a7683f0e180bf112135fae3a3803eed8490d4"
+
 requires "https://github.com/vacp2p/nim-lsquic"
 requires "https://github.com/vacp2p/nim-jwt.git#057ec95eb5af0eea9c49bfe9025b3312c95dc5f2"
 
