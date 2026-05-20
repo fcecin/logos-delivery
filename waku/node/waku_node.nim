@@ -628,6 +628,12 @@ proc start*(node: WakuNode) {.async.} =
   # After switch.start, run custom Logos Delivery relay start logic
   await node.reconnectRelayPeers()
 
+  # Kick off the DoS-protection registration broadcast now that peers are
+  # reconnected. Fire-and-forget: the proc returns immediately and an
+  # internal background task retries until the broadcast lands.
+  if not node.wakuMix.isNil():
+    node.wakuMix.registerDoSProtectionWithNetwork()
+
   node.started = true
 
   if not node.wakuFilterClient.isNil():
