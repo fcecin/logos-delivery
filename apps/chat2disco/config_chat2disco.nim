@@ -15,7 +15,7 @@ const defaultMetricsAddress* = parseIpAddress("127.0.0.1")
 
 type Chat2DiscoConf* = object ## General node config
   logLevel* {.
-    desc: "Sets the log level.", defaultValue: LogLevel.INFO, name: "log-level"
+    desc: "Sets the log level.", defaultValue: LogLevel.DEBUG, name: "log-level"
   .}: LogLevel
 
   nodekey* {.desc: "P2P node private key as 64 char hex string.", name: "nodekey".}:
@@ -47,26 +47,6 @@ type Chat2DiscoConf* = object ## General node config
     desc: "Enable relay protocol: true|false", defaultValue: true, name: "relay"
   .}: bool
 
-  keepAlive* {.
-    desc: "Enable keep-alive for idle connections: true|false",
-    defaultValue: false,
-    name: "keep-alive"
-  .}: bool
-
-  clusterId* {.
-    desc:
-      "Cluster id that the node is running in. Node in a different cluster id is disconnected.",
-    defaultValue: 0,
-    name: "cluster-id"
-  .}: uint16
-
-  shards* {.
-    desc:
-      "Shards index to subscribe to [0..NUM_SHARDS_IN_NETWORK-1]. Argument may be repeated.",
-    defaultValue: @[uint16(0)],
-    name: "shard"
-  .}: seq[uint16]
-
   ## Metrics config
   metricsServer* {.
     desc: "Enable the metrics server: true|false",
@@ -91,41 +71,6 @@ type Chat2DiscoConf* = object ## General node config
     defaultValue: true,
     name: "metrics-logging"
   .}: bool
-
-  ## Chat2 configuration
-  contentTopic* {.
-    desc: "Content topic for chat messages.",
-    defaultValue: "/chat2disco/1/default/proto",
-    name: "content-topic"
-  .}: string
-
-  ## Websocket Configuration
-  websocketSupport* {.
-    desc: "Enable websocket:  true|false",
-    defaultValue: false,
-    name: "websocket-support"
-  .}: bool
-
-  websocketPort* {.
-    desc: "WebSocket listening port.", defaultValue: 8000, name: "websocket-port"
-  .}: Port
-
-  websocketSecureSupport* {.
-    desc: "WebSocket Secure Support.",
-    defaultValue: false,
-    name: "websocket-secure-support"
-  .}: bool
-
-  ## DNS Resolution config
-  dnsAddrsNameServers* {.
-    desc:
-      "DNS name server IPs to query for DNS multiaddrs resolution. Argument may be repeated.",
-    defaultValue: @[
-      IpAddress(family: IpAddressFamily.IPv4, address_v4: [1'u8, 1, 1, 1]),
-      IpAddress(family: IpAddressFamily.IPv4, address_v4: [1'u8, 0, 0, 1]),
-    ],
-    name: "dns-addrs-name-server"
-  .}: seq[IpAddress]
 
   ## Kademlia Discovery config
   kadBootstrapNodes* {.

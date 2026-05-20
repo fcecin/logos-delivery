@@ -82,11 +82,6 @@ proc newWakuSwitch*(
     circuitRelay: Relay,
     maxNumRelays: int = 5,
 ): Switch {.raises: [Defect, IOError, LPError].} =
-  let
-    autonatService = AutonatService.new(AutonatClient(), rng)
-    autoRelayService = AutoRelayService.new(maxNumRelays, RelayClient.new(), nil, rng)
-    hpService: Service = HPService.new(autonatService, autoRelayService)
-
   var b = SwitchBuilder
     .new()
     .withRng(rng)
@@ -99,9 +94,8 @@ proc newWakuSwitch*(
     .withTcpTransport(transportFlags)
     .withNameResolver(nameResolver)
     .withSignedPeerRecord(sendSignedPeerRecord)
-    #.withAddressPolicy(publicRoutableAddressPolicy)
-    #.withCircuitRelay(circuitRelay)
-    #.withServices(@[hpService])
+    .withAddressPolicy(publicRoutableAddressPolicy)
+    .withCircuitRelay(circuitRelay)
 
   if peerStoreCapacity.isSome():
     b = b.withPeerStore(peerStoreCapacity.get())

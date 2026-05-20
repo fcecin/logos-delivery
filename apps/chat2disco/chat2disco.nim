@@ -28,12 +28,16 @@ import
     protobuf/minprotobuf,
     extended_peer_record,
     nameresolving/dnsresolver,
+    protocols/connectivity/relay/client,
+    services/autorelayservice,
+    services/hpservice,
   ]
 import
   waku/[
     waku_core,
     waku_enr,
     discovery/waku_kademlia,
+    discovery/autonat_service,
     waku_node,
     node/waku_metrics,
     node/peer_manager,
@@ -314,6 +318,8 @@ proc processInput(rfd: AsyncFD, rng: crypto.Rng) {.async.} =
     error "failed to create enr record", error
     quit(QuitFailure)
 
+  let circuitRelay = RelayClient.new()
+
   let node = block:
     var builder = WakuNodeBuilder.init()
     builder.withNodeKey(nodeKey)
@@ -330,11 +336,29 @@ proc processInput(rfd: AsyncFD, rng: crypto.Rng) {.async.} =
       quit(QuitFailure)
 
     let nameResolver =
-      DnsResolver.new(conf.dnsAddrsNameServers.mapIt(initTAddress(it, Port(53))))
+      DnsResolver.new(netConf.dnsNameServers.mapIt(initTAddress(it, Port(53))))
 
     builder.withNetworkConfiguration(netConf)
     builder.withSwitchConfiguration(nameResolver = nameResolver)
+    builder.withCircuitRelay(circuitRelay)
     builder.build().tryGet()
+
+  proc onReservation(addresses: seq[MultiAddress]) {.gcsafe, raises: [].} =
+    info "circuit relay handler new reserve event",
+      addrs_before = $(node.announcedAddresses), addrs = $addresses
+
+    node.announcedAddresses.setLen(0) ## remove previous addresses
+    node.announcedAddresses.add(addresses)
+
+    info "chat2disco node announced addresses updated",
+      announcedAddresses = node.announcedAddresses
+
+  let
+    autonatService = getAutonatService(rng)
+    autoRelayService = AutoRelayService.new(2, circuitRelay, onReservation, rng)
+    holePunchService = HPService.new(autonatService, autoRelayService)
+
+  node.switch.services = @[Service(holePunchService)]
 
   if conf.relay:
     (await node.mountRelay()).isOkOr:
