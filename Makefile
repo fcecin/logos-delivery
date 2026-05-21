@@ -94,10 +94,14 @@ REQUIRED_NIM_VERSION    := $(shell grep -E '^const RequiredNimVersion\s*=' waku.
 REQUIRED_NIMBLE_VERSION := $(shell grep -E '^const RequiredNimbleVersion\s*=' waku.nimble | grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"')
 
 install-nim:
+ifneq ($(detected_OS),Windows)
 	scripts/install_nim.sh $(REQUIRED_NIM_VERSION)
+endif
 
 install-nimble: install-nim
+ifneq ($(detected_OS),Windows)
 	scripts/install_nimble.sh $(REQUIRED_NIMBLE_VERSION)
+endif
 
 build:
 	mkdir -p build
