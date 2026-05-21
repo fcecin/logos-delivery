@@ -17,7 +17,7 @@ env:
   NIM_VERSION: '2.2.4'
   NIMBLE_VERSION: '0.22.3'
   # Bump to invalidate the nimble deps cache (GitHub caches are immutable per key).
-  NIMBLE_CACHE_VERSION: 'v2'
+  NIMBLE_CACHE_VERSION: 'v3'
 
 jobs:
   changes: # changes detection
@@ -110,6 +110,7 @@ jobs:
           path: |
             nimbledeps/
             nimble.paths
+            ~/.nimble
           key: ${{ runner.os }}-nimbledeps-${{ env.NIMBLE_CACHE_VERSION }}-nimble${{ env.NIMBLE_VERSION }}-${{ hashFiles('nimble.lock', 'BearSSL.mk', 'Nat.mk') }}
           restore-keys: |
             ${{ runner.os }}-nimbledeps-${{ env.NIMBLE_CACHE_VERSION }}-nimble${{ env.NIMBLE_VERSION }}-
@@ -191,6 +192,7 @@ jobs:
           path: |
             nimbledeps/
             nimble.paths
+            ~/.nimble
           key: ${{ runner.os }}-nimbledeps-${{ env.NIMBLE_CACHE_VERSION }}-nimble${{ env.NIMBLE_VERSION }}-${{ hashFiles('nimble.lock', 'BearSSL.mk', 'Nat.mk') }}
           restore-keys: |
             ${{ runner.os }}-nimbledeps-${{ env.NIMBLE_CACHE_VERSION }}-nimble${{ env.NIMBLE_VERSION }}-
@@ -274,6 +276,7 @@ jobs:
           path: |
             nimbledeps/
             nimble.paths
+            ~/.nimble
           key: ${{ runner.os }}-nimbledeps-${{ env.NIMBLE_CACHE_VERSION }}-nimble${{ env.NIMBLE_VERSION }}-${{ hashFiles('nimble.lock', 'BearSSL.mk', 'Nat.mk') }}
           restore-keys: |
             ${{ runner.os }}-nimbledeps-${{ env.NIMBLE_CACHE_VERSION }}-nimble${{ env.NIMBLE_VERSION }}-
