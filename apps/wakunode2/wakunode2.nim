@@ -22,6 +22,8 @@ logScope:
 
 const git_version* {.strdefine.} = "n/a"
 
+const ciWindowsBuildTrigger {.used.} = true
+
 {.pop.}
   # @TODO confutils.nim(775, 17) Error: can raise an unlisted exception: ref IOError
 when isMainModule:
