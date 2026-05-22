@@ -115,9 +115,9 @@ proc encode*(message: Chat2Message): ProtoBuffer =
 
   return serialised
 
-proc toString*(message: Chat2Message): string =
-  let time = message.timestamp.fromUnix().local().format("'<'MMM' 'dd,' 'HH:mm'>'")
-  return time & " " & message.nick & ": " & string.fromBytes(message.payload)
+proc `$`*(message: Chat2Message): string =
+  let time = message.timestamp.fromUnix().local().format("HH:mm")
+  return time & "->" & message.nick & ": " & string.fromBytes(message.payload)
 
 #####################
 
