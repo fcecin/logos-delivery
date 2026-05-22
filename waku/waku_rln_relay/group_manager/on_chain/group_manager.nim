@@ -506,8 +506,9 @@ method generateProof*(
     external_nullifier: extNullifier,
   )
 
-  let output = generateRlnProofWithWitness(g.rlnInstance, witness, epoch, rlnIdentifier).valueOr:
-    return err("Failed to generate proof: " & error)
+  waku_rln_proof_generation_duration_seconds.nanosecondTime:
+    let output = generateRlnProofWithWitness(g.rlnInstance, witness, epoch, rlnIdentifier).valueOr:
+      return err("Failed to generate proof: " & error)
 
   info "Proof generated successfully", proof = output
 
