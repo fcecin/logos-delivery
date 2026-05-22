@@ -107,7 +107,8 @@ suite "Onchain group manager":
     (waitFor manager.init()).isOkOr:
       raiseAssert $error
 
-    let merkleRootBefore = waitFor manager.fetchMerkleRoot()
+    let merkleRootBefore = (waitFor manager.fetchMerkleRoot()).valueOr:
+      raiseAssert "Failed to fetch merkle root before: " & error
 
     for i in 0 ..< credentials.len():
       info "Registering credential", index = i, credential = credentials[i]
@@ -115,11 +116,46 @@ suite "Onchain group manager":
         assert false, "Failed to register credential " & $i & ": " & error
       discard waitFor manager.updateRoots()
 
-    let merkleRootAfter = waitFor manager.fetchMerkleRoot()
+    let merkleRootAfter = (waitFor manager.fetchMerkleRoot()).valueOr:
+      raiseAssert "Failed to fetch merkle root after: " & error
 
     check:
       merkleRootBefore != merkleRootAfter
       manager.validRoots.len() == credentialCount
+
+  test "trackRootChanges: oldest roots are evicted once the window is exceeded":
+    const
+      initialCount = 5
+      additionalCount = 46
+    let credentials = generateCredentials(initialCount + additionalCount)
+    (waitFor manager.init()).isOkOr:
+      raiseAssert $error
+
+    # Register the first 5 credentials and snapshot the 3 oldest roots.
+    for i in 0 ..< initialCount:
+      (waitFor manager.register(credentials[i], UserMessageLimit(20))).isOkOr:
+        assert false, "Failed to register credential " & $i & ": " & error
+      discard waitFor manager.updateRoots()
+
+    check manager.validRoots.len() >= 3
+    let firstThreeBefore =
+      @[manager.validRoots[0], manager.validRoots[1], manager.validRoots[2]]
+
+    # Register the remaining credentials, pushing the deque past AcceptableRootWindowSize.
+    for i in initialCount ..< credentials.len():
+      (waitFor manager.register(credentials[i], UserMessageLimit(20))).isOkOr:
+        assert false, "Failed to register credential " & $i & ": " & error
+      discard waitFor manager.updateRoots()
+
+    let rootsAfter = manager.validRoots.items().toSeq()
+
+    # 51 registrations into a window of 50 evicts exactly the single oldest root,
+    # so only the first of the original three is gone; the other two remain.
+    check:
+      manager.validRoots.len() == AcceptableRootWindowSize
+      firstThreeBefore[0] notin rootsAfter
+      firstThreeBefore[1] in rootsAfter
+      firstThreeBefore[2] in rootsAfter
 
   test "register: should guard against uninitialized state":
     let dummyCommitment = default(IDCommitment)
