@@ -149,12 +149,6 @@ proc checkInitialized(g: OnchainGroupManager): Result[void, string] =
     return err("OnchainGroupManager is not initialized")
   return ok()
 
-template retryWrapper(
-    g: OnchainGroupManager, res: auto, errStr: string, body: untyped
-): auto =
-  retryWrapper(res, RetryStrategy.new(), errStr, g.onFatalErrorAction):
-    body
-
 # proc updateRoots*(g: OnchainGroupManager): Future[bool] {.async.} =
 #   let rootRes = await g.fetchMerkleRoot()
 #   if rootRes.isErr():
