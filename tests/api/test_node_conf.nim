@@ -4,7 +4,6 @@ import std/[options, json, strutils], results, stint, testutils/unittests
 import json_serialization, confutils, confutils/std/net
 import
   tools/confutils/cli_args,
-  waku/api/api_conf,
   waku/factory/waku_conf,
   waku/factory/networks_config,
   waku/factory/conf_builder/conf_builder,
@@ -340,53 +339,6 @@ suite "WakuNodeConf JSON -> WakuConf integration":
     require wakuConf.validate().isOk()
     check:
       wakuConf.maxMessageSizeBytes == 100'u64 * 1024'u64
-
-# ---- Deprecated NodeConfig tests (kept for backward compatibility) ----
-
-{.push warning[Deprecated]: off.}
-
-import waku/api/api_conf
-
-suite "NodeConfig (deprecated) - toWakuConf":
-  test "Minimal configuration":
-    let nodeConfig = NodeConfig.init(ethRpcEndpoints = @["http://someaddress"])
-    let wakuConfRes = api_conf.toWakuConf(nodeConfig)
-    let wakuConf = wakuConfRes.valueOr:
-      raiseAssert error
-    wakuConf.validate().isOkOr:
-      raiseAssert error
-    check:
-      wakuConf.clusterId == 1
-      wakuConf.shardingConf.numShardsInCluster == 8
-      wakuConf.staticNodes.len == 0
-
-  test "Edge mode configuration":
-    let protocolsConfig = ProtocolsConfig.init(entryNodes = @[], clusterId = 1)
-    let nodeConfig =
-      NodeConfig.init(mode = api_conf.WakuMode.Edge, protocolsConfig = protocolsConfig)
-    let wakuConfRes = api_conf.toWakuConf(nodeConfig)
-    require wakuConfRes.isOk()
-    let wakuConf = wakuConfRes.get()
-    require wakuConf.validate().isOk()
-    check:
-      wakuConf.relay == false
-      wakuConf.lightPush == false
-      wakuConf.peerExchangeService == true
-
-  test "Core mode configuration":
-    let protocolsConfig = ProtocolsConfig.init(entryNodes = @[], clusterId = 1)
-    let nodeConfig =
-      NodeConfig.init(mode = api_conf.WakuMode.Core, protocolsConfig = protocolsConfig)
-    let wakuConfRes = api_conf.toWakuConf(nodeConfig)
-    require wakuConfRes.isOk()
-    let wakuConf = wakuConfRes.get()
-    require wakuConf.validate().isOk()
-    check:
-      wakuConf.relay == true
-      wakuConf.lightPush == true
-      wakuConf.peerExchangeService == true
-
-{.pop.}
 
 suite "WakuConfBuilder - store retention policies":
   test "Multiple retention policies":

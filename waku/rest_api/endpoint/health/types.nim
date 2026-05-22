@@ -3,7 +3,7 @@
 import results
 import chronicles, json_serialization, json_serialization/std/options
 import ../serdes
-import waku/[waku_node, api/types]
+import waku/waku_node
 
 #### Serialization and deserialization
 

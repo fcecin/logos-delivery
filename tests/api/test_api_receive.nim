@@ -7,18 +7,21 @@ import brokers/broker_context
 import ../testlib/[common, wakucore, wakunode, testasync]
 import ../waku_archive/archive_utils
 
+import waku/api/api
+import layers/logos_delivery
+import messaging/api/events
 import
   waku,
   waku/[
     waku_node,
     waku_core,
-    events/message_events,
+    api/events/message,
     waku_relay/protocol,
     waku_archive,
     waku_archive/common as archive_common,
-    node/delivery_service/delivery_service,
-    node/delivery_service/recv_service,
   ]
+import messaging/delivery_service/delivery_service
+import messaging/delivery_service/recv_service
 import waku/factory/waku_conf
 import tools/confutils/cli_args
 
@@ -142,12 +145,15 @@ suite "Messaging API, Receive Service (store recovery)":
     # RecvService captures startTimeToCheck at construction time; the
     # message's timestamp must land after that point to fall inside
     # checkStore's time window.
-    var subscriber: Waku
+    var subscriber: LogosDelivery
     lockNewGlobalBrokerContext:
-      subscriber = (await createNode(createApiNodeConf(numShards))).expect(
+      let waku = (await createNode(createApiNodeConf(numShards))).expect(
         "Failed to create subscriber"
       )
-      (await startWaku(addr subscriber)).expect("Failed to start subscriber")
+      subscriber = LogosDelivery.new(MessagingClient, waku).expect(
+        "Failed to wrap subscriber in LogosDelivery"
+      )
+      (await subscriber.start()).expect("Failed to start subscriber")
 
     # publish after the subscriber exists but before it connects to the
     # store; the message reaches the archive but the subscriber doesn't
@@ -174,10 +180,10 @@ suite "Messaging API, Receive Service (store recovery)":
 
     # connect subscriber to store after the message is already archived so
     # gossipsub doesn't replay it via the live path
-    await subscriber.node.connectToNodes(@[storeNodePeerInfo])
+    await subscriber.waku.node.connectToNodes(@[storeNodePeerInfo])
 
     # subscribe to content topic
-    (await subscriber.subscribe(testTopic)).expect("Failed to subscribe")
+    (await subscriber.messaging.subscribe(testTopic)).expect("Failed to subscribe")
 
     # listen before triggering store check
     let eventManager = newReceiveEventListenerManager(subscriber.brokerCtx, 1)
@@ -185,7 +191,7 @@ suite "Messaging API, Receive Service (store recovery)":
       await eventManager.teardown()
 
     # trigger store check, should recover and deliver via MessageReceivedEvent
-    await subscriber.deliveryService.recvService.checkStore()
+    await subscriber.messaging.deliveryService.recvService.checkStore()
 
     let received = await eventManager.waitForEvents(TestTimeout)
     check received

@@ -26,7 +26,8 @@ import
   ../../waku_store/resume,
   ../peer_manager,
   ../../common/rate_limit/setting,
-  ../../waku_archive
+  ../../waku_archive,
+  ../providers/store as store_providers
 
 logScope:
   topics = "waku node store api"
@@ -119,6 +120,9 @@ proc mountStoreClient*(node: WakuNode) =
   info "mounting store client"
 
   node.wakuStoreClient = store_client.WakuStoreClient.new(node.peerManager, node.rng)
+
+  store_providers.registerStoreProviders(node).isOkOr:
+    error "failed to register store API providers", error = error
 
 proc query*(
     node: WakuNode, request: store_common.StoreQueryRequest, peer: RemotePeerInfo

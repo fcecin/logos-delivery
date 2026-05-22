@@ -10,8 +10,7 @@ import
   waku/[
     waku_relay,
     waku_rln_relay,
-    api/types,
-    events/health_events,
+    api/events/health,
     events/peer_events,
     node/waku_node,
     node/peer_manager,
@@ -22,6 +21,7 @@ import
     node/health_monitor/connection_status,
     node/health_monitor/protocol_health,
     node/health_monitor/event_loop_monitor,
+    api/requests/health,
     requests/health_requests,
   ]
 
@@ -48,7 +48,7 @@ type NodeHealthMonitor* = ref object
     ## latest known connectivity strength (e.g. connected peer count) metric for each protocol.
     ## if it doesn't make sense for the protocol in question, this is set to zero.
   relayObserver: PubSubObserver
-  peerEventListener: WakuPeerEventListener
+  peerEventListener: EventWakuPeerListener
   shardHealthListener: EventShardTopicHealthChangeListener
   eventLoopLagExceeded: bool
     ## set to true when the chronos event loop lag exceeds the severe threshold,
@@ -680,9 +680,9 @@ proc startHealthMonitor*(hm: NodeHealthMonitor): Result[void, string] =
     )
     hm.node.wakuRelay.addObserver(hm.relayObserver)
 
-  hm.peerEventListener = WakuPeerEvent.listen(
+  hm.peerEventListener = EventWakuPeer.listen(
     hm.node.brokerCtx,
-    proc(evt: WakuPeerEvent): Future[void] {.async: (raises: []), gcsafe.} =
+    proc(evt: EventWakuPeer): Future[void] {.async: (raises: []), gcsafe.} =
       ## Recompute health on any peer changing anything (join, leave, identify, metadata update)
       hm.healthUpdateEvent.fire(),
   ).valueOr:
@@ -725,7 +725,7 @@ proc stopHealthMonitor*(hm: NodeHealthMonitor) {.async.} =
   if not isNil(hm.eventLoopMonitorFut):
     await hm.eventLoopMonitorFut.cancelAndWait()
 
-  await WakuPeerEvent.dropListener(hm.node.brokerCtx, hm.peerEventListener)
+  await EventWakuPeer.dropListener(hm.node.brokerCtx, hm.peerEventListener)
   await EventShardTopicHealthChange.dropListener(
     hm.node.brokerCtx, hm.shardHealthListener
   )

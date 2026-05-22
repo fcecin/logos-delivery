@@ -30,7 +30,7 @@ import
     common/error_handling,
     waku_relay, # for WakuRelayHandler
     waku_core,
-    requests/rln_requests,
+    api/requests/rln,
     waku_keystore,
   ]
 

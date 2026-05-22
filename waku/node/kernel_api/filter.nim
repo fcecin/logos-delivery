@@ -27,7 +27,8 @@ import
   ../../waku_filter_v2/client as filter_client,
   ../../waku_filter_v2/subscriptions as filter_subscriptions,
   ../../common/rate_limit/setting,
-  ../peer_manager
+  ../peer_manager,
+  ../providers/filter as filter_providers
 
 logScope:
   topics = "waku node filter api"
@@ -95,6 +96,9 @@ proc mountFilterClient*(node: WakuNode) {.async: (raises: []).} =
     node.switch.mount(node.wakuFilterClient, protocolMatcher(WakuFilterSubscribeCodec))
   except LPError:
     error "failed to mount wakuFilterClient", error = getCurrentExceptionMsg()
+
+  filter_providers.registerFilterProviders(node).isOkOr:
+    error "failed to register filter API providers", error = error
 
 proc filterSubscribe*(
     node: WakuNode,

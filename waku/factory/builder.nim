@@ -16,6 +16,7 @@ import
   ../discovery/waku_discv5,
   ../waku_node,
   ../node/peer_manager,
+  ../node/subscription_manager,
   ../common/rate_limit/setting,
   ../common/utils/parse_size_units
 
@@ -225,5 +226,7 @@ proc build*(builder: WakuNodeBuilder): Result[WakuNode, string] =
     )
   except Exception:
     return err("failed to build WakuNode instance: " & getCurrentExceptionMsg())
+
+  node.subscriptionManager = WakuSubscriptionManager.new(node)
 
   ok(node)

@@ -1,6 +1,11 @@
-import chronos, results, std/strutils, ../../api/types
+import chronos, results, std/strutils
 
-export ConnectionStatus
+## Overall connectivity state for the node, plus its change-handler type.
+
+type ConnectionStatus* {.pure.} = enum
+  Disconnected
+  PartiallyConnected
+  Connected
 
 const HealthyThreshold* = 2
   ## Minimum peers required per service protocol for a "Connected" status (excluding Relay).

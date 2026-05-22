@@ -1,13 +1,13 @@
 import brokers/event_broker
 import libp2p/switch
 
-type WakuPeerEventKind* {.pure.} = enum
+type EventWakuPeerKind* {.pure.} = enum
   EventConnected
   EventDisconnected
   EventIdentified
   EventMetadataUpdated
 
 EventBroker:
-  type WakuPeerEvent* = object
+  type EventWakuPeer* = object
     peerId*: PeerId
-    kind*: WakuPeerEventKind
+    kind*: EventWakuPeerKind

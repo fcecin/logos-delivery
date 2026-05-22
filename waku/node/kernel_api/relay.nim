@@ -30,16 +30,16 @@ import
     waku_rln_relay,
     node/waku_node,
     node/peer_manager,
-    events/message_events,
+    api/events/message,
+    waku_lightpush/callbacks,
+    node/providers/relay as relay_providers,
   ]
 
 export waku_relay.WakuRelayHandler
 
-declarePublicHistogram waku_histogram_message_size,
-  "message size histogram in kB",
-  buckets = [
-    0.0, 1.0, 3.0, 5.0, 15.0, 50.0, 75.0, 100.0, 125.0, 150.0, 500.0, 700.0, 1000.0, Inf
-  ]
+# NOTE: `waku_node_messages` + `waku_histogram_message_size` are declared in
+# `waku/node/waku_telemetry` (re-exported via `node/waku_node`) so both this
+# handler and WakuSubscriptionManager observe the same Prometheus collectors.
 
 logScope:
   topics = "waku node relay api"
@@ -267,6 +267,9 @@ proc mountRelay*(
     await node.reconnectRelayPeers()
 
   node.switch.mount(node.wakuRelay, protocolMatcher(WakuRelayCodec))
+
+  relay_providers.registerRelayProviders(node).isOkOr:
+    error "failed to register relay API providers", error = error
 
   info "relay mounted successfully"
   return ok()

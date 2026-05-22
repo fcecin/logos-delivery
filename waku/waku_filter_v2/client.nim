@@ -12,7 +12,7 @@ import
   brokers/broker_context
 
 import
-  waku/[node/peer_manager, waku_core, events/delivery_events],
+  waku/[node/peer_manager, waku_core],
   ./common,
   ./protocol_metrics,
   ./rpc_codec,
@@ -137,8 +137,6 @@ proc subscribe*(
 
   ?await wfc.sendSubscribeRequest(servicePeer, filterSubscribeRequest)
 
-  OnFilterSubscribeEvent.emit(wfc.brokerCtx, pubsubTopic, contentTopicSeq)
-
   return ok()
 
 proc unsubscribe*(
@@ -159,8 +157,6 @@ proc unsubscribe*(
   )
 
   ?await wfc.sendSubscribeRequest(servicePeer, filterSubscribeRequest)
-
-  OnFilterUnSubscribeEvent.emit(wfc.brokerCtx, pubsubTopic, contentTopicSeq)
 
   return ok()
 

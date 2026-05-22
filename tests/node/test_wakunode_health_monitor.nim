@@ -4,6 +4,8 @@ import
   std/[json, options, sequtils, strutils, tables], testutils/unittests, chronos, results
 import brokers/broker_context
 
+import layers/logos_delivery
+
 import
   waku/[
     waku_core,
@@ -15,16 +17,19 @@ import
     node/health_monitor/protocol_health,
     node/health_monitor/topic_health,
     node/health_monitor/node_health_monitor,
-    node/delivery_service/delivery_service,
-    node/delivery_service/subscription_manager,
     node/kernel_api/relay,
     node/kernel_api/store,
     node/kernel_api/lightpush,
     node/kernel_api/filter,
-    events/health_events,
+    api/events/health,
     events/peer_events,
     waku_archive,
   ]
+import waku/node/subscription_manager
+import waku/api/api
+import waku/factory/waku
+import waku/factory/waku_conf
+import tools/confutils/cli_args
 
 import ../testlib/[wakunode, wakucore], ../waku_archive/archive_utils
 
@@ -228,9 +233,9 @@ suite "Health Monitor - events":
       nodeA.mountMetadata(1, @[0'u16]).expect("Node A failed to mount metadata")
       await nodeA.start()
 
-    let ds =
-      DeliveryService.new(false, nodeA).expect("Failed to create DeliveryService")
-    ds.startDeliveryService().expect("Failed to start DeliveryService")
+    nodeA.subscriptionManager.startWakuSubscriptionManager().expect(
+      "Failed to start subscription manager"
+    )
 
     let monitorA = NodeHealthMonitor.new(nodeA)
 
@@ -263,12 +268,12 @@ suite "Health Monitor - events":
       await nodeB.start()
 
     var metadataFut = newFuture[void]("waitForMetadata")
-    let metadataLis = WakuPeerEvent
+    let metadataLis = EventWakuPeer
       .listen(
         nodeA.brokerCtx,
-        proc(evt: WakuPeerEvent): Future[void] {.async: (raises: []), gcsafe.} =
+        proc(evt: EventWakuPeer): Future[void] {.async: (raises: []), gcsafe.} =
           if not metadataFut.finished and
-              evt.kind == WakuPeerEventKind.EventMetadataUpdated:
+              evt.kind == EventWakuPeerKind.EventMetadataUpdated:
             metadataFut.complete()
         ,
       )
@@ -277,7 +282,7 @@ suite "Health Monitor - events":
     await nodeA.connectToNodes(@[nodeB.switch.peerInfo.toRemotePeerInfo()])
 
     let metadataOk = await metadataFut.withTimeout(TestConnectivityTimeLimit)
-    await WakuPeerEvent.dropListener(nodeA.brokerCtx, metadataLis)
+    await EventWakuPeer.dropListener(nodeA.brokerCtx, metadataLis)
     require metadataOk
 
     let connectTimeLimit = Moment.now() + TestConnectivityTimeLimit
@@ -317,25 +322,27 @@ suite "Health Monitor - events":
       lastStatus == ConnectionStatus.Disconnected
 
     await monitorA.stopHealthMonitor()
-    await ds.stopDeliveryService()
+    await nodeA.subscriptionManager.stopWakuSubscriptionManager()
     await nodeA.stop()
 
   asyncTest "Edge health driven by confirmed filter subscriptions":
-    var nodeA: WakuNode
+    var clientA: LogosDelivery
     lockNewGlobalBrokerContext:
-      let nodeAKey = generateSecp256k1Key()
-      nodeA = newTestWakuNode(nodeAKey, parseIpAddress("127.0.0.1"), Port(0))
-      await nodeA.mountFilterClient()
-      nodeA.mountLightpushClient()
-      nodeA.mountStoreClient()
-      require nodeA.mountAutoSharding(1, 8).isOk
-      nodeA.mountMetadata(1, @[0'u16]).expect("Node A failed to mount metadata")
-      await nodeA.start()
-
-    let ds =
-      DeliveryService.new(false, nodeA).expect("Failed to create DeliveryService")
-    ds.startDeliveryService().expect("Failed to start DeliveryService")
-    let subMgr = ds.subscriptionManager
+      var confA = defaultWakuNodeConf().valueOr:
+        raiseAssert error
+      confA.mode = cli_args.WakuMode.Edge
+      confA.listenAddress = parseIpAddress("127.0.0.1")
+      confA.tcpPort = Port(0)
+      confA.discv5UdpPort = Port(0)
+      confA.clusterId = 1'u16
+      confA.numShardsInNetwork = 8
+      confA.rest = false
+      let wakuA = (await createNode(confA)).expect("Failed to create nodeA")
+      clientA = LogosDelivery.new(MessagingClient, wakuA).expect(
+        "Failed to wrap nodeA in LogosDelivery"
+      )
+      (await clientA.start()).expect("Failed to start nodeA")
+    let subMgr = clientA.waku.node.subscriptionManager
 
     var nodeB: WakuNode
     lockNewGlobalBrokerContext:
@@ -353,7 +360,7 @@ suite "Health Monitor - events":
       )
       await nodeB.start()
 
-    let monitorA = NodeHealthMonitor.new(nodeA)
+    let monitorA = NodeHealthMonitor.new(clientA.waku.node)
 
     var
       lastStatus = ConnectionStatus.Disconnected
@@ -366,21 +373,21 @@ suite "Health Monitor - events":
     monitorA.startHealthMonitor().expect("Health monitor failed to start")
 
     var metadataFut = newFuture[void]("waitForMetadata")
-    let metadataLis = WakuPeerEvent
+    let metadataLis = EventWakuPeer
       .listen(
-        nodeA.brokerCtx,
-        proc(evt: WakuPeerEvent): Future[void] {.async: (raises: []), gcsafe.} =
+        clientA.brokerCtx,
+        proc(evt: EventWakuPeer): Future[void] {.async: (raises: []), gcsafe.} =
           if not metadataFut.finished and
-              evt.kind == WakuPeerEventKind.EventMetadataUpdated:
+              evt.kind == EventWakuPeerKind.EventMetadataUpdated:
             metadataFut.complete()
         ,
       )
       .expect("Failed to listen for metadata")
 
-    await nodeA.connectToNodes(@[nodeB.switch.peerInfo.toRemotePeerInfo()])
+    await clientA.waku.node.connectToNodes(@[nodeB.switch.peerInfo.toRemotePeerInfo()])
 
     let metadataOk = await metadataFut.withTimeout(TestConnectivityTimeLimit)
-    await WakuPeerEvent.dropListener(nodeA.brokerCtx, metadataLis)
+    await EventWakuPeer.dropListener(clientA.brokerCtx, metadataLis)
     require metadataOk
 
     var deadline = Moment.now() + TestConnectivityTimeLimit
@@ -396,7 +403,7 @@ suite "Health Monitor - events":
 
     let shardHealthLis = EventShardTopicHealthChange
       .listen(
-        nodeA.brokerCtx,
+        clientA.brokerCtx,
         proc(
             evt: EventShardTopicHealthChange
         ): Future[void] {.async: (raises: []), gcsafe.} =
@@ -410,10 +417,10 @@ suite "Health Monitor - events":
       .expect("Failed to listen for shard health")
 
     let contentTopic = ContentTopic("/waku/2/default-content/proto")
-    subMgr.subscribe(contentTopic).expect("Failed to subscribe")
+    subMgr.edgeSubscribe(contentTopic).expect("Failed to subscribe")
 
     let shardHealthOk = await shardHealthFut.withTimeout(TestConnectivityTimeLimit)
-    await EventShardTopicHealthChange.dropListener(nodeA.brokerCtx, shardHealthLis)
+    await EventShardTopicHealthChange.dropListener(clientA.brokerCtx, shardHealthLis)
 
     check shardHealthOk == true
     check subMgr.edgeFilterSubStates.len > 0
@@ -428,7 +435,6 @@ suite "Health Monitor - events":
 
     check lastStatus == ConnectionStatus.PartiallyConnected
 
-    await ds.stopDeliveryService()
     await monitorA.stopHealthMonitor()
     await nodeB.stop()
-    await nodeA.stop()
+    (await clientA.stop()).expect("Failed to stop clientA")

@@ -12,6 +12,8 @@ import
   libp2p/crypto/secp,
   libp2p/protocols/rendezvous
 
+import brokers/broker_context
+
 import
   waku/[
     waku_core/topics,
@@ -429,10 +431,14 @@ suite "Waku Discovery v5":
       let conf = confBuilder.build().valueOr:
         raiseAssert error
 
-      let waku0 = (await Waku.new(conf)).valueOr:
-        raiseAssert error
-      (waitFor startWaku(addr waku0)).isOkOr:
-        raiseAssert error
+      var waku0, waku1, waku2: Waku
+
+      # Each Waku instance must have its own broker context; they must not share one.
+      lockNewGlobalBrokerContext:
+        waku0 = (await Waku.new(conf)).valueOr:
+          raiseAssert error
+        (waitFor startWaku(addr waku0)).isOkOr:
+          raiseAssert error
 
       confBuilder.withNodeKey(crypto.PrivateKey.random(Secp256k1, myRng[])[])
       confBuilder.discv5Conf.withBootstrapNodes(@[waku0.node.enr.toURI()])
@@ -443,13 +449,13 @@ suite "Waku Discovery v5":
       let conf1 = confBuilder.build().valueOr:
         raiseAssert error
 
-      let waku1 = (await Waku.new(conf1)).valueOr:
-        raiseAssert error
-      (waitFor startWaku(addr waku1)).isOkOr:
-        raiseAssert error
-
-      await waku1.node.mountPeerExchange()
-      await waku1.node.mountRendezvous(conf.clusterId)
+      lockNewGlobalBrokerContext:
+        waku1 = (await Waku.new(conf1)).valueOr:
+          raiseAssert error
+        (waitFor startWaku(addr waku1)).isOkOr:
+          raiseAssert error
+        await waku1.node.mountPeerExchange()
+        await waku1.node.mountRendezvous(conf.clusterId)
 
       confBuilder.discv5Conf.withBootstrapNodes(@[waku1.node.enr.toURI()])
       confBuilder.withP2pTcpPort(60003.Port)
@@ -459,10 +465,11 @@ suite "Waku Discovery v5":
       let conf2 = confBuilder.build().valueOr:
         raiseAssert error
 
-      let waku2 = (await Waku.new(conf2)).valueOr:
-        raiseAssert error
-      (waitFor startWaku(addr waku2)).isOkOr:
-        raiseAssert error
+      lockNewGlobalBrokerContext:
+        waku2 = (await Waku.new(conf2)).valueOr:
+          raiseAssert error
+        (waitFor startWaku(addr waku2)).isOkOr:
+          raiseAssert error
 
       # leave some time for discv5 to act
       await sleepAsync(chronos.seconds(10))

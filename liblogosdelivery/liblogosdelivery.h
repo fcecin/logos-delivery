@@ -5,20 +5,12 @@
 #ifndef __liblogosdelivery__
 #define __liblogosdelivery__
 
-#include <stddef.h>
-#include <stdint.h>
-
-// The possible returned values for the functions that return int
-#define RET_OK 0
-#define RET_ERR 1
-#define RET_MISSING_CALLBACK 2
+#include "liblogosdelivery_common.h"
 
 #ifdef __cplusplus
 extern "C"
 {
 #endif
-
-  typedef void (*FFICallBack)(int callerRet, const char *msg, size_t len, void *userData);
 
   // Creates a new instance of the node from the given configuration JSON.
   // Returns a pointer to the Context needed by the rest of the API functions.
@@ -27,6 +19,15 @@ extern "C"
   // Example: {"mode": "Core", "clusterId": 42, "relay": true}
   void *logosdelivery_create_node(
       const char *configJson,
+      FFICallBack callback,
+      void *userData);
+
+  // Creates a new node from a (preset, mode) shorthand (App-Dev entry point).
+  // preset: network preset string (e.g. "twn", "logos.dev", "").
+  // mode:   WakuMode string ("Core" or "Edge").
+  void *logosdelivery_create_node_preset_mode(
+      const char *preset,
+      const char *mode,
       FFICallBack callback,
       void *userData);
 
@@ -40,7 +41,7 @@ extern "C"
                       FFICallBack callback,
                       void *userData);
 
-  // Destroys an instance of a node created with logosdelivery_create_node
+  // Destroys an instance of a node created with a logosdelivery_create_node... API
   int logosdelivery_destroy(void *ctx,
                     FFICallBack callback,
                     void *userData);

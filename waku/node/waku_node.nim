@@ -52,22 +52,32 @@ import
     waku_enr,
     waku_peer_exchange,
     waku_rln_relay,
+    api/requests/relay as relay_api,
+    api/requests/lightpush as lightpush_api,
+    api/requests/store as store_api,
+    api/requests/filter as filter_api,
+    api/requests/peers as peers_api,
+    api/requests/protocols as protocols_api,
     common/rate_limit/setting,
     common/callbacks,
     common/nimchronos,
     waku_mix,
-    requests/node_requests,
+    api/requests/node,
+    api/requests/health,
     requests/health_requests,
-    events/health_events,
-    events/message_events,
+    api/events/health,
+    api/events/message,
+    events/peer_events,
   ],
   waku/discovery/waku_kademlia,
   waku/net/[bound_ports, net_config],
   ./peer_manager,
   ./health_monitor/health_status,
-  ./health_monitor/topic_health
+  ./health_monitor/topic_health,
+  ./waku_telemetry
 
-declarePublicCounter waku_node_messages, "number of messages received", ["type"]
+export waku_telemetry # waku_node_messages / waku_histogram_message_size, shared
+  # by kernel_api/relay and WakuSubscriptionManager.
 
 declarePublicGauge waku_version,
   "Waku version info (in git describe format)", ["version"]
@@ -101,6 +111,40 @@ type
     listenAddresses*: seq[string]
     enrUri*: string #multiaddrStrings*: seq[string]
     mixPubKey*: Option[string]
+
+  ## Subscription engine state. Procs live in `./subscription_manager.nim`;
+  ## the type bodies are here to avoid an import cycle.
+
+  EdgeFilterSubState* = object
+    peers*: seq[RemotePeerInfo]
+      ## Filter service peers with confirmed subscriptions on this shard.
+    pending*: seq[Future[void]] ## In-flight dial futures for peers not yet confirmed.
+    pendingPeers*: HashSet[PeerId] ## PeerIds of peers currently being dialed.
+    currentHealth*: TopicHealth
+      ## Health derived from peers.len; updated on every peer set change.
+
+  WakuSubscriptionManager* = ref object of RootObj
+    node*: WakuNode
+    relayContentTopicSubs*: Table[PubsubTopic, HashSet[ContentTopic]]
+      ## Per-shard content-topic interest for relay. A shard key is
+      ## present only while it has at least one content-topic interest.
+    edgeContentTopicSubs*: Table[PubsubTopic, HashSet[ContentTopic]]
+      ## Per-shard content-topic interest for edge.  A shard key is
+      ## present only while it has at least one content-topic interest.
+    directShardSubs*: HashSet[PubsubTopic]
+      ## A shard's relay-mesh subscription is held while it is in this
+      ## set OR has non-empty content-topic interest.
+    edgeFilterSubStates*: Table[PubsubTopic, EdgeFilterSubState]
+      ## Per-shard filter subscription state for edge mode.
+    edgeFilterWakeup*: AsyncEvent
+      ## Set when the edge filter sub loop should re-reconcile.
+    edgeFilterSubLoopFut*: Future[void]
+    edgeFilterMaintenanceLoopFut*: Future[void]
+    peerEventListener*: EventWakuPeerListener
+      ## Listener for peer connect/disconnect events (edge filter wakeup).
+    shardHealthListener*: EventShardTopicHealthChangeListener
+      ## Listener on shard-health changes; fans them out to per-content-topic
+      ## health events for every content topic subscribed on the shard.
 
   # NOTE based on Eth2Node in NBC eth2_network.nim
   WakuNode* = ref object
@@ -141,8 +185,9 @@ type
     kademliaDiscoveryLoop*: Future[void]
     wakuKademlia*: WakuKademlia
     ports*: BoundPorts
+    subscriptionManager*: WakuSubscriptionManager
 
-proc deduceRelayShard(
+proc deduceRelayShard*(
     node: WakuNode,
     contentTopic: ContentTopic,
     pubsubTopicOp: Option[PubsubTopic] = none[PubsubTopic](),
@@ -481,6 +526,39 @@ proc updateAnnouncedAddrWithPrimaryIpAddr*(node: WakuNode): Result[void, string]
 
   return ok()
 
+proc registerPeersProviders(node: WakuNode): Result[void, string] =
+  ## Bind the peers broker providers.
+  peers_api.RequestSelectPeer.setProvider(
+    node.brokerCtx,
+    proc(
+        proto: string, shard: Option[PubsubTopic]
+    ): Result[peers_api.RequestSelectPeer, string] {.gcsafe, raises: [].} =
+      ok(peers_api.RequestSelectPeer(peer: node.peerManager.selectPeer(proto, shard))),
+  ).isOkOr:
+    return err("registerPeersProviders: RequestSelectPeer: " & error)
+
+  peers_api.RequestSelectPeers.setProvider(
+    node.brokerCtx,
+    proc(
+        proto: string, shard: Option[PubsubTopic]
+    ): Result[peers_api.RequestSelectPeers, string] {.gcsafe, raises: [].} =
+      ok(peers_api.RequestSelectPeers(peers: node.peerManager.selectPeers(proto, shard))),
+  ).isOkOr:
+    return err("registerPeersProviders: RequestSelectPeers: " & error)
+
+  peers_api.RequestIsPeerConnected.setProvider(
+    node.brokerCtx,
+    proc(peerId: PeerId): Result[peers_api.RequestIsPeerConnected, string] {.gcsafe, raises: [].} =
+      ok(
+        peers_api.RequestIsPeerConnected(
+          connected: node.peerManager.switch.peerStore.isConnected(peerId)
+        )
+      ),
+  ).isOkOr:
+    return err("registerPeersProviders: RequestIsPeerConnected: " & error)
+
+  ok()
+
 proc startProvidersAndListeners*(node: WakuNode) =
   RequestRelayShard.setProvider(
     node.brokerCtx,
@@ -552,10 +630,39 @@ proc startProvidersAndListeners*(node: WakuNode) =
   ).isOkOr:
     error "Can't set provider for RequestContentTopicsHealth", error = error
 
+  # Which optional protocol clients are mounted; consumed by the messaging layer.
+  protocols_api.RequestProtocolMountStatus.setProvider(
+    node.brokerCtx,
+    proc(): Result[protocols_api.RequestProtocolMountStatus, string] =
+      ok(
+        protocols_api.RequestProtocolMountStatus(
+          relayMounted: not node.wakuRelay.isNil(),
+          lightpushMounted: not node.wakuLightpushClient.isNil(),
+          filterMounted: not node.wakuFilterClient.isNil(),
+          storeMounted: not node.wakuStoreClient.isNil(),
+        )
+      ),
+  ).isOkOr:
+    error "Can't set provider for RequestProtocolMountStatus", error = error
+
+  registerPeersProviders(node).isOkOr:
+    error "failed to register peers API providers", error = error
+
 proc stopProvidersAndListeners*(node: WakuNode) =
   RequestRelayShard.clearProvider(node.brokerCtx)
   RequestContentTopicsHealth.clearProvider(node.brokerCtx)
   RequestShardTopicsHealth.clearProvider(node.brokerCtx)
+
+  relay_api.RequestRelayPublish.clearProvider(node.brokerCtx)
+  lightpush_api.RequestLightpushPublish.clearProvider(node.brokerCtx)
+  store_api.RequestStoreQueryToAny.clearProvider(node.brokerCtx)
+  filter_api.RequestFilterSubscribe.clearProvider(node.brokerCtx)
+  filter_api.RequestFilterUnsubscribe.clearProvider(node.brokerCtx)
+  filter_api.RequestFilterPing.clearProvider(node.brokerCtx)
+  peers_api.RequestSelectPeer.clearProvider(node.brokerCtx)
+  peers_api.RequestSelectPeers.clearProvider(node.brokerCtx)
+  peers_api.RequestIsPeerConnected.clearProvider(node.brokerCtx)
+  protocols_api.RequestProtocolMountStatus.clearProvider(node.brokerCtx)
 
 proc start*(node: WakuNode) {.async.} =
   ## Starts a created Waku Node and

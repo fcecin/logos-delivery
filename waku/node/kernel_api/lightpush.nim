@@ -29,7 +29,8 @@ import
   ../../waku_lightpush as lightpush_protocol,
   ../peer_manager,
   ../../common/rate_limit/setting,
-  ../../waku_rln_relay
+  ../../waku_rln_relay,
+  ../providers/lightpush as lightpush_providers
 
 logScope:
   topics = "waku node lightpush api"
@@ -184,6 +185,8 @@ proc mountLightPushClient*(node: WakuNode) =
 
   if node.wakuLightpushClient.isNil():
     node.wakuLightpushClient = WakuLightPushClient.new(node.peerManager, node.rng)
+    lightpush_providers.registerLightpushProviders(node).isOkOr:
+      error "failed to register lightpush API providers", error = error
 
 proc lightpushPublishHandler(
     node: WakuNode,

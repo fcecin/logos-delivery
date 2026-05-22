@@ -29,25 +29,23 @@ import
     waku_relay/protocol,
     waku_enr/sharding,
     waku_enr/multiaddr,
-    api/types,
     common/logging,
     node/peer_manager,
     node/health_monitor,
     node/waku_metrics,
-    node/delivery_service/delivery_service,
-    node/delivery_service/subscription_manager,
     rest_api/message_cache,
     rest_api/endpoint/server,
     rest_api/endpoint/builder as rest_server_builder,
     discovery/waku_dnsdisc,
     discovery/waku_discv5,
     discovery/autonat_service,
-    requests/health_requests,
+    api/requests/health,
     factory/node_factory,
     factory/internal_config,
     factory/app_callbacks,
     persistency/persistency,
   ],
+  waku/node/subscription_manager,
   ./waku_conf,
   ./waku_state_info
 
@@ -72,8 +70,6 @@ type Waku* = ref object
   node*: WakuNode
 
   healthMonitor*: NodeHealthMonitor
-
-  deliveryService*: DeliveryService
 
   restServer*: WakuRestServerRef
   metricsServer*: MetricsHttpServerRef
@@ -215,10 +211,6 @@ proc new*(
     error "Failed setting up app callbacks", error = error
     return err("Failed setting up app callbacks: " & $error)
 
-  ## Delivery Monitor
-  let deliveryService = DeliveryService.new(wakuConf.p2pReliability, node).valueOr:
-    return err("could not create delivery service: " & $error)
-
   var waku = Waku(
     stateInfo: WakuStateInfo.init(node),
     conf: wakuConf,
@@ -226,7 +218,6 @@ proc new*(
     key: wakuConf.nodeKey,
     node: node,
     healthMonitor: healthMonitor,
-    deliveryService: deliveryService,
     appCallbacks: appCallbacks,
     restServer: restServer,
     brokerCtx: brokerCtx,
@@ -428,6 +419,14 @@ proc startWaku*(waku: ptr Waku): Future[Result[void, string]] {.async: (raises: 
     waku[].node.ports.discv5Udp = waku[].wakuDiscV5.udpPort.uint16
     waku[].conf.discv5Conf.get().udpPort = waku[].wakuDiscV5.udpPort
 
+  ## Subscription engine: register the broker subscription surface and run the
+  ## core-mode auto-subscribe / edge-mode filter loops. Started here (after the
+  ## node is up and the discv5 subscription listener is registered) so a fresh
+  ## shard subscription's PubsubSub event reaches discv5 ENR advertisement.
+  if not waku[].node.subscriptionManager.isNil():
+    waku[].node.subscriptionManager.startWakuSubscriptionManager().isOkOr:
+      return err("failed to start WakuSubscriptionManager: " & error)
+
   ## Update waku data that is set dynamically on node start
   try:
     (await updateWaku(waku)).isOkOr:
@@ -435,28 +434,9 @@ proc startWaku*(waku: ptr Waku): Future[Result[void, string]] {.async: (raises: 
   except CatchableError:
     return err("Caught exception in startWaku: " & getCurrentExceptionMsg())
 
-  ## Reliability
-  if not waku[].deliveryService.isNil():
-    waku[].deliveryService.startDeliveryService().isOkOr:
-      return err("failed to start delivery service: " & $error)
-
   ## Health Monitor
   waku[].healthMonitor.startHealthMonitor().isOkOr:
     return err("failed to start health monitor: " & $error)
-
-  ## Setup RequestConnectionStatus provider
-
-  RequestConnectionStatus.setProvider(
-    globalBrokerContext(),
-    proc(): Result[RequestConnectionStatus, string] =
-      try:
-        let healthReport = waku[].healthMonitor.getSyncNodeHealthReport()
-        return
-          ok(RequestConnectionStatus(connectionStatus: healthReport.connectionStatus))
-      except CatchableError:
-        err("Failed to read health report: " & getCurrentExceptionMsg()),
-  ).isOkOr:
-    error "Failed to set RequestConnectionStatus provider", error = error
 
   ## Setup RequestProtocolHealth provider
 
@@ -486,6 +466,20 @@ proc startWaku*(waku: ptr Waku): Future[Result[void, string]] {.async: (raises: 
         return err("Failed to get health report: " & getCurrentExceptionMsg()),
   ).isOkOr:
     error "Failed to set RequestHealthReport provider", error = error
+
+  ## Setup RequestConnectionStatus provider
+
+  RequestConnectionStatus.setProvider(
+    globalBrokerContext(),
+    proc(): Result[RequestConnectionStatus, string] =
+      try:
+        let healthReport = waku[].healthMonitor.getSyncNodeHealthReport()
+        return
+          ok(RequestConnectionStatus(connectionStatus: healthReport.connectionStatus))
+      except CatchableError:
+        err("Failed to read health report: " & getCurrentExceptionMsg()),
+  ).isOkOr:
+    error "Failed to set RequestConnectionStatus provider", error = error
 
   if conf.restServerConf.isSome():
     rest_server_builder.startRestServerProtocolSupport(
@@ -538,9 +532,8 @@ proc stop*(waku: Waku): Future[Result[void, string]] {.async: (raises: []).} =
     if not waku.wakuDiscv5.isNil():
       await waku.wakuDiscv5.stop()
 
-    if not waku.deliveryService.isNil():
-      await waku.deliveryService.stopDeliveryService()
-      waku.deliveryService = nil
+    if not waku.node.isNil() and not waku.node.subscriptionManager.isNil():
+      await waku.node.subscriptionManager.stopWakuSubscriptionManager()
 
     if not waku.node.isNil():
       await waku.node.stop()
@@ -551,8 +544,10 @@ proc stop*(waku: Waku): Future[Result[void, string]] {.async: (raises: []).} =
     if not waku.healthMonitor.isNil():
       await waku.healthMonitor.stopHealthMonitor()
 
-    ## Clear RequestConnectionStatus provider
+    ## Clear health-tier providers (set in setup above).
     RequestConnectionStatus.clearProvider(waku.brokerCtx)
+    RequestHealthReport.clearProvider(waku.brokerCtx)
+    RequestProtocolHealth.clearProvider(waku.brokerCtx)
 
     if not waku.restServer.isNil():
       await waku.restServer.stop()

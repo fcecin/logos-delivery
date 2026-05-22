@@ -22,8 +22,8 @@ import
 import
   waku/waku_core,
   waku/node/health_monitor/topic_health,
-  waku/requests/health_requests,
-  waku/events/health_events,
+  waku/api/requests/health,
+  waku/api/events/health,
   ./message_id,
   waku/events/peer_events
 
@@ -157,7 +157,7 @@ type
   ): Future[ValidationResult] {.gcsafe, raises: [Defect].}
   WakuRelay* = ref object of GossipSub
     brokerCtx: BrokerContext
-    peerEventListener: WakuPeerEventListener
+    peerEventListener: EventWakuPeerListener
     # seq of tuples: the first entry in the tuple contains the validators are called for every topic
     # the second entry contains the error messages to be returned when the validator fails
     wakuValidators: seq[tuple[handler: WakuValidatorHandler, errorMessage: string]]
@@ -378,10 +378,10 @@ proc new*(
     w.initProtocolHandler()
     w.initRelayObservers()
 
-    w.peerEventListener = WakuPeerEvent.listen(
+    w.peerEventListener = EventWakuPeer.listen(
       w.brokerCtx,
-      proc(evt: WakuPeerEvent): Future[void] {.async: (raises: []), gcsafe.} =
-        if evt.kind == WakuPeerEventKind.EventDisconnected:
+      proc(evt: EventWakuPeer): Future[void] {.async: (raises: []), gcsafe.} =
+        if evt.kind == EventWakuPeerKind.EventDisconnected:
           w.topicHealthCheckAll = true
           w.topicHealthUpdateEvent.fire()
       ,
@@ -526,7 +526,7 @@ method stop*(w: WakuRelay) {.async: (raises: []).} =
   info "stop"
   await procCall GossipSub(w).stop()
 
-  await WakuPeerEvent.dropListener(w.brokerCtx, w.peerEventListener)
+  await EventWakuPeer.dropListener(w.brokerCtx, w.peerEventListener)
 
   if not w.topicHealthLoopHandle.isNil():
     await w.topicHealthLoopHandle.cancelAndWait()

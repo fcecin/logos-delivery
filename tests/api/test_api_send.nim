@@ -6,6 +6,9 @@ import brokers/broker_context
 import ../testlib/[common, wakucore, wakunode, testasync]
 import ../waku_archive/archive_utils
 import waku, waku/[waku_node, waku_core, waku_relay/protocol]
+import waku/api/api
+import layers/logos_delivery
+import messaging/api/events
 import waku/factory/waku_conf
 import tools/confutils/cli_args
 
@@ -237,11 +240,13 @@ suite "Waku API - Send":
     )
 
   asyncTest "Check API availability (unhealthy node)":
-    var node: Waku
+    var client: LogosDelivery
     lockNewGlobalBrokerContext:
-      node = (await createNode(createApiNodeConf())).valueOr:
+      let waku = (await createNode(createApiNodeConf())).valueOr:
         raiseAssert error
-      (await startWaku(addr node)).isOkOr:
+      client = LogosDelivery.new(MessagingClient, waku).valueOr:
+        raiseAssert "Failed to wrap in LogosDelivery: " & error
+      (await client.start()).isOkOr:
         raiseAssert "Failed to start Waku node: " & error
       # node is not connected !
 
@@ -249,28 +254,30 @@ suite "Waku API - Send":
       ContentTopic("/waku/2/default-content/proto"), "test payload"
     )
 
-    let sendResult = await node.send(envelope)
+    let sendResult = await client.messaging.send(envelope)
 
     # TODO: The API is not enforcing a health check before the send,
     #       so currently this test cannot successfully fail to send.
     check sendResult.isOk()
 
-    (await node.stop()).isOkOr:
+    (await client.stop()).isOkOr:
       raiseAssert "Failed to stop node: " & error
 
   asyncTest "Send fully validated":
-    var node: Waku
+    var client: LogosDelivery
     lockNewGlobalBrokerContext:
-      node = (await createNode(createApiNodeConf())).valueOr:
+      let waku = (await createNode(createApiNodeConf())).valueOr:
         raiseAssert error
-      (await startWaku(addr node)).isOkOr:
+      client = LogosDelivery.new(MessagingClient, waku).valueOr:
+        raiseAssert "Failed to wrap in LogosDelivery: " & error
+      (await client.start()).isOkOr:
         raiseAssert "Failed to start Waku node: " & error
 
-      await node.node.connectToNodes(
+      await client.waku.node.connectToNodes(
         @[relayNode1PeerInfo, lightpushNodePeerInfo, storeNodePeerInfo]
       )
 
-    let eventManager = newSendEventListenerManager(node.brokerCtx)
+    let eventManager = newSendEventListenerManager(client.brokerCtx)
     defer:
       await eventManager.teardown()
 
@@ -278,7 +285,7 @@ suite "Waku API - Send":
       ContentTopic("/waku/2/default-content/proto"), "test payload"
     )
 
-    let requestId = (await node.send(envelope)).valueOr:
+    let requestId = (await client.messaging.send(envelope)).valueOr:
       raiseAssert error
 
     # Wait for events with timeout
@@ -289,20 +296,22 @@ suite "Waku API - Send":
       {SendEventOutcome.Sent, SendEventOutcome.Propagated}, requestId
     )
 
-    (await node.stop()).isOkOr:
+    (await client.stop()).isOkOr:
       raiseAssert "Failed to stop node: " & error
 
   asyncTest "Send only propagates":
-    var node: Waku
+    var client: LogosDelivery
     lockNewGlobalBrokerContext:
-      node = (await createNode(createApiNodeConf())).valueOr:
+      let waku = (await createNode(createApiNodeConf())).valueOr:
         raiseAssert error
-      (await startWaku(addr node)).isOkOr:
+      client = LogosDelivery.new(MessagingClient, waku).valueOr:
+        raiseAssert "Failed to wrap in LogosDelivery: " & error
+      (await client.start()).isOkOr:
         raiseAssert "Failed to start Waku node: " & error
 
-      await node.node.connectToNodes(@[relayNode1PeerInfo])
+      await client.waku.node.connectToNodes(@[relayNode1PeerInfo])
 
-    let eventManager = newSendEventListenerManager(node.brokerCtx)
+    let eventManager = newSendEventListenerManager(client.brokerCtx)
     defer:
       await eventManager.teardown()
 
@@ -310,7 +319,7 @@ suite "Waku API - Send":
       ContentTopic("/waku/2/default-content/proto"), "test payload"
     )
 
-    let requestId = (await node.send(envelope)).valueOr:
+    let requestId = (await client.messaging.send(envelope)).valueOr:
       raiseAssert error
 
     # Wait for events with timeout
@@ -319,20 +328,22 @@ suite "Waku API - Send":
 
     eventManager.validate({SendEventOutcome.Propagated}, requestId)
 
-    (await node.stop()).isOkOr:
+    (await client.stop()).isOkOr:
       raiseAssert "Failed to stop node: " & error
 
   asyncTest "Send only propagates fallback to lightpush":
-    var node: Waku
+    var client: LogosDelivery
     lockNewGlobalBrokerContext:
-      node = (await createNode(createApiNodeConf())).valueOr:
+      let waku = (await createNode(createApiNodeConf())).valueOr:
         raiseAssert error
-      (await startWaku(addr node)).isOkOr:
+      client = LogosDelivery.new(MessagingClient, waku).valueOr:
+        raiseAssert "Failed to wrap in LogosDelivery: " & error
+      (await client.start()).isOkOr:
         raiseAssert "Failed to start Waku node: " & error
 
-      await node.node.connectToNodes(@[lightpushNodePeerInfo])
+      await client.waku.node.connectToNodes(@[lightpushNodePeerInfo])
 
-    let eventManager = newSendEventListenerManager(node.brokerCtx)
+    let eventManager = newSendEventListenerManager(client.brokerCtx)
     defer:
       await eventManager.teardown()
 
@@ -340,7 +351,7 @@ suite "Waku API - Send":
       ContentTopic("/waku/2/default-content/proto"), "test payload"
     )
 
-    let requestId = (await node.send(envelope)).valueOr:
+    let requestId = (await client.messaging.send(envelope)).valueOr:
       raiseAssert error
 
     # Wait for events with timeout
@@ -349,20 +360,22 @@ suite "Waku API - Send":
 
     eventManager.validate({SendEventOutcome.Propagated}, requestId)
 
-    (await node.stop()).isOkOr:
+    (await client.stop()).isOkOr:
       raiseAssert "Failed to stop node: " & error
 
   asyncTest "Send fully validates fallback to lightpush":
-    var node: Waku
+    var client: LogosDelivery
     lockNewGlobalBrokerContext:
-      node = (await createNode(createApiNodeConf())).valueOr:
+      let waku = (await createNode(createApiNodeConf())).valueOr:
         raiseAssert error
-      (await startWaku(addr node)).isOkOr:
+      client = LogosDelivery.new(MessagingClient, waku).valueOr:
+        raiseAssert "Failed to wrap in LogosDelivery: " & error
+      (await client.start()).isOkOr:
         raiseAssert "Failed to start Waku node: " & error
 
-      await node.node.connectToNodes(@[lightpushNodePeerInfo, storeNodePeerInfo])
+      await client.waku.node.connectToNodes(@[lightpushNodePeerInfo, storeNodePeerInfo])
 
-    let eventManager = newSendEventListenerManager(node.brokerCtx)
+    let eventManager = newSendEventListenerManager(client.brokerCtx)
     defer:
       await eventManager.teardown()
 
@@ -370,7 +383,7 @@ suite "Waku API - Send":
       ContentTopic("/waku/2/default-content/proto"), "test payload"
     )
 
-    let requestId = (await node.send(envelope)).valueOr:
+    let requestId = (await client.messaging.send(envelope)).valueOr:
       raiseAssert error
 
     # Wait for events with timeout
@@ -380,7 +393,7 @@ suite "Waku API - Send":
     eventManager.validate(
       {SendEventOutcome.Propagated, SendEventOutcome.Sent}, requestId
     )
-    (await node.stop()).isOkOr:
+    (await client.stop()).isOkOr:
       raiseAssert "Failed to stop node: " & error
 
   asyncTest "Send fails with event":
@@ -407,16 +420,18 @@ suite "Waku API - Send":
     ).isOkOr:
       raiseAssert "Failed to subscribe fakeLightpushNode: " & error
 
-    var node: Waku
+    var client: LogosDelivery
     lockNewGlobalBrokerContext:
-      node = (await createNode(createApiNodeConf(cli_args.WakuMode.Edge))).valueOr:
+      let waku = (await createNode(createApiNodeConf(cli_args.WakuMode.Edge))).valueOr:
         raiseAssert error
-      (await startWaku(addr node)).isOkOr:
+      client = LogosDelivery.new(MessagingClient, waku).valueOr:
+        raiseAssert "Failed to wrap in LogosDelivery: " & error
+      (await client.start()).isOkOr:
         raiseAssert "Failed to start Waku node: " & error
 
-      await node.node.connectToNodes(@[fakeLightpushNodePeerInfo])
+      await client.waku.node.connectToNodes(@[fakeLightpushNodePeerInfo])
 
-    let eventManager = newSendEventListenerManager(node.brokerCtx)
+    let eventManager = newSendEventListenerManager(client.brokerCtx)
     defer:
       await eventManager.teardown()
 
@@ -424,7 +439,7 @@ suite "Waku API - Send":
       ContentTopic("/waku/2/default-content/proto"), "test payload"
     )
 
-    let requestId = (await node.send(envelope)).valueOr:
+    let requestId = (await client.messaging.send(envelope)).valueOr:
       raiseAssert error
 
     echo "Sent message with requestId=", requestId
@@ -433,5 +448,5 @@ suite "Waku API - Send":
     discard await eventManager.waitForEvents(eventTimeout)
 
     eventManager.validate({SendEventOutcome.Error}, requestId)
-    (await node.stop()).isOkOr:
+    (await client.stop()).isOkOr:
       raiseAssert "Failed to stop node: " & error

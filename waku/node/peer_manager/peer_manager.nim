@@ -774,7 +774,7 @@ proc refreshPeerMetadata(pm: PeerManager, peerId: PeerId) {.async.} =
     # TODO: should only trigger an event if metadata actually changed
     #       should include the shard subscription delta in the event when
     #         it is a MetadataUpdated event
-    WakuPeerEvent.emit(pm.brokerCtx, peerId, WakuPeerEventKind.EventMetadataUpdated)
+    EventWakuPeer.emit(pm.brokerCtx, peerId, EventWakuPeerKind.EventMetadataUpdated)
     return
 
   info "disconnecting from peer", peerId = peerId, reason = reason
@@ -819,7 +819,7 @@ proc onPeerEvent(pm: PeerManager, peerId: PeerId, event: PeerEvent) {.async.} =
           asyncSpawn(pm.evictPeer(peerId))
           peerStore.delete(peerId)
 
-    WakuPeerEvent.emit(pm.brokerCtx, peerId, WakuPeerEventKind.EventConnected)
+    EventWakuPeer.emit(pm.brokerCtx, peerId, EventWakuPeerKind.EventConnected)
 
     if not pm.onConnectionChange.isNil():
       # we don't want to await for the callback to finish
@@ -836,7 +836,7 @@ proc onPeerEvent(pm: PeerManager, peerId: PeerId, event: PeerEvent) {.async.} =
           pm.ipTable.del(ip)
         break
 
-    WakuPeerEvent.emit(pm.brokerCtx, peerId, WakuPeerEventKind.EventDisconnected)
+    EventWakuPeer.emit(pm.brokerCtx, peerId, EventWakuPeerKind.EventDisconnected)
 
     if not pm.onConnectionChange.isNil():
       # we don't want to await for the callback to finish
@@ -844,7 +844,7 @@ proc onPeerEvent(pm: PeerManager, peerId: PeerId, event: PeerEvent) {.async.} =
   of PeerEventKind.Identified:
     info "event identified", peerId = peerId
 
-    WakuPeerEvent.emit(pm.brokerCtx, peerId, WakuPeerEventKind.EventIdentified)
+    EventWakuPeer.emit(pm.brokerCtx, peerId, EventWakuPeerKind.EventIdentified)
 
   peerStore[ConnectionBook][peerId] = connectedness
   peerStore[DirectionBook][peerId] = direction
