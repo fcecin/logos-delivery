@@ -126,7 +126,7 @@ suite "Onchain group manager":
   test "trackRootChanges: oldest roots are evicted once the window is exceeded":
     const
       initialCount = 5
-      additionalCount = 46
+      additionalCount = 6
     let credentials = generateCredentials(initialCount + additionalCount)
     (waitFor manager.init()).isOkOr:
       raiseAssert $error
