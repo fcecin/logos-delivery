@@ -6,6 +6,9 @@ permissions:
 on:
   pull_request:
     branches: [master]
+  push:
+    branches: [master]
+    tags: ['v*']
 
 jobs:
   build:
@@ -17,6 +20,7 @@ jobs:
           - x86_64-linux
         nixpkg:
           - liblogosdelivery
+          - rln
 
         include:
           - system: aarch64-darwin
@@ -29,6 +33,20 @@ jobs:
     runs-on: ${{ matrix.runs_on }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup Cachix (read-only)
+        if: github.event_name == 'pull_request'
+        uses: cachix/cachix-action@v15
+        with:
+          name: logos-co
+          skipPush: true
+
+      - name: Setup Cachix (push)
+        if: github.event_name == 'push'
+        uses: cachix/cachix-action@v15
+        with:
+          name: logos-co
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
       - name: 'Run Nix build for ${{ matrix.nixpkg }}'
         shell: bash
