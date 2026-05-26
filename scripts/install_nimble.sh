@@ -19,7 +19,13 @@ if [ -z "${NIMBLE_VERSION}" ]; then
   exit 1
 fi
 
-NIMBLE_BIN="${HOME}/.nimble/bin/nimble"
+# On Windows (MSYS2) the binaries carry a .exe extension.
+EXE=""
+case "$(uname -s)" in
+MINGW* | MSYS* | CYGWIN*) EXE=".exe" ;;
+esac
+
+NIMBLE_BIN="${HOME}/.nimble/bin/nimble${EXE}"
 
 # 1. Already installed at the right version?
 if [ -x "${NIMBLE_BIN}" ]; then
@@ -32,7 +38,7 @@ if [ -x "${NIMBLE_BIN}" ]; then
 fi
 
 # 2. Already compiled into pkgs2/ from a previous (possibly partial) run?
-PKGS2_NIMBLE=$(ls -dt "${HOME}/.nimble/pkgs2/nimble-${NIMBLE_VERSION}-"*/nimble \
+PKGS2_NIMBLE=$(ls -dt "${HOME}/.nimble/pkgs2/nimble-${NIMBLE_VERSION}-"*/nimble${EXE} \
   2>/dev/null | head -1 || true)
 if [ -n "${PKGS2_NIMBLE}" ] && [ -x "${PKGS2_NIMBLE}" ]; then
   echo "Nimble ${NIMBLE_VERSION} found in pkgs2, re-linking to ${NIMBLE_BIN}."
@@ -42,7 +48,7 @@ if [ -n "${PKGS2_NIMBLE}" ] && [ -x "${PKGS2_NIMBLE}" ]; then
 fi
 
 # 3. Build from source.
-NIM_BIN="${HOME}/.nimble/bin/nim"
+NIM_BIN="${HOME}/.nimble/bin/nim${EXE}"
 if [ ! -x "${NIM_BIN}" ]; then
   NIM_BIN="$(command -v nim)"
 fi
@@ -60,11 +66,11 @@ echo "Building nimble ${NIMBLE_VERSION} with $("${NIM_BIN}" --version | head -1)
 cd "${WORK_DIR}/nimble"
 # nim reads nim.cfg / config.nims in the current dir, which sets vendor paths.
 "${NIM_BIN}" c -d:release --path:src \
-  -o:"${WORK_DIR}/nimble_new" src/nimble.nim
+  -o:"${WORK_DIR}/nimble_new${EXE}" src/nimble.nim
 
 mkdir -p "${HOME}/.nimble/bin"
 # Atomic rename: avoids ETXTBSY when the old binary at NIMBLE_BIN is still running.
-cp "${WORK_DIR}/nimble_new" "${NIMBLE_BIN}.new.$$"
+cp "${WORK_DIR}/nimble_new${EXE}" "${NIMBLE_BIN}.new.$$"
 mv -f "${NIMBLE_BIN}.new.$$" "${NIMBLE_BIN}"
 
 echo "Nimble ${NIMBLE_VERSION} installed to ${NIMBLE_BIN}"
