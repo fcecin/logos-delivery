@@ -264,7 +264,6 @@ proc trackRootChanges*(g: OnchainGroupManager): Future[Result[void, string]] {.a
   const rpcDelay = 5.seconds
 
   while true:
-    await sleepAsync(rpcDelay)
     let rootUpdated = await g.updateRoots()
 
     if rootUpdated:
@@ -287,6 +286,7 @@ proc trackRootChanges*(g: OnchainGroupManager): Future[Result[void, string]] {.a
 
       let memberCount = cast[int64](nextFreeIndex.get())
       waku_rln_number_registered_memberships.set(float64(memberCount))
+      await sleepAsync(rpcDelay)
 
 method register*(
     g: OnchainGroupManager, rateCommitment: RateCommitment
