@@ -62,43 +62,42 @@ proc fetchMerkleProofElements*(
   let response = await sendEthCallWithParams(
     ethRpc = g.ethRpc.get(),
     functionSignature = methodSig,
-    params = paddedParam,
     fromAddress = g.ethRpc.get().defaultAccount,
     toAddress = fromHex(Address, g.ethContractAddress),
     chainId = g.chainId,
+    params = paddedParam,
   )
 
   return response
 
-# proc fetchMerkleRoot*(
-#     g: OnchainGroupManager
-# ): Future[Result[UInt256, string]] {.async.} =
-#   try:
-#     let merkleRoot = await sendEthCallWithoutParams(
-#       ethRpc = g.ethRpc.get(),
-#       functionSignature = "root()",
-#       fromAddress = g.ethRpc.get().defaultAccount,
-#       toAddress = fromHex(Address, g.ethContractAddress),
-#       chainId = g.chainId,
-#     )
-#     return merkleRoot
-#   except CatchableError:
-#     error "Failed to fetch Merkle root", error = getCurrentExceptionMsg()
-#     return err("Failed to fetch merkle root: " & getCurrentExceptionMsg())
+proc fetchMerkleRoot*(
+    g: OnchainGroupManager
+): Future[Result[UInt256, string]] {.async.} =
+  try:
+    let merkleRoot = await sendEthCallWithoutParams(
+      ethRpc = g.ethRpc.get(),
+      functionSignature = "root()",
+      fromAddress = g.ethRpc.get().defaultAccount,
+      toAddress = fromHex(Address, g.ethContractAddress),
+      chainId = g.chainId,
+    )
+    return merkleRoot
+  except CatchableError:
+    error "Failed to fetch Merkle root", error = getCurrentExceptionMsg()
+    return err("Failed to fetch merkle root: " & getCurrentExceptionMsg())
 
-##  params = @[] - added empty params as way to get the raw return bytes (seq[bytes])
-## 
 proc fetchMerkleRoot*(
     g: OnchainGroupManager
 ): Future[Result[seq[byte], string]] {.async.} =
-  let merkleRoots = await sendEthCallWithParams(
-    ethRpc = g.ethRpc.get(),
-    functionSignature = "getRecentRoots()",
-    params = @[],
-    fromAddress = g.ethRpc.get().defaultAccount,
-    toAddress = fromHex(Address, g.ethContractAddress),
-    chainId = g.chainId,
-  )
+  let
+    # using sendEthCallWithParams to get return type of seq[bytes] for getRecentRoots() function which returns an array of bytes32 (5 recent roots)
+    merkleRoots = await sendEthCallWithParams(
+      ethRpc = g.ethRpc.get(),
+      functionSignature = "getRecentRoots()",
+      fromAddress = g.ethRpc.get().defaultAccount,
+      toAddress = fromHex(Address, g.ethContractAddress),
+      chainId = g.chainId,
+    )
   return merkleRoots
 
 proc fetchNextFreeIndex*(
@@ -121,10 +120,10 @@ proc fetchMembershipStatus*(
     await sendEthCallWithParams(
       ethRpc = g.ethRpc.get(),
       functionSignature = "isInMembershipSet(uint256)",
-      params = params,
       fromAddress = g.ethRpc.get().defaultAccount,
       toAddress = fromHex(Address, g.ethContractAddress),
       chainId = g.chainId,
+      params = params,
     )
   ).valueOr:
     return err("Failed to check membership: " & error)
