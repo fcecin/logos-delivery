@@ -86,7 +86,7 @@ proc fetchMerkleRoot*(
     error "Failed to fetch Merkle root", error = getCurrentExceptionMsg()
     return err("Failed to fetch merkle root: " & getCurrentExceptionMsg())
 
-proc fetchMerkleRoot*(
+proc fetchMerkleRootsCache*(
     g: OnchainGroupManager
 ): Future[Result[seq[byte], string]] {.async.} =
   let
@@ -148,72 +148,49 @@ proc checkInitialized(g: OnchainGroupManager): Result[void, string] =
     return err("OnchainGroupManager is not initialized")
   return ok()
 
-# proc updateRoots*(g: OnchainGroupManager): Future[bool] {.async.} =
-#   let rootRes = await g.fetchMerkleRoot()
-#   if rootRes.isErr():
-#     return false
-
-#   let merkleRoot = UInt256ToField(rootRes.get())
-
-#   if g.validRoots.len == 0:
-#     g.validRoots.addLast(merkleRoot)
-#     return true
-
-#   if g.validRoots[g.validRoots.len - 1] != merkleRoot:
-#     if g.validRoots.len > AcceptableRootWindowSize:
-#       discard g.validRoots.popFirst()
-#     g.validRoots.addLast(merkleRoot)
-#     return true
-
-#   return false
-
 proc updateRoots*(g: OnchainGroupManager): Future[bool] {.async.} =
   let rootRes = await g.fetchMerkleRoot()
-  # let rootRes = await g.fetchMerkleRecentRoots()
+  if rootRes.isErr():
+    return false
+
+  let merkleRoot = UInt256ToField(rootRes.get())
+
+  if g.validRoots.len == 0:
+    g.validRoots.addLast(merkleRoot)
+    return true
+
+  if g.validRoots[g.validRoots.len - 1] != merkleRoot:
+    if g.validRoots.len > AcceptableRootWindowSize:
+      discard g.validRoots.popFirst()
+    g.validRoots.addLast(merkleRoot)
+    return true
+
+  return false
+
+proc updateRecentRoots*(g: OnchainGroupManager): Future[bool] {.async.} =
+  let rootRes = await g.fetchMerkleRootsCache()
   if rootRes.isErr():
     error "Failed to fetch recent roots", error = rootRes.error
     return false
 
   let bytes = rootRes.get()
-  debug "recent roots raw bytes received", length = bytes.len
   if (bytes.len mod 32) != 0:
     error "Invalid recent roots payload length", length = bytes.len
     return false
 
   let chunkCount = bytes.len div 32
-  debug "recent roots parsed chunk count", chunks = chunkCount
   if chunkCount != 5:
     warn "Unexpected number of recent roots returned; proceeding anyway",
       count = chunkCount
 
-  # Parse 32-byte chunks into MerkleNode values (UInt256 -> Field bytes)
-  var newRoots: seq[MerkleNode] = @[] # newest-first order from contract
-  var zeroIndices: seq[int] = @[]
-  for i in 0 ..< chunkCount:
-    let startIdx = i * 32
-    let endIdx = (i + 1) * 32 - 1
-    var allZero = true
-    for b in bytes[startIdx .. endIdx]:
-      if b != 0'u8:
-        allZero = false
-        break
-    if allZero:
-      zeroIndices.add(i)
-    let u = UInt256.fromBytesBE(bytes[startIdx .. endIdx])
-    let node = UInt256ToField(u)
-    newRoots.add(node)
-
-  if zeroIndices.len > 0:
-    debug "zero or empty roots detected in recent roots",
-      zeroRootsCount = zeroIndices.len, indices = zeroIndices
-
-  # Convert to deque order: oldest-first (so newest ends up at tail)
-  # Skip zero roots so they are not added to the validRoots list
+  # Parse 32-byte chunks (contract returns newest-first) into MerkleNode values,
+  # reversing to oldest-first and skipping zero roots.
   var newRootsDequeOrder: seq[MerkleNode] = @[]
-  for i in countdown(newRoots.len - 1, 0):
-    if zeroIndices.contains(i):
+  for startIdx in countdown(bytes.len - 32, 0, 32):
+    let u = UInt256.fromBytesBE(bytes.toOpenArray(startIdx, startIdx + 31))
+    if u.isZero:
       continue
-    newRootsDequeOrder.add(newRoots[i])
+    newRootsDequeOrder.add(UInt256ToField(u))
 
   if newRootsDequeOrder.len == 0:
     debug "no non-zero recent roots to add; skipping update"
@@ -236,24 +213,22 @@ proc updateRoots*(g: OnchainGroupManager): Future[bool] {.async.} =
 
   let toAdd = newRootsDequeOrder[matchLen ..< newRootsDequeOrder.len]
   if toAdd.len == 0:
-    debug "recent roots already present up-to-date; skipping update"
     return false
 
   # If this is the first time, just seed the deque with all provided roots
   if g.validRoots.len == 0:
     for r in newRootsDequeOrder:
-      debug "adding new recent root", root = r
       g.validRoots.addLast(r)
+    debug "seeded recent roots", count = newRootsDequeOrder.len
     return true
 
-  # Add all new roots to the "top" (tail) and drop the bottom 5
+  # Add all new roots to the "top" (tail) and trim to AcceptableRootWindowSize
   for r in toAdd:
-    debug "adding new recent root", root = r
     g.validRoots.addLast(r)
+  debug "appended recent roots", count = toAdd.len, roots = toAdd
 
-  # Only trim the deque if it exceeds the acceptable window size
   while g.validRoots.len > AcceptableRootWindowSize:
-    debug "removing old recent root", root = g.validRoots[0]
+    trace "removing old merkle root", root = g.validRoots[0]
     discard g.validRoots.popFirst()
 
   return true
