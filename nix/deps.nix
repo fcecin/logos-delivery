@@ -124,8 +124,15 @@
 
   confutils = pkgs.fetchgit {
     url = "https://github.com/status-im/nim-confutils";
-    rev = "7728f6bd81a1eedcfe277d02ea85fdb805bcc05a";
-    sha256 = "18bj1ilx10jm2vmqx2wy2xl9rzy7alymi2m4n9jgpa4sbxnfh0x3";
+    rev = "36f3115ca350f40841ac0eecc7dfa5fe7790c864";
+    sha256 = "1vppqplwlpl7a61r8iki5hlzvhd8lnq41ixpqslv35dnm482c55j";
+    fetchSubmodules = true;
+  };
+
+  cbor_serialization = pkgs.fetchgit {
+    url = "https://github.com/vacp2p/nim-cbor-serialization";
+    rev = "1664160e04d153573373afddc552b9cbf6fbe4dc";
+    sha256 = "0c1rj4fk0fcqvsf0yqhxvm8h10aww75gi4yfsjhlczh88ypywii2";
     fetchSubmodules = true;
   };
 
@@ -147,6 +154,13 @@
     url = "https://github.com/status-im/nim-presto";
     rev = "d66043dd7ede146442e6c39720c76a20bde5225f";
     sha256 = "1hrppcak32aigrdv3mqk124w81yy9jv1prs57vqqhfj83gl930vi";
+    fetchSubmodules = true;
+  };
+
+  brokers = pkgs.fetchgit {
+    url = "https://github.com/NagyZoltanPeter/nim-brokers.git";
+    rev = "2093ca4d50e581adda73fee7fd16231f990f4cbe";
+    sha256 = "0a4ix2q6riqfrd0hfnajisy159qdmk5imwzymppj23rwc8n7d2dx";
     fetchSubmodules = true;
   };
 
@@ -259,6 +273,13 @@
     url = "https://github.com/status-im/nim-taskpools";
     rev = "9e8ccc754631ac55ac2fd495e167e74e86293edb";
     sha256 = "1y78l33vdjxmb9dkr455pbphxa73rgdsh8m9gpkf4d9b1wm1yivy";
+    fetchSubmodules = true;
+  };
+
+  sds = pkgs.fetchgit {
+    url = "https://github.com/logos-messaging/nim-sds.git";
+    rev = "2e9a7683f0e180bf112135fae3a3803eed8490d4";
+    sha256 = "1dbpvp3zhvdlfxdyggz5waga1vg3b6ndd3acfzhnx8k1wdr01c6f";
     fetchSubmodules = true;
   };
 

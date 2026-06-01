@@ -168,7 +168,7 @@ type WakuNodeConf* = object
 
     preset* {.
       desc:
-        "Network preset to use. 'twn' is The RLN-protected Waku Network (cluster 1). 'logos.dev' is the Logos Dev Network (cluster 2). Overrides other values.",
+        "Network preset to use. 'twn' is The RLN-protected Waku Network (cluster 1). 'logos.dev' is the Logos Dev Network (cluster 2). 'logos.test' is the Logos Test Network (cluster 2). Overrides other values.",
       defaultValue: "",
       name: "preset"
     .}: string
@@ -717,6 +717,12 @@ hence would have reachability issues.""",
       name: "rate-limit"
     .}: seq[string]
 
+    localStoragePath* {.
+      desc: "Path to store local data.",
+      defaultValue: "./data",
+      name: "local-storage-path"
+    .}: string
+
 ## Parsing
 
 # NOTE: Keys are different in nim-libp2p
@@ -960,6 +966,8 @@ proc toNetworkConf(
     ok(some(NetworkConf.TheWakuNetworkConf()))
   of "logos.dev", "logosdev":
     ok(some(NetworkConf.LogosDevConf()))
+  of "logos.test", "logostest":
+    ok(some(NetworkConf.LogosTestConf()))
   else:
     err("Invalid --preset value passed: " & lcPreset)
 
@@ -1144,6 +1152,8 @@ proc toWakuConf*(n: WakuNodeConf): ConfResult[WakuConf] =
 
   if n.rateLimits.len > 0:
     b.rateLimitConf.withRateLimits(n.rateLimits)
+
+  b.withLocalStoragePath(n.localStoragePath)
 
   if n.enableKadDiscovery.isSome():
     b.kademliaDiscoveryConf.withEnabled(n.enableKadDiscovery.get())

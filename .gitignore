@@ -85,3 +85,8 @@ nimble.paths
 nimbledeps
 
 **/anvil_state/state-deployed-contracts-mint-and-approved.json
+.gitnexus
+
+# Python bytecode from tests/simulator
+__pycache__/
+*.pyc
