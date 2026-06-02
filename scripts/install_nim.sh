@@ -45,6 +45,13 @@ if [ -n "${nim_ver}" ]; then
   echo "INFO: Nim ${nim_ver} found in PATH; installing Nim ${NIM_VERSION} to ${NIM_DEST}." >&2
 fi
 
+<<<<<<< HEAD
+=======
+OS=$(uname -s | tr 'A-Z' 'a-z' | sed 's/darwin/macosx/')
+ARCH=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/')
+
+BINARY_URL="https://nim-lang.org/download/nim-${NIM_VERSION}-${OS}_${ARCH}.tar.xz"
+>>>>>>> master
 WORK_DIR=$(mktemp -d)
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
@@ -58,6 +65,7 @@ MINGW* | MSYS* | CYGWIN*)
   esac
   BINARY_URL="https://nim-lang.org/download/nim-${NIM_VERSION}_${WIN_ARCH}.zip"
 
+<<<<<<< HEAD
   echo "Downloading pre-built Nim ${NIM_VERSION} (windows_${WIN_ARCH}) from ${BINARY_URL}..."
   curl -fL "${BINARY_URL}" -o "${WORK_DIR}/nim.zip"
   unzip -q "${WORK_DIR}/nim.zip" -d "${WORK_DIR}"
@@ -88,6 +96,28 @@ MINGW* | MSYS* | CYGWIN*)
   fi
   ;;
 esac
+
+# rm -rf can fail with "Directory not empty" on overlay filesystems (e.g. Docker).
+# Using cp -r src/. dst/ handles both cases: dst absent (clean) or partially present.
+rm -rf "${NIM_DEST}" 2>/dev/null || true
+mkdir -p "${NIM_DEST}"
+cp -r "${SRC_DIR}/." "${NIM_DEST}/"
+=======
+if [ "${HTTP_STATUS}" = "200" ]; then
+  echo "Downloading pre-built binary from ${BINARY_URL}..."
+  curl -fL "${BINARY_URL}" -o "${WORK_DIR}/nim.tar.xz"
+  tar -xJf "${WORK_DIR}/nim.tar.xz" -C "${WORK_DIR}"
+  SRC_DIR="${WORK_DIR}/nim-${NIM_VERSION}"
+else
+  echo "No pre-built binary found for ${OS}_${ARCH}. Building from source..."
+  SRC_URL="https://github.com/nim-lang/Nim/archive/refs/tags/v${NIM_VERSION}.tar.gz"
+  curl -fL "${SRC_URL}" -o "${WORK_DIR}/nim-src.tar.gz"
+  tar -xzf "${WORK_DIR}/nim-src.tar.gz" -C "${WORK_DIR}"
+  cd "${WORK_DIR}/Nim-${NIM_VERSION}"
+  sh build_all.sh
+  SRC_DIR="${WORK_DIR}/Nim-${NIM_VERSION}"
+fi
+>>>>>>> master
 
 # rm -rf can fail with "Directory not empty" on overlay filesystems (e.g. Docker).
 # Using cp -r src/. dst/ handles both cases: dst absent (clean) or partially present.

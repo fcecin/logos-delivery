@@ -3,11 +3,13 @@ name: Daily logos-delivery CI
 on:
   schedule:
     - cron: '30 6 * * *'
+  workflow_dispatch:
 
 env:
   NPROC: 2
   MAKEFLAGS: "-j${NPROC}"
-  NIMFLAGS: "--parallelBuild:${NPROC} --colors:off -d:chronicles_colors:none"
+  NIMFLAGS: "--parallelBuild:${NPROC} --colors:off -d:chronicles_colors:none -d:disableMarchNative"
+  NIM_PARAMS: "-d:disableMarchNative"
 
 jobs:
   build:

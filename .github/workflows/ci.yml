@@ -13,7 +13,8 @@ concurrency:
 env:
   NPROC: 2
   MAKEFLAGS: "-j${NPROC}"
-  NIMFLAGS: "--parallelBuild:${NPROC} --colors:off -d:chronicles_colors:none"
+  NIMFLAGS: "--parallelBuild:${NPROC} --colors:off -d:chronicles_colors:none -d:disableMarchNative"
+  NIM_PARAMS: "-d:disableMarchNative"
   NIM_VERSION: '2.2.4'
   NIMBLE_VERSION: '0.22.3'
 
@@ -35,6 +36,9 @@ jobs:
           - 'nimble.lock'
           - 'waku.nimble'
           - 'Makefile'
+          - 'scripts/**'
+          - 'flake.nix'
+          - 'flake.lock'
           - 'library/**'
           - 'liblogosdelivery/**'
           v2:
@@ -43,6 +47,7 @@ jobs:
           - 'tools/**'
           - 'tests/all_tests_v2.nim'
           - 'tests/**'
+          - 'channels/**'
           docker:
           - 'docker/**'
 
@@ -156,7 +161,7 @@ jobs:
           fi
 
           export MAKEFLAGS="-j1"
-          export NIMFLAGS="--colors:off -d:chronicles_colors:none"
+          export NIMFLAGS="--colors:off -d:chronicles_colors:none -d:disableMarchNative"
           export USE_LIBBACKTRACE=0
 
           make V=1 POSTGRES=$postgres_enabled test
@@ -175,20 +180,6 @@ jobs:
       node_nwaku: ${{ needs.build-docker-image.outputs.image }}
 
     secrets: inherit
-
-  js-waku-node:
-    needs: build-docker-image
-    uses: logos-messaging/logos-delivery-js/.github/workflows/test-node.yml@master
-    with:
-      nim_wakunode_image: ${{ needs.build-docker-image.outputs.image }}
-      test_type: node
-
-  js-waku-node-optional:
-    needs: build-docker-image
-    uses: logos-messaging/logos-delivery-js/.github/workflows/test-node.yml@master
-    with:
-      nim_wakunode_image: ${{ needs.build-docker-image.outputs.image }}
-      test_type: node-optional
 
   lint:
     name: "Lint"

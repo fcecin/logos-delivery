@@ -24,6 +24,7 @@ export PATH := $(HOME)/.nimble/bin:$(PATH)
 # NIM binary location
 NIM_BINARY := $(shell which nim 2>/dev/null)
 NPH := $(HOME)/.nimble/bin/nph
+NIMBLE := $(HOME)/.nimble/bin/nimble
 NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
 
 # Compilation parameters
@@ -71,7 +72,7 @@ waku.nims:
 	ln -s waku.nimble $@
 
 $(NIMBLEDEPS_STAMP): nimble.lock | install-nimble build-nph waku.nims
-	nimble setup --localdeps
+	$(NIMBLE) setup --localdeps
 	touch $@
 
 # Must be phony so the recipe always runs and the sub-make re-evaluates
@@ -92,10 +93,14 @@ REQUIRED_NIM_VERSION    := $(shell grep -E '^const RequiredNimVersion\s*=' waku.
 REQUIRED_NIMBLE_VERSION := $(shell grep -E '^const RequiredNimbleVersion\s*=' waku.nimble | grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"')
 
 install-nim:
+ifneq ($(detected_OS),Windows)
 	scripts/install_nim.sh $(REQUIRED_NIM_VERSION)
+endif
 
 install-nimble: install-nim
+ifneq ($(detected_OS),Windows)
 	scripts/install_nimble.sh $(REQUIRED_NIMBLE_VERSION)
+endif
 
 build:
 	mkdir -p build
