@@ -167,7 +167,9 @@ proc updateRoots*(g: OnchainGroupManager): Future[bool] {.async.} =
   return false
 
 proc updateRecentRoots*(g: OnchainGroupManager): Future[bool] {.async.} =
-  let bytes = (await g.fetchMerkleRoot()).valueOr:
+  ## Fetch recent roots from the contract roots cache and update the validRoots deque, ensuring we maintain a window of acceptable roots.
+  ## Contract returns array if uint256 roots, newest first, zero-padded to the cache size (e.g. 5).
+  let bytes = (await g.fetchMerkleRootsCache()).valueOr:
     error "Failed to fetch current Merkle root", error = error
     return false
 
@@ -176,7 +178,7 @@ proc updateRecentRoots*(g: OnchainGroupManager): Future[bool] {.async.} =
     return false
 
   let chunkCount = bytes.len div 32
-  if chunkCount != 5:
+  if chunkCount != RlnContractRootCacheSize:
     warn "Unexpected number of recent roots returned; proceeding anyway",
       count = chunkCount
 
