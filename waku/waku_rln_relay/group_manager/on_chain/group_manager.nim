@@ -196,18 +196,11 @@ proc updateRecentRoots*(g: OnchainGroupManager): Future[bool] {.async.} =
     return false
 
   # Determine overlap with existing tail so we only append truly new roots
-  var overlap = min(g.validRoots.len, newRootsDequeOrder.len)
+  let overlap = min(g.validRoots.len, newRootsDequeOrder.len)
   var matchLen = 0
-  # Find the largest n (<= overlap) such that last n of validRoots == first n of newRootsDequeOrder
-  for n in countdown(overlap, 1):
-    var ok = true
-    let startIdx = g.validRoots.len - n
-    for i in 0 ..< n:
-      if g.validRoots[startIdx + i] != newRootsDequeOrder[i]:
-        ok = false
-        break
-    if ok:
-      matchLen = n
+  for startIdx in (g.validRoots.len - overlap) ..< g.validRoots.len:
+    if g.validRoots[startIdx] == newRootsDequeOrder[0]:
+      matchLen = g.validRoots.len - startIdx
       break
 
   let toAdd = newRootsDequeOrder[matchLen ..< newRootsDequeOrder.len]

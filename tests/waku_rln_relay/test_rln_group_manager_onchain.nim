@@ -131,7 +131,7 @@ suite "Onchain group manager":
     #       relies on a busy loop rather than event-based monitoring. but that busy loop fetch root every 5 seconds
     #       so we can't use it in this test.
 
-    const credentialCount = 5
+    const credentialCount = RlnContractRootCacheSize
     let credentials = generateCredentials(credentialCount)
     (waitFor manager.init()).isOkOr:
       raiseAssert $error
@@ -140,7 +140,7 @@ suite "Onchain group manager":
       raiseAssert "Failed to fetch merkle root cache before: " & error
 
     check:
-      merkleRootCacheBefore.len == 5 * 32
+      merkleRootCacheBefore.len == RlnContractRootCacheSize * 32
       merkleRootCacheBefore.allIt(it == 0'u8)
       manager.validRoots.len() == 0
 
@@ -154,20 +154,20 @@ suite "Onchain group manager":
       raiseAssert "Failed to fetch merkle root cache after: " & error
 
     check:
-      merkleRootCacheAfter.len == 5 * 32
+      merkleRootCacheAfter.len == RlnContractRootCacheSize * 32
       not merkleRootCacheAfter.allIt(it == 0'u8)
       manager.validRoots.len() == credentialCount
       manager.validRoots.items().toSeq().allIt(it != default(MerkleNode))
 
   test "trackRootChanges: oldest roots are evicted once the window is exceeded":
     const
-      initialCount = 5
-      additionalCount = 6
+      initialCount = AcceptableRootWindowSize - RlnContractRootCacheSize
+      additionalCount = RlnContractRootCacheSize + 1 # one more than the cache size to ensure eviction occurs
     let credentials = generateCredentials(initialCount + additionalCount)
     (waitFor manager.init()).isOkOr:
       raiseAssert $error
 
-    # Register the first 5 credentials and snapshot the 3 oldest roots.
+    # Register the first credentials and snapshot the 3 oldest roots.
     for i in 0 ..< initialCount:
       (waitFor manager.register(credentials[i], UserMessageLimit(20))).isOkOr:
         assert false, "Failed to register credential " & $i & ": " & error
@@ -185,7 +185,7 @@ suite "Onchain group manager":
 
     let rootsAfter = manager.validRoots.items().toSeq()
 
-    # 51 registrations into a window of 50 evicts exactly the single oldest root,
+    # AcceptableRootWindowSize + 1 registrations evicts exactly the single oldest root,
     # so only the first of the original three is gone; the other two remain.
     check:
       manager.validRoots.len() == AcceptableRootWindowSize
