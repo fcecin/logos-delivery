@@ -13,7 +13,7 @@ import stew/byteutils
 import brokers/broker_context
 
 import waku/events/message_events as waku_message_events
-import waku/messaging_client
+import messaging/messaging_client
 import waku/waku_core/topics
 
 import ./reliable_channel

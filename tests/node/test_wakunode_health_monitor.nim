@@ -15,7 +15,6 @@ import
     node/health_monitor/protocol_health,
     node/health_monitor/topic_health,
     node/health_monitor/node_health_monitor,
-    messaging_client,
     node/waku_node/relay,
     node/waku_node/store,
     node/waku_node/lightpush,
@@ -27,6 +26,7 @@ import
 
 import ../testlib/[wakunode, wakucore], ../waku_archive/archive_utils
 import waku/node/subscription_manager
+import messaging/messaging_client
 
 const MockDLow = 4 # Mocked GossipSub DLow value
 

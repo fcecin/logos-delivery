@@ -21,7 +21,7 @@ import stew/byteutils
 import libp2p/crypto/crypto as libp2p_crypto
 
 import waku/api/types
-import waku/node/delivery_service/send_service
+import messaging/delivery_service/send_service
 import waku/waku_core/topics
 
 import ./events

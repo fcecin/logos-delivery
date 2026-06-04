@@ -5,7 +5,7 @@ import chronos, testutils/unittests, stew/byteutils
 import libp2p/[peerid, peerinfo, multiaddress, crypto/crypto]
 import brokers/broker_context
 import ../testlib/[common, wakucore, wakunode, testasync]
-import waku/messaging_client
+import messaging/messaging_client
 
 import
   waku,

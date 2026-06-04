@@ -1,9 +1,9 @@
 import chronicles, chronos, results
 
 import waku/factory/waku
-import waku/messaging_client
+import messaging/messaging_client
 import waku/[requests/health_requests, waku_core, waku_node]
-import waku/node/delivery_service/send_service
+import messaging/delivery_service/send_service
 import waku/node/subscription_manager
 import libp2p/peerid
 import ../../tools/confutils/cli_args

@@ -30,7 +30,6 @@ import
     waku_enr/sharding,
     waku_enr/multiaddr,
     api/types,
-    messaging_client,
     common/logging,
     node/peer_manager,
     node/health_monitor,
@@ -50,6 +49,7 @@ import
     persistency/persistency,
   ],
   channels/reliable_channel_manager,
+  messaging/messaging_client,
   ./waku_conf,
   ./waku_state_info
 

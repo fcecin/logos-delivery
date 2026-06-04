@@ -6,7 +6,8 @@ import libp2p/[peerid, peerinfo, crypto/crypto]
 import brokers/broker_context
 import ../testlib/[common, wakucore, wakunode, testasync]
 import ../waku_archive/archive_utils
-import waku/messaging_client
+import messaging/messaging_client
+import messaging/delivery_service/recv_service
 
 import
   waku,
@@ -17,7 +18,6 @@ import
     waku_relay/protocol,
     waku_archive,
     waku_archive/common as archive_common,
-    node/delivery_service/recv_service,
   ]
 import waku/factory/waku_conf
 import tools/confutils/cli_args
