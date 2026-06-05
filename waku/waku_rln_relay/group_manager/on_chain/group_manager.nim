@@ -225,25 +225,32 @@ proc updateRecentRoots*(g: OnchainGroupManager): Future[bool] {.async.} =
 
   return true
 
+proc syncFromContract*(g: OnchainGroupManager): Future[bool] {.async.} =
+  ## Refresh validRoots from the contract's recent-roots cache. If anything
+  ## changed and this node is a registered member, also refresh the local
+  ## Merkle proof cache so subsequent generateProof calls use the latest tree.
+  ## Returns whether validRoots was updated.
+  let rootUpdated = await g.updateRecentRoots()
+  if rootUpdated and g.membershipIndex.isSome():
+    ## A membership index exists only if the node has registered with RLN.
+    ## Non-registered nodes cannot have Merkle proof elements.
+    let proofResult = await g.fetchMerkleProofElements()
+    if proofResult.isErr():
+      error "Failed to fetch Merkle proof", error = proofResult.error
+    else:
+      g.merkleProofCache = proofResult.get()
+  return rootUpdated
+
 proc trackRootChanges*(g: OnchainGroupManager): Future[Result[void, string]] {.async.} =
   ?checkInitialized(g)
 
   const rpcDelay = 10.seconds
 
   while true:
-    let rootUpdated = await g.updateRecentRoots()
+    let rootUpdated = await g.syncFromContract()
 
     if rootUpdated:
       ## The membership set on-chain has changed (some new members have joined or some members have left)
-      if g.membershipIndex.isSome():
-        ## A membership index exists only if the node has registered with RLN.
-        ## Non-registered nodes cannot have Merkle proof elements.
-        let proofResult = await g.fetchMerkleProofElements()
-        if proofResult.isErr():
-          error "Failed to fetch Merkle proof", error = proofResult.error
-        else:
-          g.merkleProofCache = proofResult.get()
-
       let nextFreeIndex = (await g.fetchNextFreeIndex()).valueOr:
         error "Failed to fetch next free index", error = error
         return err("Failed to fetch next free index: " & error)
@@ -493,16 +500,19 @@ method validateRoot*(g: OnchainGroupManager, root: MerkleNode): Future[bool] {.a
 
   # Coalesce: if a refresh is already in flight, ride along instead of starting a new one.
   if not g.pendingRefresh.isNil and not g.pendingRefresh.finished:
+    debug "Root validation missed but refresh already in flight; waiting for refresh to complete"
     discard await g.pendingRefresh
     return g.indexOfRoot(root) >= 0
 
   # Debounce: don't queue another refresh too soon after the previous one.
   let now = Moment.now()
   if now - g.lastRefreshAt < RootRefreshDebounceInterval:
+    debug "Root validation missed but refresh is recently performed; skipping refresh"
     return false
 
   g.lastRefreshAt = now
-  g.pendingRefresh = g.updateRecentRoots()
+  debug "Root not found in valid roots; refreshing from contract cache"
+  g.pendingRefresh = g.syncFromContract()
   discard await g.pendingRefresh
 
   return g.indexOfRoot(root) >= 0
