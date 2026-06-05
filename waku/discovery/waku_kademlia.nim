@@ -7,12 +7,13 @@ import
   results,
   libp2p/crypto/curve25519,
   libp2p/crypto/crypto,
-  libp2p/[peerid, multiaddress, switch],
+  libp2p/[peerid, multiaddress, switch, peeraddrpolicy],
   libp2p/extended_peer_record,
   libp2p/protocols/[kademlia, service_discovery],
   libp2p/protocols/service_discovery/types
 
 import waku/waku_core, waku/node/peer_manager
+export peeraddrpolicy
 
 logScope:
   topics = "waku kademlia"
@@ -178,6 +179,7 @@ proc new*(
       validator = ExtEntryValidator(),
       selector = ExtEntrySelector(),
       disableBootstrapping = disableBootstrapping,
+      addressPolicy = switch.peerInfo.addressPolicy,
     ),
     rng = switch.rng,
     # change from defaults for local testing
@@ -213,3 +215,10 @@ proc stop*(self: WakuKademlia) =
   if not self.periodicLookupFut.isNil():
     self.periodicLookupFut.cancelSoon()
     self.periodicLookupFut = nil
+
+proc addressPolicy*(self: WakuKademlia): PeerAddressPolicy =
+  ## Returns the PeerAddressPolicy configured for this kademlia/service-discovery
+  ## instance (sourced from the switch). Used for filtering addresses in
+  ## advertisements and when processing discovered peers. Intended for tests
+  ## and diagnostics.
+  self.protocol.config.addressPolicy

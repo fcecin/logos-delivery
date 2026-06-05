@@ -6,12 +6,24 @@ import
   chronos,
   chronos/transports/[stream, datagram, common],
   metrics/chronos_httpserver,
-  libp2p/[crypto/crypto, multiaddress, protocols/connectivity/relay/relay],
+  libp2p/[
+    crypto/crypto,
+    multiaddress,
+    protocols/connectivity/relay/relay,
+    extended_peer_record,
+  ],
   eth/p2p/discoveryv5/enr
 
 import
   tests/testlib/[wakunode, wakucore],
-  waku/[waku_node, waku_enr, net/auto_port, discovery/waku_discv5, node/waku_metrics],
+  waku/[
+    waku_node,
+    waku_enr,
+    net/auto_port,
+    discovery/waku_discv5,
+    node/waku_metrics,
+    discovery/waku_kademlia,
+  ],
   waku/factory/[
     node_factory,
     internal_config,
@@ -116,6 +128,39 @@ asynctest "Start a node based on default test configuration":
 
   check:
     node.started == true
+
+  asynctest "WakuKademlia propagates switch address policy (private filter) for service ads":
+    ## Verifies the fix: private addresses must be filtered by the libp2p
+    ## address policy (publicRoutable) in service discovery advertisements.
+    var confBuilder = defaultTestWakuConfBuilder()
+    confBuilder.kademliaDiscoveryConf.withEnabled(true)
+    # seed node is valid (no bootstrap required per code)
+    let conf = confBuilder.build().value
+
+    let node = (await setupNode(conf, relay = Relay.new())).valueOr:
+      raiseAssert error
+
+    check:
+      not node.isNil()
+      not node.wakuKademlia.isNil()
+
+    let policy = node.wakuKademlia.addressPolicy()
+    let privateAddr = MultiAddress.init("/ip4/192.168.0.123/tcp/12345").tryGet()
+    let loopbackAddr = MultiAddress.init("/ip4/127.0.0.1/tcp/12345").tryGet()
+    # Circuit addrs are preserved by the policy even with "private" relay IP
+    let circuitAddr = MultiAddress
+      .init("/ip4/192.168.0.1/tcp/12345/p2p-circuit/p2p/12D3KooWTest")
+      .tryGet()
+
+    check:
+      not policy(privateAddr)
+      not policy(loopbackAddr)
+      policy(circuitAddr)
+
+    # Exercise the advertise path (uses record() internally which applies the policy)
+    let svc = ServiceInfo(id: "test-svc/1", data: @[])
+    node.wakuKademlia.advertiseService(svc)
+    # If we reached here without crash and policy is the filtering one, ads will be filtered.
 
   # Default conf has p2pTcpPort=0, so the OS must have assigned a real port.
   var hasNonZeroTcp = false
