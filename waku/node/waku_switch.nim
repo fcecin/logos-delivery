@@ -118,4 +118,6 @@ proc newWakuSwitch*(
 
   b = b.withRendezVous(rendezvous)
 
+  b = b.withAutonat()
+
   b.build()
