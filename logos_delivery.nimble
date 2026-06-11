@@ -42,9 +42,8 @@ requires "nim >= 2.2.4",
   "secp256k1",
   "bearssl",
   # RPC & APIs
-  # TODO: revert to status-im/nim-json-rpc once
-  # https://github.com/status-im/nim-json-rpc/pull/277 merges + tag cut.
-  "https://github.com/chaitanyaprem/nim-json-rpc.git#f05fad251a1ceb845db963902b54295e7f37fb99",
+  # v0.6.1
+  "https://github.com/status-im/nim-json-rpc.git#6f1fff8ba685c9192fab153a9d66484ad9066e78",
   "presto",
   "web3",
   # Database

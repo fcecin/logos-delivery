@@ -514,9 +514,9 @@
       }
     },
     "json_rpc": {
-      "version": "#f05fad251a1ceb845db963902b54295e7f37fb99",
-      "vcsRevision": "f05fad251a1ceb845db963902b54295e7f37fb99",
-      "url": "https://github.com/chaitanyaprem/nim-json-rpc.git",
+      "version": "#6f1fff8ba685c9192fab153a9d66484ad9066e78",
+      "vcsRevision": "6f1fff8ba685c9192fab153a9d66484ad9066e78",
+      "url": "https://github.com/status-im/nim-json-rpc.git",
       "downloadMethod": "git",
       "dependencies": [
         "nim",
@@ -532,7 +532,7 @@
         "unittest2"
       ],
       "checksums": {
-        "sha1": "4221c98dbc09ba56d68ca0a36b5c2ad90e39a43b"
+        "sha1": "596db0aafcb3c83f5dba6d42993f2276e0d00eb5"
       }
     },
     "secp256k1": {
