@@ -15,6 +15,7 @@ import
   logos_delivery/waku/node/peer_manager,
   logos_delivery/waku/waku_core/peers,
   logos_delivery/waku/waku_core/codecs,
+  logos_delivery/waku/common/option_shims,
   ./common,
   ./waku_peer_record
 

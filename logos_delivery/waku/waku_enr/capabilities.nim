@@ -1,5 +1,7 @@
 {.push raises: [].}
 
+import logos_delivery/waku/common/option_shims
+
 import
   std/[options, bitops, sequtils, net, tables], results, eth/keys, libp2p/crypto/crypto
 import ../common/enr, ../waku_core/codecs

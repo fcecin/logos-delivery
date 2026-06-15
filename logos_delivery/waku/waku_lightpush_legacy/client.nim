@@ -7,6 +7,7 @@ import
   ../node/peer_manager,
   ../utils/requests,
   ../waku_core,
+  ../common/option_shims,
   ./common,
   ./protocol_metrics,
   ./rpc,

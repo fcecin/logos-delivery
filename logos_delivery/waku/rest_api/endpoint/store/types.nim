@@ -1,5 +1,7 @@
 {.push raises: [].}
 
+import logos_delivery/waku/common/option_shims
+
 import
   std/[sets, strformat, uri, options, sequtils],
   stew/byteutils,

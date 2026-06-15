@@ -9,6 +9,7 @@ import
   metrics
 import
   ../common/paging,
+  ../common/option_shims,
   ./driver,
   ./retention_policy,
   ../waku_core,

@@ -6,6 +6,7 @@ import json_serialization, json_serialization/std/options as json_options
 import
   logos_delivery/waku/common/utils/parse_size_units,
   logos_delivery/waku/common/logging,
+  logos_delivery/waku/common/option_shims,
   logos_delivery/waku/factory/waku_conf,
   logos_delivery/waku/factory/conf_builder/conf_builder,
   logos_delivery/waku/factory/networks_config,

@@ -9,6 +9,7 @@ import
   eth/p2p/discoveryv5/enr
 import
   ../common/nimchronos,
+  ../common/option_shims,
   ../node/peer_manager,
   ../waku_core,
   ../discovery/waku_discv5,

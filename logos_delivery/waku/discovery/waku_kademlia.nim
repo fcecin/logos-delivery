@@ -1,5 +1,7 @@
 {.push raises: [].}
 
+import logos_delivery/waku/common/option_shims
+
 import std/[options, sequtils]
 import
   chronos,
