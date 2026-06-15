@@ -46,6 +46,8 @@ import
   ],
   ./config_chat2disco
 
+import logos_delivery/waku/events/discovery_events
+
 import libp2p/protocols/pubsub/rpc/messages, libp2p/protocols/pubsub/pubsub
 import libp2p/extended_peer_record # for ServiceInfo
 
@@ -72,6 +74,7 @@ type Chat = ref object
   nick: string
   prompt: bool
   currentPubsubTopic: string
+  discoPeersListener: PeersDiscoveredEventListener
 
 type
   PrivateKey* = crypto.PrivateKey
@@ -197,6 +200,9 @@ proc publish(c: Chat, line: string) {.async.} =
 proc joinRoom(c: Chat, roomName: string) {.async.} =
   if c.currentPubsubTopic.len > 0 and c.currentPubsubTopic != roomName:
     discard c.node.unsubscribe((kind: PubsubSub, topic: c.currentPubsubTopic))
+    if not c.node.wakuKademlia.isNil():
+      c.node.wakuKademlia.removeServiceToDiscover(c.currentPubsubTopic)
+      await c.node.wakuKademlia.removeServiceToAdvertise(c.currentPubsubTopic)
 
   c.currentPubsubTopic = roomName
 
@@ -211,25 +217,11 @@ proc joinRoom(c: Chat, roomName: string) {.async.} =
 
   echo "subscribed to pubsub topic: ", roomName
 
-  # Kademlia service discovery + advertisement for the room.
-  # Kademlia is always mounted (seed node if no --kad-bootstrap-node provided).
-  let svc = roomName
-  discard c.node.wakuKademlia.protocol.registerInterest(svc)
-  let svcInfo = ServiceInfo(id: svc, data: @[])
-  c.node.wakuKademlia.protocol.startAdvertising(svcInfo)
-  echo "advertising and discovering kademlia service: ", svc
-
-  asyncSpawn (
-    proc() {.async.} =
-      let res = await c.node.wakuKademlia.lookupServicePeers(svc)
-      if res.isOk():
-        let peers = res.get()
-        if peers.len > 0:
-          echo "discovered room peers via kademlia: ", peers.mapIt($it.peerId)
-          await c.node.connectToNodes(peers)
-      else:
-        error "service lookup failed for room", service = svc, error = res.error
-  )()
+  if not c.node.wakuKademlia.isNil():
+    let svcInfo = ServiceInfo(id: roomName, data: @[])
+    c.node.wakuKademlia.addServiceToDiscover(roomName)
+    c.node.wakuKademlia.addServiceToAdvertise(svcInfo)
+    echo "advertising and discovering kademlia service: ", roomName
 
 proc readAndPrint(c: Chat) {.async.} =
   while true:
@@ -262,6 +254,7 @@ proc writeAndPrint(c: Chat) {.async.} =
       let roomName = parts[1].strip()
       await c.joinRoom(roomName)
     elif line.startsWith("/exit"):
+      await PeersDiscoveredEvent.dropListener(c.discoPeersListener)
       echo "quitting..."
 
       try:
@@ -399,7 +392,24 @@ proc processInput(rfd: AsyncFD, rng: crypto.Rng) {.async.} =
     nick: nick,
     prompt: false,
     currentPubsubTopic: "",
+    discoPeersListener: PeersDiscoveredEventListener(),
   )
+
+  let listenerHandle = PeersDiscoveredEvent.listen(
+    proc(event: PeersDiscoveredEvent) {.async: (raises: []).} =
+      let peers = event.peers
+      if peers.len > 0:
+        try:
+          echo "discovered peers via kademlia: ", peers.mapIt($it.peerId)
+          await chat.node.connectToNodes(peers)
+          chat.connected = true
+        except CatchableError as e:
+          error "error connecting discovered peers", error = e.msg
+  ).valueOr:
+    error "failed to subscribe to PeersDiscoveredEvent", error = error
+    return
+
+  chat.discoPeersListener = listenerHandle
 
   let peerInfo = node.switch.peerInfo
   let listenStr = $peerInfo.addrs[0] & "/p2p/" & $peerInfo.peerId
