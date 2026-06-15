@@ -41,6 +41,7 @@ import
     waku_store_sync,
     waku_filter_v2,
     waku_filter_v2/client as filter_client,
+    waku_filter_v2/common as filter_common,
     waku_metadata,
     waku_rendezvous/protocol,
     waku_rendezvous/client as rendezvous_client,
@@ -52,6 +53,7 @@ import
     waku_enr,
     waku_peer_exchange,
     waku_rln_relay,
+    waku_rln_relay/rln_gifter/protocol as rln_gifter_protocol,
     common/option_shims,
     common/rate_limit/setting,
     common/callbacks,
@@ -134,6 +136,12 @@ type
       ## Kernel API Relay appHandlers (if any)
     subscriptionManager*: SubscriptionManager
     wakuMix*: WakuMix
+    wakuRlnGifter*: rln_gifter_protocol.WakuRlnGifter
+      ## Set when gifterService=true. Exposed so startNode can invoke its
+      ## registerHandler for the gifter's self-registration.
+    edgeTopicsHealth*: Table[PubsubTopic, TopicHealth]
+    edgeHealthEvent*: AsyncEvent
+    edgeHealthLoop: Future[void]
     kademliaDiscoveryLoop*: Future[void]
     wakuKademlia*: WakuKademlia
     ports*: BoundPorts
@@ -328,6 +336,7 @@ proc mountMix*(
     mixnodes: seq[MixNodePubInfo],
     userMessageLimit: Option[int] = none(int),
     disableSpamProtection: bool = false,
+    useOnchainLEZ: bool = false,
 ): Future[Result[void, string]] {.async.} =
   info "mounting mix protocol", nodeId = node.info #TODO log the config used
 
@@ -360,7 +369,7 @@ proc mountMix*(
 
   node.wakuMix = WakuMix.new(
     localaddrStr, node.peerManager, clusterId, mixPrivKey, mixnodes, publishMessage,
-    userMessageLimit, disableSpamProtection,
+    userMessageLimit, disableSpamProtection, useOnchainLEZ,
   ).valueOr:
     error "Waku Mix protocol initialization failed", err = error
     return
@@ -528,6 +537,46 @@ proc updateAnnouncedAddrWithPrimaryIpAddr*(node: WakuNode): Result[void, string]
 
   return ok()
 
+const EdgeTopicHealthyThreshold = 2
+
+proc calculateEdgeTopicHealth(node: WakuNode, shard: PubsubTopic): TopicHealth =
+  let filterPeers =
+    node.peerManager.getPeersForShard(filter_common.WakuFilterSubscribeCodec, shard)
+  let lightpushPeers =
+    node.peerManager.getPeersForShard(lightpush_protocol.WakuLightPushCodec, shard)
+
+  if filterPeers >= EdgeTopicHealthyThreshold and
+      lightpushPeers >= EdgeTopicHealthyThreshold:
+    return TopicHealth.SUFFICIENTLY_HEALTHY
+  elif filterPeers > 0 and lightpushPeers > 0:
+    return TopicHealth.MINIMALLY_HEALTHY
+
+  return TopicHealth.UNHEALTHY
+
+proc loopEdgeHealth(node: WakuNode) {.async.} =
+  while node.started:
+    await node.edgeHealthEvent.wait()
+    node.edgeHealthEvent.clear()
+
+    try:
+      for shard in node.edgeTopicsHealth.keys:
+        if not node.wakuRelay.isNil and node.wakuRelay.isSubscribed(shard):
+          continue
+
+        let oldHealth = node.edgeTopicsHealth.getOrDefault(shard, TopicHealth.UNHEALTHY)
+        let newHealth = node.calculateEdgeTopicHealth(shard)
+        if newHealth != oldHealth:
+          node.edgeTopicsHealth[shard] = newHealth
+          EventShardTopicHealthChange.emit(node.brokerCtx, shard, newHealth)
+    except CancelledError:
+      break
+    except CatchableError as e:
+      # KEEP: async health loop must survive transient peer-manager errors.
+      warn "Error in edge health check", error = e.msg
+
+    # safety cooldown to protect from edge cases
+    await sleepAsync(100.milliseconds)
+
 proc startProvidersAndListeners*(node: WakuNode) =
   RequestRelayShard.setProvider(
     node.brokerCtx,
@@ -616,6 +665,16 @@ proc start*(node: WakuNode) {.async.} =
     if isBindIpWithZeroPort(address):
       zeroPortPresent = true
 
+  # Perform relay-specific startup tasks TODO: this should be rethought
+  if not node.wakuRelay.isNil():
+    await node.wakuRelay.start()
+
+  if not node.wakuMix.isNil():
+    await node.wakuMix.start()
+
+  if not node.wakuMetadata.isNil():
+    await node.wakuMetadata.start()
+
   if not node.wakuStoreResume.isNil():
     await node.wakuStoreResume.start()
 
@@ -683,6 +742,7 @@ proc stop*(node: WakuNode) {.async.} =
     try:
       await node.wakuRlnRelay.stop() ## this can raise an exception
     except Exception:
+      # KEEP: shutdown path; continue tearing down other subsystems regardless.
       error "exception stopping the node", error = getCurrentExceptionMsg()
 
   if not node.wakuArchive.isNil():

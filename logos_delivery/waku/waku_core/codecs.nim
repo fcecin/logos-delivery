@@ -10,3 +10,8 @@ const
   WakuMetadataCodec* = "/vac/waku/metadata/1.0.0"
   WakuPeerExchangeCodec* = "/vac/waku/peer-exchange/2.0.0-alpha1"
   WakuRendezVousCodec* = "/vac/waku/rendezvous/1.0.0"
+  WakuRlnGifterCodec* = "/logos/rln/membership/1.0.0"
+  # Separate codec so clients can poll registration status on short-lived
+  # streams instead of holding the original register stream open past the
+  # libp2p timeout.
+  WakuRlnGifterStatusCodec* = "/logos/rln/membership/status/1.0.0"

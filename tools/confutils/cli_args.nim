@@ -654,6 +654,45 @@ with the drawback of consuming some more bandwidth.""",
       name: "mix-disable-spam-protection"
     .}: bool
 
+    mixOnchainLEZ* {.
+      desc: "Use on-chain LEZ (LSSA sequencer) for mix RLN spam protection instead of off-chain keystores.",
+      defaultValue: false,
+      name: "mix-onchain-lez"
+    .}: bool
+
+    mixGifterService* {.
+      desc: "Run as RLN gifter service for mix nodes.",
+      defaultValue: false,
+      name: "mix-gifter-service"
+    .}: bool
+
+    mixGifterWalletAccount* {.
+      desc: "Wallet account ID for RLN gifter registration payments.",
+      defaultValue: "",
+      name: "mix-gifter-wallet-account"
+    .}: string
+
+    mixGifterNode* {.
+      desc: "Multiaddress of the RLN gifter node (for client auto-registration).",
+      defaultValue: "",
+      name: "mix-gifter-node"
+    .}: string
+
+    mixGifterAllowlist* {.
+      desc:
+        "Comma-separated 0x-prefixed Ethereum addresses allowed to redeem an RLN membership via the gifter (one-shot per address). Empty disables auth.",
+      defaultValue: "",
+      name: "mix-gifter-allowlist"
+    .}: string
+
+    mixGifterAuthKey* {.
+      desc:
+        "64-hex-char secp256k1 private key used to sign gifter-membership requests (EIP-191 over the idCommitment hex). Empty disables signing.",
+      defaultValue: "",
+      name: "mix-gifter-auth-key"
+    .}: string
+
+
     # Kademlia Discovery config
     enableKadDiscovery* {.
       desc:
@@ -1089,6 +1128,12 @@ proc toWakuConf*(n: WakuNodeConf): ConfResult[WakuConf] =
   b.mixConf.withEnabled(n.mix)
   b.mixConf.withMixNodes(n.mixnodes)
   b.withMix(n.mix)
+  b.mixConf.withUseOnchainLEZ(n.mixOnchainLEZ)
+  b.mixConf.withGifterService(n.mixGifterService)
+  b.mixConf.withGifterWalletAccount(n.mixGifterWalletAccount)
+  b.mixConf.withGifterNode(n.mixGifterNode)
+  b.mixConf.withGifterAllowlist(n.mixGifterAllowlist)
+  b.mixConf.withGifterAuthKey(n.mixGifterAuthKey)
   if n.mixkey.isSome():
     b.mixConf.withMixKey(n.mixkey.get())
   if n.mixUserMessageLimit.isSome():

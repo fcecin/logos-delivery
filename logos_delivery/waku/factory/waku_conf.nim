@@ -53,6 +53,12 @@ type MixConf* = ref object
   mixnodes*: seq[MixNodePubInfo]
   userMessageLimit*: Option[int]
   disableSpamProtection*: bool
+  useOnchainLEZ*: bool
+  gifterService*: bool
+  gifterWalletAccount*: string
+  gifterNode*: string
+  gifterAllowlist*: string
+  gifterAuthKey*: string
 
 type KademliaDiscoveryConf* = object
   bootstrapNodes*: seq[(PeerId, seq[MultiAddress])]

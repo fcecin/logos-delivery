@@ -24,9 +24,15 @@
       url = "github:vacp2p/zerokit/5e64cb8822bee65eed6cf459f95ae72b80c6ba63";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Mix RLN spam protection requires a separate, newer zerokit (v2.0.0).
+    # Pinned by tag to match what scripts/build_rln_mix.sh uses by default.
+    zerokitMix = {
+      url = "git+https://github.com/vacp2p/zerokit?ref=refs/tags/v2.0.0";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, rust-overlay, zerokit }:
+  outputs = { self, nixpkgs, rust-overlay, zerokit, zerokitMix }:
     let
       systems = [
         "x86_64-linux" "aarch64-linux"
@@ -71,13 +77,26 @@
         let
           pkgs = pkgsFor system;
 
-          zerokitRln = import ./nix/zerokit.nix { inherit zerokit system; };
+          zerokitRln = import ./nix/zerokit.nix {
+            inherit zerokit system;
+            vendorHash = "sha256-PNwEdZLgGQPqQDrEK2hsQtSybVfBbD6xn4K47fPFJUU=";
+          };
+          zerokitMixRln = import ./nix/zerokit.nix {
+            zerokit = zerokitMix;
+            inherit system;
+            vendorHash = "sha256-SoMl0QBBgTG1b4UhOlErlzWmg3J6G0xOC0tNDddOptA=";
+          };
 
           liblogosdelivery = pkgs.callPackage ./nix/default.nix {
             inherit pkgs;
             src = ./.;
-            inherit zerokitRln;
+            inherit zerokitRln zerokitMixRln;
             gitVersion = "v${nimbleVersion}-g${builtins.substring 0 6 shortRev}";
+            # The .lgx wrapper does not put its variant dir on dyld's search
+            # path, so nim's runtime dlopen("libpq.dylib") from db_postgres
+            # fails even though libpq.dylib ships in the bundle. Disable
+            # postgres so the dylib has no runtime libpq dependency.
+            enablePostgres = false;
           };
 
           wakucanary = pkgs.callPackage ./nix/default.nix {

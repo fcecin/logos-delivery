@@ -93,6 +93,18 @@ extern "C"
                                     FFICallBack callback,
                                     void *userData);
 
+  int logosdelivery_init(void);
+
+  // RLN fetcher: C++ implements this, Nim calls it to get roots/proofs from RLN module.
+  typedef int (*RlnFetcherFunc)(const char *method, const char *params,
+      FFICallBack callback, void *callbackData, void *fetcherData);
+
+  void logosdelivery_set_rln_fetcher(void *ctx, RlnFetcherFunc fetcher, void *fetcherData);
+  int logosdelivery_set_rln_config(void *ctx, const char *configAccountId, int leafIndex);
+  void logosdelivery_set_rln_identity(void *ctx, const char *idSecretHashHex);
+  void logosdelivery_push_roots(void *ctx, const char *rootsJson);
+  void logosdelivery_push_proof(void *ctx, const char *proofJson);
+
 #ifdef __cplusplus
 }
 #endif

@@ -5,6 +5,9 @@ if defined(release):
 else:
   switch("nimcache", "nimcache/debug/$projectName")
 
+# Add mix-rln-spam-protection-plugin to search path (all platforms)
+switch("path", "./vendor/mix-rln-spam-protection-plugin/src")
+
 if defined(windows):
   switch("passL", "rln.lib")
   switch("define", "postgres=false")

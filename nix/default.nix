@@ -1,6 +1,7 @@
 { pkgs
 , src
 , zerokitRln
+, zerokitMixRln        ? null
 , targets              ? []
 , gitVersion           ? "n/a"
 , enablePostgres       ? true
@@ -42,6 +43,12 @@ let
   # few mode-specific flags (e.g. --app:lib, --noMain, --header); everything
   # else (paths, defines, threading, gc, nimcache, rln linkage) is constant.
   # $NAT_TRAV and $NIMCACHE are shell variables defined in buildPhase.
+  # Optional mix-rln link flag: appended when zerokitMixRln is provided so
+  # liblogosdelivery's mix-rln-spam-protection-plugin path resolves at link
+  # time. Empty otherwise (vanilla liblogosdelivery build).
+  mixRlnLinkArg = pkgs.lib.optionalString (zerokitMixRln != null)
+    "--passL:${zerokitMixRln}/lib/librln.a --passL:-lm";
+
   nimCompile = { outFile, sourceFile, extraArgs ? [] }: ''
     nim c \
       --noNimblePath \
@@ -49,6 +56,7 @@ let
       --path:$NAT_TRAV \
       --path:$NAT_TRAV/src \
       --passL:"-L${zerokitRln}/lib -lrln${pkgs.lib.optionalString pkgs.stdenv.isLinux " -lstdc++"}" \
+      ${mixRlnLinkArg} \
       ${nimDefineArgs} \
       --threads:on \
       --mm:refc \

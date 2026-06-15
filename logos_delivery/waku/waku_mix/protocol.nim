@@ -110,6 +110,7 @@ proc new*(
     publishMessage: PublishMessage,
     userMessageLimit: Option[int] = none(int),
     disableSpamProtection: bool = false,
+    useOnchainLEZ: bool = false,
 ): WakuMixResult[T] =
   let mixPubKey = public(mixPrivKey)
   trace "mixPubKey", mixPubKey = mixPubKey
@@ -128,9 +129,12 @@ proc new*(
 
   var spamProtectionOpt = default(Opt[SpamProtection])
   if not disableSpamProtection:
-    # Initialize spam protection with persistent credentials
+    # Initialize spam protection with persistent credentials. In LEZ mode,
+    # roots/proofs are fetched from the on-chain tree via the RLN module;
+    # only the identity is local.
     let peerId = peermgr.switch.peerInfo.peerId
     var spamProtectionConfig = defaultConfig()
+    spamProtectionConfig.useOnchainLEZ = useOnchainLEZ
     spamProtectionConfig.keystorePath = "rln_keystore_" & $peerId & ".json"
     spamProtectionConfig.keystorePassword = "mix-rln-password"
     if userMessageLimit.isSome():
@@ -384,6 +388,24 @@ proc registerDoSProtectionWithNetwork*(mix: WakuMix) =
     debug "DoS-protection registration already in progress, skipping"
     return
   mix.dosRegistrationTask = mix.dosRegistrationRetryLoop()
+
+proc publishGossipsubTrigger*(mix: WakuMix) {.async.} =
+  ## Publish dummy messages to spam protection topics to trigger gossipsub
+  ## SUBSCRIBE flow and kademlia peer exchange. Call AFTER the node is fully
+  ## started (switch running, peers connected) so the messages actually reach
+  ## gossipsub mesh peers. In off-chain mode the side effect of registerSelf()
+  ## broadcasting already triggers SUBSCRIBE; in LEZ mode registerSelf() doesn't
+  ## fire (membership comes from on-chain) so we publish explicitly.
+  if mix.publishMessage.isNil or mix.mixRlnSpamProtection.isNil:
+    return
+  let spTopics = mix.getSpamProtectionContentTopics()
+  for ct in spTopics:
+    let msg = WakuMessage(contentTopic: ct, payload: @[byte(0)])
+    let pubRes = await mix.publishMessage(msg)
+    if pubRes.isErr:
+      debug "gossipsub trigger failed (expected if no peers yet)", contentTopic = ct
+    else:
+      info "Published gossipsub trigger (post-start)", contentTopic = ct
 
 method stop*(mix: WakuMix) {.async.} =
   # Cancel the in-flight DoS-protection registration retry loop, if any
