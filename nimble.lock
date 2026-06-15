@@ -599,9 +599,9 @@
       }
     },
     "mix_rln_spam_protection": {
-      "version": "#61ee3e5aacb6b224b70e164ef7d0a5714fe66b26",
-      "vcsRevision": "61ee3e5aacb6b224b70e164ef7d0a5714fe66b26",
-      "url": "https://github.com/logos-co/mix-rln-spam-protection-plugin.git",
+      "version": "#ba32e9f25f4de1de1b1e14b6a23bef7da56ca7c8",
+      "vcsRevision": "ba32e9f25f4de1de1b1e14b6a23bef7da56ca7c8",
+      "url": "https://github.com/adklempner/mix-rln-spam-protection-plugin.git",
       "downloadMethod": "git",
       "dependencies": [
         "nim",

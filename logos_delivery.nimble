@@ -65,7 +65,7 @@ requires "nim >= 2.2.4",
 # Packages not on nimble (use git URLs)
 
 requires "https://github.com/logos-messaging/nim-ffi#v0.1.3"
-requires "https://github.com/logos-co/mix-rln-spam-protection-plugin.git#61ee3e5aacb6b224b70e164ef7d0a5714fe66b26"
+requires "https://github.com/adklempner/mix-rln-spam-protection-plugin.git#ba32e9f25f4de1de1b1e14b6a23bef7da56ca7c8"
 
 # nim-libp2p-mix: extracted mix protocol used by the plugin and by waku's
 # mix integration layer. Tip of experiment/drop-nimble-lock (PR #14, stacked
