@@ -29,6 +29,8 @@ import
       # manage the information of a peer, such as peer ID and public / private key
     peerid, # Implement how peers interact
     protobuf/minprotobuf, # message serialisation/deserialisation from and to protobufs
+    protocols/kademlia/types,
+    protocols/service_discovery/types as sd_types,
     nameresolving/dnsresolver,
   ] # define DNS resolution
 # libp2p_mix has been extracted into its own package; import from there.
@@ -37,6 +39,7 @@ import
   logos_delivery/waku/[
     waku_core,
     waku_core/topics/sharding,
+    waku_core/peers,
     waku_lightpush/common,
     waku_lightpush/rpc,
     waku_enr,
@@ -45,6 +48,7 @@ import
     waku_node,
     node/waku_metrics,
     node/peer_manager,
+    factory/waku_conf,
     factory/builder,
     common/utils/nat,
     waku_store/common,
@@ -567,30 +571,27 @@ proc processInput(rfd: AsyncFD, rng: ref HmacDrbgContext) {.async.} =
   if conf.kadBootstrapNodes.len > 0:
     var kadBootstrapPeers: seq[(PeerId, seq[MultiAddress])]
     for nodeStr in conf.kadBootstrapNodes:
-      let (peerId, ma) = parseFullAddress(nodeStr).valueOr:
-        error "Failed to parse kademlia bootstrap node", node = nodeStr, error = error
-        continue
+      let (peerId, ma) = block:
+        parseFullAddress(nodeStr).isOkOr:
+          error "Failed to parse kademlia bootstrap node", node = nodeStr, error
+          continue
+
       kadBootstrapPeers.add((peerId, @[ma]))
 
     if kadBootstrapPeers.len > 0:
-      node.wakuKademlia = WakuKademlia.new(
-        node.switch,
-        ExtendedServiceDiscoveryParams(
+      node.mountKademlia(
+        KademliaDiscoveryConf(
           bootstrapNodes: kadBootstrapPeers,
-          mixPubKey: some(mixPubKey),
-          advertiseMix: false,
-        ),
-        node.peerManager,
-        rng = libp2p_rng.newBearSslRng(node.rng),
-        getMixNodePoolSize = proc(): int {.gcsafe, raises: [].} =
-          if node.wakuMix.isNil():
-            0
-          else:
-            node.getMixNodePoolSize(),
-        isNodeStarted = proc(): bool {.gcsafe, raises: [].} =
-          node.started,
-      ).valueOr:
-        error "failed to setup kademlia discovery", error = error
+          servicesToDiscover: @[MixProtocolID],
+          randomLookupInterval: chronos.seconds(60),
+          serviceLookupInterval: chronos.seconds(60),
+          kadDhtConfig: KadDHTConfig.new(),
+          discoConfig: sd_types.ServiceDiscoveryConfig.new(),
+          clientMode: false,
+          xprPublishing: true,
+        )
+      ).isOkOr:
+        error "failed to setup service discovery", error = error
         quit(QuitFailure)
 
   #await node.mountRendezvousClient(conf.clusterId)
@@ -602,10 +603,6 @@ proc processInput(rfd: AsyncFD, rng: ref HmacDrbgContext) {.async.} =
   await node.start()
 
   node.peerManager.start()
-  if not node.wakuKademlia.isNil():
-    (await node.wakuKademlia.start(minMixPeers = MinMixNodePoolSize)).isOkOr:
-      error "failed to start kademlia discovery", error = error
-      quit(QuitFailure)
 
   await node.mountLibp2pPing()
   #await node.mountPeerExchangeClient()

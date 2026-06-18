@@ -384,6 +384,31 @@ proc mountMix*(
 
   return ok()
 
+proc mountKademlia*(
+    node: WakuNode, config: KademliaDiscoveryConf
+): Result[void, string] =
+  if not node.wakuKademlia.isNil():
+    return err("WakuKademlia already mounted, skipping")
+
+  let wk = WakuKademlia.new(
+    node.switch, node.peerManager, config.bootstrapNodes, config.servicesToAdvertise,
+    config.servicesToDiscover, config.randomLookupInterval,
+    config.serviceLookupInterval, node.rng, config.kadDhtConfig, config.discoConfig,
+    config.clientMode, config.xprPublishing,
+  ).valueOr:
+    return err("failed to create service discovery: " & error)
+
+  node.wakuKademlia = wk
+
+  let mountRes = catch:
+    node.switch.mount(wk.protocol)
+  mountRes.isOkOr:
+    return err("failed to mount service discovery: " & error.msg)
+
+  return ok()
+
+## Waku Sync
+
 proc mountStoreSync*(
     node: WakuNode,
     cluster: uint16,
@@ -707,6 +732,9 @@ proc start*(node: WakuNode) {.async.} =
 
   node.started = true
 
+  if not node.wakuKademlia.isNil():
+    await node.wakuKademlia.start()
+
   if not node.wakuFilterClient.isNil():
     node.wakuFilterClient.registerPushHandler(
       proc(pubsubTopic: PubsubTopic, msg: WakuMessage) {.async, gcsafe.} =
@@ -733,6 +761,9 @@ proc stop*(node: WakuNode) {.async.} =
 
   node.stopProvidersAndListeners()
 
+  if not node.wakuKademlia.isNil():
+    await node.wakuKademlia.stop()
+
   ## NOTE: This will dispatch gossipsub stop to the WakuRelay.stop method override
   await node.switch.stop()
 
@@ -754,9 +785,6 @@ proc stop*(node: WakuNode) {.async.} =
   if not node.wakuPeerExchangeClient.isNil() and
       not node.wakuPeerExchangeClient.pxLoopHandle.isNil():
     await node.wakuPeerExchangeClient.pxLoopHandle.cancelAndWait()
-
-  if not node.wakuKademlia.isNil():
-    await node.wakuKademlia.stop()
 
   if not node.wakuRendezvousClient.isNil():
     await node.wakuRendezvousClient.stopWait()

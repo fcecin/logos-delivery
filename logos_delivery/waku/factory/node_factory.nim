@@ -10,6 +10,8 @@ import
   libp2p/crypto/crypto,
   libp2p/crypto/curve25519,
   libp2p/crypto/rng as libp2p_rng,
+  libp2p/extended_peer_record,
+  libp2p_mix/mix_protocol,
   bearssl/rand
 
 import
@@ -44,7 +46,8 @@ import
   ../node/peer_manager/peer_store/waku_peer_storage,
   ../node/peer_manager/peer_store/migrations as peer_store_sqlite_migrations,
   ../waku_lightpush_legacy/common,
-  ../common/rate_limit/setting
+  ../common/rate_limit/setting,
+  ../events/discovery_events
 
 ## Peer persistence
 
@@ -405,32 +408,29 @@ proc setupProtocols(
         if mixConf.gifterNode.len > 0:
           info "Gifter client mode: registration deferred to startNode()"
 
-  # Setup extended kademlia discovery
+  # Setup service discovery
   if conf.kademliaDiscoveryConf.isSome():
-    let mixPubKey =
-      if conf.mixConf.isSome():
-        some(conf.mixConf.get().mixPubKey)
-      else:
-        none(Curve25519Key)
+    var kadConf = conf.kademliaDiscoveryConf.get()
 
-    node.wakuKademlia = WakuKademlia.new(
-      node.switch,
-      ExtendedServiceDiscoveryParams(
-        bootstrapNodes: conf.kademliaDiscoveryConf.get().bootstrapNodes,
-        mixPubKey: mixPubKey,
-        advertiseMix: conf.mixConf.isSome(),
-      ),
-      node.peerManager,
-      rng = libp2p_rng.newBearSslRng(node.rng),
-      getMixNodePoolSize = proc(): int {.gcsafe, raises: [].} =
-        if node.wakuMix.isNil():
-          0
-        else:
-          node.getMixNodePoolSize(),
-      isNodeStarted = proc(): bool {.gcsafe, raises: [].} =
-        node.started,
-    ).valueOr:
-      return err("failed to setup kademlia discovery: " & error)
+    if conf.mixConf.isSome():
+      let mixService =
+        ServiceInfo(id: MixProtocolID, data: @(conf.mixConf.get().mixPubKey))
+      kadConf.servicesToAdvertise.incl(mixService)
+      kadConf.servicesToDiscover.incl(mixService.id)
+
+    node.mountKademlia(kadConf).isOkOr:
+      return err("failed to setup service discovery: " & error)
+
+    # Register ServicePeersRequest provider
+    ServicePeersRequest.setProvider(
+      node.brokerCtx,
+      proc(serviceId: string): Future[Result[ServicePeersRequest, string]] {.async.} =
+        let peers = (await node.wakuKademlia.lookupServicePeers(serviceId)).valueOr:
+          return err("failed call to lookupServicePeers: " & error)
+        return ok(ServicePeersRequest(serviceId: serviceId, peers: peers)),
+    ).isOkOr:
+      error "Can't set provider for ServicePeersRequest", error = error
+      return err("Can't set provider for ServicePeersRequest: " & error)
 
   if conf.storeServiceConf.isSome():
     let storeServiceConf = conf.storeServiceConf.get()

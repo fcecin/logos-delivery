@@ -1,10 +1,14 @@
 import
   std/[net, options, strutils],
   chronicles,
+  chronos,
   libp2p/crypto/crypto,
   libp2p/multiaddress,
   libp2p/crypto/curve25519,
   libp2p/peerid,
+  libp2p/extended_peer_record,
+  libp2p/protocols/kademlia/types,
+  libp2p/protocols/service_discovery/types as sd_types,
   secp256k1,
   results
 
@@ -12,12 +16,14 @@ import
   ../waku_rln_relay/rln_relay,
   ../rest_api/endpoint/builder,
   ../discovery/waku_discv5,
+  ../discovery/waku_kademlia,
   ../node/waku_metrics,
   ../common/logging,
   ../common/rate_limit/setting,
   ../waku_enr/capabilities,
   ./networks_config,
-  ../waku_mix
+  ../waku_mix,
+  ./conf_builder/kademlia_discovery_conf_builder
 
 export RlnRelayConf, RlnRelayCreds, RestServerConf, Discv5Conf, MetricsServerConf
 
@@ -59,10 +65,6 @@ type MixConf* = ref object
   gifterNode*: string
   gifterAllowlist*: string
   gifterAuthKey*: string
-
-type KademliaDiscoveryConf* = object
-  bootstrapNodes*: seq[(PeerId, seq[MultiAddress])]
-    ## Bootstrap nodes for extended kademlia discovery.
 
 type StoreServiceConf* {.requiresInit.} = object
   dbMigration*: bool
