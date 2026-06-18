@@ -202,7 +202,9 @@ proc joinRoom(c: Chat, roomName: string) {.async.} =
     discard c.node.unsubscribe((kind: PubsubSub, topic: c.currentPubsubTopic))
     if not c.node.wakuKademlia.isNil():
       c.node.wakuKademlia.removeServiceToDiscover(c.currentPubsubTopic)
-      await c.node.wakuKademlia.removeServiceToAdvertise(c.currentPubsubTopic)
+      await c.node.wakuKademlia.removeServiceToAdvertise(
+        ServiceInfo(id: c.currentPubsubTopic, data: @[])
+      )
 
   c.currentPubsubTopic = roomName
 
@@ -353,8 +355,6 @@ proc processInput(rfd: AsyncFD, rng: crypto.Rng) {.async.} =
   node.mountKademlia(
     KademliaDiscoveryConf(
       bootstrapNodes: kadBootstrapPeers,
-      servicesToAdvertise: @[],
-      servicesToDiscover: @[],
       randomLookupInterval: chronos.seconds(60),
       serviceLookupInterval: chronos.seconds(60),
       kadDhtConfig: KadDHTConfig.new(),
