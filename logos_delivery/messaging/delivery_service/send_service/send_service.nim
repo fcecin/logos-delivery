@@ -5,6 +5,7 @@ import logos_delivery/waku/compat/option_valueor
 import std/[sequtils, tables, options, typetraits]
 import chronos, chronicles, libp2p/utility
 import brokers/broker_context
+import logos_delivery/api/messaging_client_interface
 import
   ./[send_processor, relay_processor, lightpush_processor, delivery_task],
   logos_delivery/waku/[
@@ -170,14 +171,14 @@ proc checkStoredMessages(self: SendService) {.async.} =
 
   await self.checkMsgsInStore(tasksToValidate)
 
-proc reportTaskResult(self: SendService, task: DeliveryTask) =
+proc reportTaskResult(self: SendService, task: DeliveryTask) {.async.} =
   case task.state
   of DeliveryState.SuccessfullyPropagated:
     # TODO: in case of unable to strore check messages shall we report success instead?
     if not task.propagateEventEmitted:
       info "Message successfully propagated",
         requestId = task.requestId, msgHash = task.msgHash.to0xHex()
-      MessagePropagatedEvent.emit(
+      await MessagePropagatedEvent.emit(
         self.brokerCtx, task.requestId, task.msgHash.to0xHex()
       )
       task.propagateEventEmitted = true
@@ -185,14 +186,14 @@ proc reportTaskResult(self: SendService, task: DeliveryTask) =
   of DeliveryState.SuccessfullyValidated:
     info "Message successfully sent",
       requestId = task.requestId, msgHash = task.msgHash.to0xHex()
-    MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+    await MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
     return
   of DeliveryState.FailedToDeliver:
     error "Failed to send message",
       requestId = task.requestId,
       msgHash = task.msgHash.to0xHex(),
       error = task.errorDesc
-    MessageErrorEvent.emit(
+    await MessageErrorEvent.emit(
       self.brokerCtx, task.requestId, task.msgHash.to0xHex(), task.errorDesc
     )
     return
@@ -207,15 +208,16 @@ proc reportTaskResult(self: SendService, task: DeliveryTask) =
       error = "Message too old",
       age = task.messageAge()
     task.state = DeliveryState.FailedToDeliver
-    MessageErrorEvent.emit(
+    await MessageErrorEvent.emit(
       self.brokerCtx,
       task.requestId,
       task.msgHash.to0xHex(),
       "Unable to send within retry time window",
     )
 
-proc evaluateAndCleanUp(self: SendService) =
-  self.taskCache.forEach(self.reportTaskResult(it))
+proc evaluateAndCleanUp(self: SendService) {.async.} =
+  for task in self.taskCache:
+    await self.reportTaskResult(task)
   self.taskCache.keepItIf(
     it.state != DeliveryState.SuccessfullyValidated and
       it.state != DeliveryState.FailedToDeliver
@@ -241,7 +243,7 @@ proc serviceLoop(self: SendService) {.async.} =
   while true:
     await self.trySendMessages()
     await self.checkStoredMessages()
-    self.evaluateAndCleanUp()
+    await self.evaluateAndCleanUp()
     ## TODO: add circuit breaker to avoid infinite looping in case of persistent failures
     ## Use OnlineStateChange observers to pause/resume the loop
     await sleepAsync(ServiceLoopInterval)
@@ -264,6 +266,6 @@ proc send*(self: SendService, task: DeliveryTask) {.async.} =
       contentTopic = task.msg.contentTopic, error = error
 
   await self.sendProcessor.process(task)
-  reportTaskResult(self, task)
+  await reportTaskResult(self, task)
   if task.state != DeliveryState.FailedToDeliver:
     self.addTask(task)

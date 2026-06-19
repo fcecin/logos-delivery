@@ -1,31 +1,10 @@
 import brokers/event_broker
 import logos_delivery/waku/[api/types, waku_core/message, waku_core/topics]
-export types
-
-EventBroker:
-  # Event emitted when a message is sent to the network
-  type MessageSentEvent* = object
-    requestId*: RequestId
-    messageHash*: string
-
-EventBroker:
-  # Event emitted when a message send operation fails
-  type MessageErrorEvent* = object
-    requestId*: RequestId
-    messageHash*: string
-    error*: string
-
-EventBroker:
-  # Confirmation that a message has been correctly delivered to some neighbouring nodes.
-  type MessagePropagatedEvent* = object
-    requestId*: RequestId
-    messageHash*: string
-
-EventBroker:
-  # Event emitted when a message is received via Waku
-  type MessageReceivedEvent* = object
-    messageHash*: string
-    message*: WakuMessage
+from logos_delivery/api/messaging_client_interface import
+  MessageSentEvent, MessageErrorEvent, MessagePropagatedEvent, MessageReceivedEvent
+export
+  types, MessageSentEvent, MessageErrorEvent, MessagePropagatedEvent,
+  MessageReceivedEvent
 
 EventBroker:
   # Internal event emitted when a message arrives from the network via any protocol

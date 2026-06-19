@@ -6,6 +6,7 @@ import logos_delivery/waku/compat/option_valueor
 import std/[tables, sequtils, options, sets]
 import chronos, chronicles, libp2p/utility
 import brokers/broker_context
+import logos_delivery/api/messaging_client_interface
 import
   logos_delivery/waku/[
     waku_core,
@@ -78,7 +79,7 @@ proc getMissingMsgsFromStore(
 
 proc processIncomingMessage(
     self: RecvService, pubsubTopic: string, message: WakuMessage
-): bool =
+): Future[bool] {.async.} =
   ## Return false if the incoming message is from a non-subscribed topic,
   ## or if the message is a duplicate (recently-seen). Otherwise, save it as
   ## recently-seen, emit a MessageReceivedEvent, and return true.
@@ -100,7 +101,7 @@ proc processIncomingMessage(
 
   let rxMsg = RecvMessage(msgHash: msgHash, rxTime: message.timestamp)
   self.recentReceivedMsgs.add(rxMsg)
-  MessageReceivedEvent.emit(self.brokerCtx, msgHash.to0xHex(), message)
+  await MessageReceivedEvent.emit(self.brokerCtx, msgHash.to0xHex(), message)
   return true
 
 proc checkStore*(self: RecvService) {.async.} =
@@ -143,7 +144,7 @@ proc checkStore*(self: RecvService) {.async.} =
       let missingMsgsRet = await self.getMissingMsgsFromStore(missedHashes)
       if missingMsgsRet.isOk():
         for msgTuple in missingMsgsRet.get():
-          if self.processIncomingMessage(msgTuple.pubsubTopic, msgTuple.msg):
+          if await self.processIncomingMessage(msgTuple.pubsubTopic, msgTuple.msg):
             info "recv service store-recovered message",
               msg_hash = shortLog(msgTuple.hash), pubsubTopic = msgTuple.pubsubTopic
       else:

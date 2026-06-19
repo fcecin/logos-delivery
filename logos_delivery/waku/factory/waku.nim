@@ -384,35 +384,6 @@ proc startDnsDiscoveryRetryLoop(waku: Waku): Future[void] {.async.} =
       error "failed to connect to dynamic bootstrap nodes: " & getCurrentExceptionMsg()
     return
 
-proc mountMessagingClient*(waku: Waku): Result[void, string] =
-  if not waku.messagingClient.isNil():
-    return err("messaging client already mounted")
-  if waku.node.started:
-    return err("cannot mount messaging client on a started node")
-  waku.messagingClient = MessagingClient.new(waku.conf.p2pReliability, waku.node).valueOr:
-    return err("could not create messaging client: " & $error)
-  return ok()
-
-proc mountReliableChannelManager*(waku: Waku): Result[void, string] =
-  if not waku.reliableChannelManager.isNil():
-    return err("reliable channel manager already mounted")
-  if waku.messagingClient.isNil():
-    return err("reliable channel manager requires a mounted messaging client")
-  if waku.node.started:
-    return err("cannot mount reliable channel manager on a started node")
-
-  let messagingClient = waku.messagingClient
-  let defaultSendHandler: SendHandler = proc(
-      envelope: MessageEnvelope
-  ): Future[Result[RequestId, string]] {.async: (raises: [CatchableError]), gcsafe.} =
-    return await messagingClient.send(envelope)
-
-  waku.reliableChannelManager = ReliableChannelManager.new(
-    messagingClient, defaultSendHandler, waku.brokerCtx
-  ).valueOr:
-    return err("could not create reliable channel manager: " & $error)
-  return ok()
-
 proc start*(waku: Waku): Future[Result[void, string]] {.async: (raises: []).} =
   if waku.node.started:
     warn "start: waku node already started"
