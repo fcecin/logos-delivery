@@ -13,8 +13,7 @@
 
 {.push raises: [].}
 
-import bearssl/rand, std/times, chronos
-import stew/byteutils
+import libp2p/crypto/crypto, std/times, chronos
 import std/hashes
 
 import
@@ -77,7 +76,7 @@ type
 
 ## ===== helpers =====
 ##
-proc new*(T: typedesc[RequestId], rng: ref HmacDrbgContext): T =
+proc new*(T: typedesc[RequestId], rng: crypto.Rng): T =
   ## Generate a new RequestId using the provided RNG.
   RequestId(request_utils.generateRequestId(rng))
 
@@ -91,10 +90,8 @@ proc hash*(r: RequestId): Hash =
   ## Allows `RequestId` to be used as a `Table` key.
   hash(string(r))
 
-proc generateRequestId*(rng: ref HmacDrbgContext): RequestId =
-  var bytes: array[10, byte]
-  hmacDrbgGenerate(rng[], bytes)
-  return RequestId(byteutils.toHex(bytes))
+proc generateRequestId*(rng: crypto.Rng): RequestId =
+  RequestId(request_utils.generateRequestId(rng))
 
 proc init*(
     T: type MessageEnvelope,

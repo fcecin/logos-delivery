@@ -140,7 +140,7 @@ BrokerImplement ReliableChannelManager of ReliableChannelManagerInterface:
     let chn = self.channels.getOrDefault(channelId)
     if chn.isNil():
       return err("unknown channel: " & channelId)
-    return chn.send(appPayload, ephemeral)
+    return await chn.send(appPayload, ephemeral)
 
 ## Inbound messages are not handed to the manager by direct call. Each
 ## `ReliableChannel` installs its own `MessageReceivedEvent` listener

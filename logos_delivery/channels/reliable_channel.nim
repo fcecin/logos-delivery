@@ -22,7 +22,7 @@ import stew/byteutils
 import libp2p/crypto/crypto as libp2p_crypto
 
 import logos_delivery/api/messaging_client_interface as mci
-import logos_delivery/waku/api/types
+import logos_delivery/api/types
 import logos_delivery/waku/waku_core/topics
 
 import ./events
@@ -359,7 +359,7 @@ proc dispatchRepair(self: ReliableChannel, wire: seq[byte]) {.async: (raises: []
 
   let sendRes =
     try:
-      await self.sendHandler(envelope)
+      await self.messagingClient.send(envelope)
     except CatchableError as e:
       Result[RequestId, string].err("messaging send raised: " & e.msg)
   if sendRes.isErr():
@@ -425,9 +425,9 @@ proc new*(
   ## `Decrypt` request brokers, so the channel keeps no per-instance
   ## encryption state either.
   ##
-  ## `sendHandler` is the egress dispatch. The owning `ReliableChannelManager`
-  ## typically constructs it as a closure over `MessagingClient.send`. Tests
-  ## pass a fake to drive the send state machine without touching the network.
+  ## `messagingClient` is the egress dispatch — the channel calls
+  ## `messagingClient.send` to transmit. Tests pass a fake `MessagingClientInterface`
+  ## to drive the send state machine without touching the network.
   let chn = T(
     messagingClient: messagingClient,
     channelId: channelId,
