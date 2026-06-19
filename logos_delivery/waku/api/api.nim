@@ -6,10 +6,11 @@ import chronicles, chronos, libp2p/peerid, results
 import logos_delivery/waku/factory/waku
 import logos_delivery/messaging/messaging_client
 import logos_delivery/channels/reliable_channel_manager
-import logos_delivery/api/messaging_client_interface
-  # brings the interface `send` method into scope: the impl's `method send` in the
-  # BrokerImplement block is not exported, so the call below dispatches through the
-  # MessagingClientInterface method instead.
+import
+  logos_delivery/api/messaging_client_interface
+    # brings the interface `send` method into scope: the impl's `method send` in the
+    # BrokerImplement block is not exported, so the call below dispatches through the
+    # MessagingClientInterface method instead.
 import logos_delivery/waku/[requests/health_requests, waku_core, waku_node]
 import logos_delivery/messaging/delivery_service/send_service
 import logos_delivery/waku/node/subscription_manager
@@ -43,9 +44,8 @@ proc mountMessagingClient*(w: Waku): Result[void, string] =
   if not w.messagingClient.isNil():
     return ok()
 
-  w.messagingClient = MessagingClient.createUnderContext(
-    w.brokerCtx, w.conf.p2pReliability, w.node
-  )
+  w.messagingClient =
+    MessagingClient.createUnderContext(w.brokerCtx, w.conf.p2pReliability, w.node)
   return ok()
 
 # TODO workaround for legacy use. It will be removed as soon all usage goes through LogosDelivery.
