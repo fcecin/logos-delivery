@@ -101,7 +101,7 @@ proc processIncomingMessage(
 
   let rxMsg = RecvMessage(msgHash: msgHash, rxTime: message.timestamp)
   self.recentReceivedMsgs.add(rxMsg)
-  await MessageReceivedEvent.emit(self.brokerCtx, msgHash.to0xHex(), message)
+  MessageReceivedEvent.emit(self.brokerCtx, msgHash.to0xHex(), message)
   return true
 
 proc checkStore*(self: RecvService) {.async.} =

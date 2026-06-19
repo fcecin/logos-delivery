@@ -23,12 +23,16 @@ import logos_delivery/waku/persistency/sds_persistency
 import sds
 import snapshot_codec
 
+import logos_delivery/api/messaging_client_interface
+  # for the `Send` request broker — send-side tests mock its provider to
+  # intercept `messagingClient.send` without touching the network.
+
 const TestTimeout = chronos.seconds(15)
 
 proc createApiNodeConf(): WakuNodeConf =
   var conf = defaultWakuNodeConf().valueOr:
     raiseAssert error
-  conf.mode = cli_args.WakuMode.Core
+  conf.mode = some(cli_args.WakuMode.Core)
   conf.listenAddress = parseIpAddress("0.0.0.0")
   conf.tcpPort = Port(0)
   conf.discv5UdpPort = Port(0)
@@ -68,9 +72,11 @@ suite "Reliable Channel - ingress":
     ## plaintext anyway, but installing them is the documented setup.
     setNoopEncryption()
 
-    discard manager
-      .createReliableChannel(channelId, contentTopic, SdsParticipantID("local"))
-      .expect("createReliableChannel")
+    discard (
+      await manager.createReliableChannel(
+        channelId, contentTopic, SdsParticipantID("local")
+      )
+    ).expect("createReliableChannel")
 
     let received = newFuture[seq[byte]]("channel-message-received")
     discard ChannelMessageReceivedEvent
@@ -133,9 +139,11 @@ suite "Reliable Channel - ingress":
 
     setNoopEncryption()
 
-    discard manager
-      .createReliableChannel(channelId, contentTopic, SdsParticipantID("local"))
-      .expect("createReliableChannel")
+    discard (
+      await manager.createReliableChannel(
+        channelId, contentTopic, SdsParticipantID("local")
+      )
+    ).expect("createReliableChannel")
 
     var fired = false
     discard ChannelMessageReceivedEvent
@@ -193,17 +201,22 @@ suite "Reliable Channel - send state machine":
     setNoopEncryption()
 
     var sendCalls = 0
-    let fakeSend: SendHandler = proc(
-        env: MessageEnvelope
-    ): Future[Result[RequestId, string]] {.async: (raises: [CatchableError]), gcsafe.} =
-      sendCalls.inc
-      return ok(fakeMsgReqId)
+    ## Mock the messaging egress: override the `Send` provider the mounted
+    ## MessagingClient installed, so the channel's `messagingClient.send`
+    ## returns a canned RequestId without hitting the network.
+    Send.clearProvider(brokerCtx)
+    Send.setProvider(
+      brokerCtx,
+      proc(env: MessageEnvelope): Future[Result[RequestId, string]] {.async.} =
+        sendCalls.inc
+        return ok(fakeMsgReqId),
+    ).expect("set Send provider")
 
-    discard manager
-      .createReliableChannel(
-        channelId, contentTopic, SdsParticipantID("local"), sendHandler = fakeSend
+    discard (
+      await manager.createReliableChannel(
+        channelId, contentTopic, SdsParticipantID("local")
       )
-      .expect("createReliableChannel")
+    ).expect("createReliableChannel")
 
     let sentFut = newFuture[RequestId]("channel-sent")
     discard ChannelMessageSentEvent
@@ -216,7 +229,8 @@ suite "Reliable Channel - send state machine":
       )
       .expect("listen ChannelMessageSentEvent")
 
-    let channelReqId = (await manager.send(channelId, "hello".toBytes())).expect("send")
+    let channelReqId =
+      (await manager.sendOnChannel(channelId, "hello".toBytes(), false)).expect("send")
 
     let dispatchDeadline = Moment.now() + 1.seconds
     while Moment.now() < dispatchDeadline and sendCalls == 0:
@@ -260,18 +274,21 @@ suite "Reliable Channel - send state machine":
     setNoopEncryption()
 
     var msgReqIds: seq[RequestId]
-    let fakeSend: SendHandler = proc(
-        env: MessageEnvelope
-    ): Future[Result[RequestId, string]] {.async: (raises: [CatchableError]), gcsafe.} =
-      let id = RequestId("fake-msg-req-" & $(msgReqIds.len + 1))
-      msgReqIds.add(id)
-      return ok(id)
+    ## Mock the messaging egress (see the single-send case above).
+    Send.clearProvider(brokerCtx)
+    Send.setProvider(
+      brokerCtx,
+      proc(env: MessageEnvelope): Future[Result[RequestId, string]] {.async.} =
+        let id = RequestId("fake-msg-req-" & $(msgReqIds.len + 1))
+        msgReqIds.add(id)
+        return ok(id),
+    ).expect("set Send provider")
 
-    discard manager
-      .createReliableChannel(
-        channelId, contentTopic, SdsParticipantID("local"), sendHandler = fakeSend
+    discard (
+      await manager.createReliableChannel(
+        channelId, contentTopic, SdsParticipantID("local")
       )
-      .expect("createReliableChannel")
+    ).expect("createReliableChannel")
 
     let sentFut = newFuture[RequestId]("channel-sent")
     let erroredFut = newFuture[RequestId]("channel-errored")
@@ -295,9 +312,9 @@ suite "Reliable Channel - send state machine":
       .expect("listen ChannelMessageErrorEvent")
 
     let channelReqId1 =
-      (await manager.send(channelId, "first".toBytes())).expect("send 1")
+      (await manager.sendOnChannel(channelId, "first".toBytes(), false)).expect("send 1")
     let channelReqId2 =
-      (await manager.send(channelId, "second".toBytes())).expect("send 2")
+      (await manager.sendOnChannel(channelId, "second".toBytes(), false)).expect("send 2")
 
     let dispatchDeadline = Moment.now() + 1.seconds
     while Moment.now() < dispatchDeadline and msgReqIds.len < 2:
@@ -364,29 +381,33 @@ suite "Reliable Channel - send state machine":
 
     var msgReqIds: seq[RequestId]
     var sendsReturned = 0
-    let fakeSend: SendHandler = proc(
-        env: MessageEnvelope
-    ): Future[Result[RequestId, string]] {.async: (raises: [CatchableError]), gcsafe.} =
-      ## Call 2 fires the first segment's terminal event and then
-      ## yields, so the listener task runs while the second segment
-      ## is still mid-`await` in `onReadyToSend` — the exact race
-      ## window the regression test targets.
-      let id = RequestId("race-msg-req-" & $(msgReqIds.len + 1))
-      msgReqIds.add(id)
-      if msgReqIds.len == 2:
-        waku_message_events.MessageSentEvent.emit(
-          brokerCtx,
-          waku_message_events.MessageSentEvent(requestId: msgReqIds[0], messageHash: ""),
-        )
-        await sleepAsync(50.milliseconds)
-      sendsReturned.inc()
-      return ok(id)
+    ## Mock the messaging egress. Call 2 fires the first segment's terminal
+    ## event and then yields, so the listener task runs while the second
+    ## segment is still mid-`await` in `onReadyToSend` — the exact race
+    ## window the regression test targets.
+    Send.clearProvider(brokerCtx)
+    Send.setProvider(
+      brokerCtx,
+      proc(env: MessageEnvelope): Future[Result[RequestId, string]] {.async.} =
+        let id = RequestId("race-msg-req-" & $(msgReqIds.len + 1))
+        msgReqIds.add(id)
+        if msgReqIds.len == 2:
+          waku_message_events.MessageSentEvent.emit(
+            brokerCtx,
+            waku_message_events.MessageSentEvent(
+              requestId: msgReqIds[0], messageHash: ""
+            ),
+          )
+          await sleepAsync(50.milliseconds)
+        sendsReturned.inc()
+        return ok(id),
+    ).expect("set Send provider")
 
-    discard manager
-      .createReliableChannel(
-        channelId, contentTopic, SdsParticipantID("local"), sendHandler = fakeSend
+    discard (
+      await manager.createReliableChannel(
+        channelId, contentTopic, SdsParticipantID("local")
       )
-      .expect("createReliableChannel")
+    ).expect("createReliableChannel")
 
     var finalisedReqIds: seq[RequestId]
     let bothFinalised = newFuture[void]("both-finalised")
@@ -403,7 +424,7 @@ suite "Reliable Channel - send state machine":
       .expect("listen ChannelMessageSentEvent")
 
     let channelReqId1 =
-      (await manager.send(channelId, "first".toBytes())).expect("send 1")
+      (await manager.sendOnChannel(channelId, "first".toBytes(), false)).expect("send 1")
 
     ## Drain the first segment fully before queueing the second, so
     ## the rate-limit FIFO between sibling sends isn't itself under
@@ -414,9 +435,9 @@ suite "Reliable Channel - send state machine":
     check msgReqIds.len == 1
 
     let channelReqId2 =
-      (await manager.send(channelId, "second".toBytes())).expect("send 2")
+      (await manager.sendOnChannel(channelId, "second".toBytes(), false)).expect("send 2")
 
-    ## Wait until `fakeSend(m2)` has fully returned and yield once
+    ## Wait until `sendOnChannel(m2)` has fully returned and yield once
     ## more so `onReadyToSend`'s post-await continuation gets a chance
     ## to register `id2` in `inflightMessagingIds` before we emit its
     ## terminal event.
@@ -480,7 +501,7 @@ suite "Reliable Channel - SDS persistence":
       )
       .expect("createReliableChannel")
 
-    discard (await manager.send(channelId, "persist me".toBytes())).expect("send")
+    discard (await manager.sendOnChannel(channelId, "persist me".toBytes(), false)).expect("send")
 
     ## Same handle the channel layer writes through (`openJob` is idempotent).
     let job = persistency.openJob("sds").expect("openJob sds")
@@ -850,7 +871,7 @@ suite "Reliable Channel - SDS protocol semantics":
     )
     await sleepAsync(100.milliseconds)
 
-    discard (await manager.send(channelId, "reply".toBytes())).expect("send")
+    discard (await manager.sendOnChannel(channelId, "reply".toBytes(), false)).expect("send")
     var deadline = Moment.now() + 2.seconds
     while Moment.now() < deadline and capturedWires.len < 1:
       await sleepAsync(5.milliseconds)
@@ -902,7 +923,7 @@ suite "Reliable Channel - SDS protocol semantics":
       )
       .expect("createReliableChannel")
 
-    discard (await manager.send(channelId, "needs ack".toBytes())).expect("send")
+    discard (await manager.sendOnChannel(channelId, "needs ack".toBytes(), false)).expect("send")
     var deadline = Moment.now() + 2.seconds
     while Moment.now() < deadline and capturedWires.len < 1:
       await sleepAsync(5.milliseconds)
@@ -1156,8 +1177,8 @@ suite "Reliable Channel - SDS protocol semantics":
       .expect("listen ChannelMessageReceivedEvent")
 
     ## Send side: the same payload twice must produce two distinct ids.
-    discard (await manager.send(channelId, appPayload)).expect("send 1")
-    discard (await manager.send(channelId, appPayload)).expect("send 2")
+    discard (await manager.sendOnChannel(channelId, appPayload, false)).expect("send 1")
+    discard (await manager.sendOnChannel(channelId, appPayload, false)).expect("send 2")
     var deadline = Moment.now() + 2.seconds
     while Moment.now() < deadline and capturedWires.len < 2:
       await sleepAsync(5.milliseconds)
@@ -1197,7 +1218,7 @@ suite "Reliable Channel - SDS protocol semantics":
       waku.mountReliableChannelManager().expect("mountReliableChannelManager")
       manager = waku.reliableChannelManager
 
-    check (await manager.send(ChannelId("no-such-channel"), "x".toBytes())).isErr()
+    check (await manager.sendOnChannel(ChannelId("no-such-channel"), "x".toBytes(), false)).isErr()
     check (await manager.closeChannel(ChannelId("no-such-channel"))).isErr()
 
     (await waku.stop()).expect("stop")

@@ -9,7 +9,7 @@ import brokers/broker_interface
 import logos_delivery/api/types
 export types
 
-BrokerInterface(API, MessagingClientInterface):
+BrokerInterface(MessagingClientInterface):
   EventBroker:
     # Event emitted when a message is sent to the network
     type MessageSentEvent* = object

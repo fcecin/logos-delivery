@@ -452,7 +452,6 @@ endif
 
 # New single-root Logos Delivery library (BrokerFfiApi + all wrappers), built from
 # ./logos_delivery.nim. Single cross-platform task (no $(BUILD_COMMAND) suffix).
-# Set SRCGEN=1 to also dump the broker-generated sources (-d:brokerDebug).
 onelogosdelivery: | build-deps librln
 	$(NIMBLE) --verbose onelogosdelivery logos_delivery.nimble
 

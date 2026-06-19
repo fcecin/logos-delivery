@@ -140,14 +140,14 @@ proc tryFinalizeChannelReq(
   self.channelReqs.del(channelReqId)
 
   if state.failedCount > 0:
-    await ChannelMessageErrorEvent.emit(
+    ChannelMessageErrorEvent.emit(
       self.brokerCtx,
       channelId = self.channelId,
       requestId = channelReqId,
       error = "one or more segments failed",
     )
   else:
-    await ChannelMessageSentEvent.emit(
+    ChannelMessageSentEvent.emit(
       self.brokerCtx, channelId = self.channelId, requestId = channelReqId
     )
 
@@ -240,7 +240,7 @@ proc onReadyToSend(
     let encRes = await Encrypt.request(m)
     let encrypted = encRes.valueOr:
       ### TODO: Emitting of events from another layer is not completly ok to do so.
-      await mci.MessageErrorEvent.emit(
+      mci.MessageErrorEvent.emit(
         self.brokerCtx,
         requestId = channelReqId,
         messageHash = "",
@@ -272,7 +272,7 @@ proc onReadyToSend(
 
     let messagingReqId = sendRes.valueOr:
       ### TODO: Emitting of events from another layer is not completly ok to do so.
-      await mci.MessageErrorEvent.emit(
+      mci.MessageErrorEvent.emit(
         self.brokerCtx,
         requestId = channelReqId,
         messageHash = "",
@@ -382,7 +382,7 @@ proc onMessageReceived(
   let decRes = await Decrypt.request(payload)
   let plaintext = decRes.valueOr:
     ### TODO: Emitting of events from another layer is not completly ok to do so.
-    await mci.MessageErrorEvent.emit(
+    mci.MessageErrorEvent.emit(
       self.brokerCtx,
       requestId = RequestId(""),
       messageHash = messageHash,
@@ -397,7 +397,7 @@ proc onMessageReceived(
   ## marker/contentTopic filter already ran, so surface it as an error event
   ## rather than dropping it silently.
   let deliverable = (await self.sdsHandler.handleIncoming(plaintextBytes)).valueOr:
-    await mci.MessageErrorEvent.emit(
+    mci.MessageErrorEvent.emit(
       self.brokerCtx,
       requestId = RequestId(""),
       messageHash = messageHash,

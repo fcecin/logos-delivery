@@ -178,7 +178,7 @@ proc reportTaskResult(self: SendService, task: DeliveryTask) {.async.} =
     if not task.propagateEventEmitted:
       info "Message successfully propagated",
         requestId = task.requestId, msgHash = task.msgHash.to0xHex()
-      await MessagePropagatedEvent.emit(
+      MessagePropagatedEvent.emit(
         self.brokerCtx, task.requestId, task.msgHash.to0xHex()
       )
       task.propagateEventEmitted = true
@@ -186,14 +186,14 @@ proc reportTaskResult(self: SendService, task: DeliveryTask) {.async.} =
   of DeliveryState.SuccessfullyValidated:
     info "Message successfully sent",
       requestId = task.requestId, msgHash = task.msgHash.to0xHex()
-    await MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+    MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
     return
   of DeliveryState.FailedToDeliver:
     error "Failed to send message",
       requestId = task.requestId,
       msgHash = task.msgHash.to0xHex(),
       error = task.errorDesc
-    await MessageErrorEvent.emit(
+    MessageErrorEvent.emit(
       self.brokerCtx, task.requestId, task.msgHash.to0xHex(), task.errorDesc
     )
     return
@@ -208,7 +208,7 @@ proc reportTaskResult(self: SendService, task: DeliveryTask) {.async.} =
       error = "Message too old",
       age = task.messageAge()
     task.state = DeliveryState.FailedToDeliver
-    await MessageErrorEvent.emit(
+    MessageErrorEvent.emit(
       self.brokerCtx,
       task.requestId,
       task.msgHash.to0xHex(),

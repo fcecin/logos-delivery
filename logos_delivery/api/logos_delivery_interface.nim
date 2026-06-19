@@ -15,7 +15,7 @@ import ./reliable_channel_manager_interface as ireliablechannelmanager_iface
 
 export ikernel_iface, imessagingclient_iface, ireliablechannelmanager_iface
 
-BrokerInterface(API, LogosDeliveryInterface):
+BrokerInterface(LogosDeliveryInterface):
   EventBroker:
     type ConnectionStatusChangeEvent* = object
       connectionStatus*: ConnectionStatus

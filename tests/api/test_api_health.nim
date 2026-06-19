@@ -31,28 +31,28 @@ proc waitForConnectionStatus(
 ) {.async.} =
   var future = newFuture[void]("waitForConnectionStatus")
 
-  let handler: EventConnectionStatusChangeListenerProc = proc(
-      e: ConnectionStatusChangeEvent
+  let handler: health_events.ConnectionStatusChangeEventListenerProc = proc(
+      e: health_events.ConnectionStatusChangeEvent
   ) {.async: (raises: []), gcsafe.} =
     if not future.finished:
       if e.connectionStatus == expected:
         future.complete()
 
-  let handle = ConnectionStatusChangeEvent.listen(brokerCtx, handler).valueOr:
+  let handle = health_events.ConnectionStatusChangeEvent.listen(brokerCtx, handler).valueOr:
     raiseAssert error
 
   try:
     if not await future.withTimeout(TestTimeout):
       raiseAssert "Timeout waiting for status: " & $expected
   finally:
-    await ConnectionStatusChangeEvent.dropListener(brokerCtx, handle)
+    await health_events.ConnectionStatusChangeEvent.dropListener(brokerCtx, handle)
 
 proc waitForShardHealthy(
     brokerCtx: BrokerContext
 ): Future[ShardTopicHealthChangeEvent] {.async.} =
   var future = newFuture[ShardTopicHealthChangeEvent]("waitForShardHealthy")
 
-  let handler: EventShardTopicHealthChangeListenerProc = proc(
+  let handler: ShardTopicHealthChangeEventListenerProc = proc(
       e: ShardTopicHealthChangeEvent
   ) {.async: (raises: []), gcsafe.} =
     if not future.finished:

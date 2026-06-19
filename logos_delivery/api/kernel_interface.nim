@@ -23,7 +23,7 @@ import
 
 export types
 
-BrokerInterface(API, KernelInterface):
+BrokerInterface(KernelInterface):
   EventBroker:
     type ReceivedMessage = object
       ## Inbound relay/filter message delivery (replaces set_event_callback).

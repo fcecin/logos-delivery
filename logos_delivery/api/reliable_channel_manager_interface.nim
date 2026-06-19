@@ -8,7 +8,7 @@ import brokers/broker_interface
 import logos_delivery/api/types
 export types
 
-BrokerInterface(API, ReliableChannelManagerInterface):
+BrokerInterface(ReliableChannelManagerInterface):
   EventBroker:
     type ChannelMessageReceivedEvent* = object
       channelId*: ChannelId

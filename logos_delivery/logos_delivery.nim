@@ -27,7 +27,6 @@ import
 import tools/confutils/[cli_args, config_option_meta] # WakuNodeConf (+ .load)
 
 type LogosDelivery* = ref object of LogosDeliveryInterface
-  kernelI: KernelInterface ## lazily-built sub-interface caches (keep them reachable)
   waku: Waku ## the owned node facade (built in initializeRequest)
   messagingClient: MessagingClient
   reliableChannelManager: ReliableChannelManager
@@ -42,25 +41,27 @@ proc createNode(conf: WakuNodeConf): Future[Result[Waku, string]] {.async.} =
     return err("Failed to handle the configuration: " & error)
 
   ## We are not defining app callbacks at node creation
-  let wakuRes = (await Waku.new(wakuConf)).valueOr:
+  let wakuRes = (await Waku.createUnderContext(globalBrokerContext(), wakuConf)).valueOr:
     error "waku initialization failed", error = error
     return err("Failed setting up Waku: " & $error)
 
   return ok(wakuRes)
 
 proc initMessagingClient(self: LogosDelivery): Result[MessagingClient, string] =
-  let subCtx = newInstanceCtx(self.brokerCtx)
   return ok(
     MessagingClient.createUnderContext(
-      subCtx, self.waku.conf.p2pReliability, self.waku.node
+      globalBrokerContext(), self.waku.conf.p2pReliability, self.waku.node
     )
   )
 
 proc initReliableChannelManager(
     self: LogosDelivery
 ): Result[ReliableChannelManager, string] =
-  let subCtx = newInstanceCtx(self.brokerCtx)
-  return ok(ReliableChannelManager.createUnderContext(subCtx, self.messagingClient))
+  return ok(
+    ReliableChannelManager.createUnderContext(
+      globalBrokerContext(), self.messagingClient
+    )
+  )
 
 BrokerImplement LogosDelivery of LogosDeliveryInterface:
   method kernel(
@@ -69,7 +70,7 @@ BrokerImplement LogosDelivery of LogosDeliveryInterface:
     if self.waku.isNil():
       return err("not initialized; call startAsClient first")
 
-    return err("kernel not yet implemented")
+    return ok(KernelInterface(self.waku))
 
   method messaging(
       self: LogosDelivery
@@ -201,15 +202,8 @@ BrokerImplement LogosDelivery of LogosDeliveryInterface:
     let asString = pretty(jsonNode)
     return ok(pretty(jsonNode))
 
-# FFI factory registration
-proc setupProviders(ctx: BrokerContext): Result[void, string] =
-  ## Called by registerBrokerLibrary on the processing thread: construct the
-  ## main facade impl adopting the FFI context, wiring its providers under `ctx`.
-  discard LogosDelivery.createUnderContext(ctx)
-  ok()
-
 # DI factory registration: non ffi - nim lib users needs it.
 LogosDeliveryInterface.provideFactory(
   proc(): Result[LogosDeliveryInterface, string] {.gcsafe.} =
-    ok(LogosDeliveryInterface(LogosDelivery.createUnderContext(NewBrokerContext())))
+    ok(LogosDeliveryInterface(LogosDelivery.createUnderContext(globalBrokerContext())))
 )

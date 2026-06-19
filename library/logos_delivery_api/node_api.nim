@@ -1,6 +1,7 @@
 import std/json
 import chronos, chronicles, results, ffi
 import
+  logos_delivery/api/messaging_client_interface,
   logos_delivery/waku/factory/waku,
   logos_delivery/waku/node/waku_node,
   logos_delivery/waku/api/[api, types],
