@@ -6,7 +6,7 @@ when not (compileOption("threads")):
 
 {.push raises: [].}
 
-import std/[strformat, strutils, times, options, random, sequtils]
+import std/[strformat, strutils, times, options, random, sequtils, sets]
 import
   confutils,
   chronicles,
@@ -571,18 +571,16 @@ proc processInput(rfd: AsyncFD, rng: ref HmacDrbgContext) {.async.} =
   if conf.kadBootstrapNodes.len > 0:
     var kadBootstrapPeers: seq[(PeerId, seq[MultiAddress])]
     for nodeStr in conf.kadBootstrapNodes:
-      let (peerId, ma) = block:
-        parseFullAddress(nodeStr).isOkOr:
-          error "Failed to parse kademlia bootstrap node", node = nodeStr, error
-          continue
-
+      let (peerId, ma) = parseFullAddress(nodeStr).valueOr:
+        error "Failed to parse kademlia bootstrap node", node = nodeStr, error = error
+        continue
       kadBootstrapPeers.add((peerId, @[ma]))
 
     if kadBootstrapPeers.len > 0:
       node.mountKademlia(
         KademliaDiscoveryConf(
           bootstrapNodes: kadBootstrapPeers,
-          servicesToDiscover: @[MixProtocolID],
+          servicesToDiscover: toHashSet([MixProtocolID]),
           randomLookupInterval: chronos.seconds(60),
           serviceLookupInterval: chronos.seconds(60),
           kadDhtConfig: KadDHTConfig.new(),

@@ -876,11 +876,6 @@ proc startNode*(
   if conf.relay:
     node.peerManager.start()
 
-  if not node.wakuKademlia.isNil():
-    let minMixPeers = if conf.mixConf.isSome(): 4 else: 0
-    (await node.wakuKademlia.start(minMixPeers = minMixPeers)).isOkOr:
-      return err("failed to start kademlia discovery: " & error)
-
   # Re-publish gossipsub trigger after switch + kademlia are up. The dummy
   # publish in WakuMix.start() fires too early in LEZ mode (0 peers on topic),
   # so SUBSCRIBE messages never propagate without this second publish.

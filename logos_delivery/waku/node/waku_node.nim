@@ -13,6 +13,7 @@ import
   eth/p2p/discoveryv5/enr,
   libp2p/crypto/crypto,
   libp2p/crypto/curve25519,
+  libp2p/crypto/rng as libp2p_rng,
   libp2p/[multiaddress, multicodec],
   libp2p/protocols/ping,
   libp2p/protocols/pubsub/gossipsub,
@@ -393,7 +394,8 @@ proc mountKademlia*(
   let wk = WakuKademlia.new(
     node.switch, node.peerManager, config.bootstrapNodes, config.servicesToAdvertise,
     config.servicesToDiscover, config.randomLookupInterval,
-    config.serviceLookupInterval, node.rng, config.kadDhtConfig, config.discoConfig,
+    config.serviceLookupInterval, libp2p_rng.newBearSslRng(node.rng),
+    config.kadDhtConfig, config.discoConfig,
     config.clientMode, config.xprPublishing,
   ).valueOr:
     return err("failed to create service discovery: " & error)

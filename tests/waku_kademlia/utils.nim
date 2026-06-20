@@ -6,6 +6,7 @@ import libp2p/[peerid, multiaddress, switch]
 import libp2p/extended_peer_record
 import libp2p/protocols/service_discovery/types as sd_types
 import libp2p/crypto/crypto as libp2p_keys
+import libp2p/crypto/rng as libp2p_rng
 
 import
   logos_delivery/waku/discovery/waku_kademlia,
@@ -35,7 +36,7 @@ proc newTestKademlia*(
       servicesToDiscover = toHashSet(servicesToDiscover),
       randomLookupInterval = randomLookupInterval,
       serviceLookupInterval = serviceLookupInterval,
-      rng = rng(),
+      rng = libp2p_rng.newBearSslRng(rng()),
       clientMode = clientMode,
       xprPublishing = xprPublishing,
     )

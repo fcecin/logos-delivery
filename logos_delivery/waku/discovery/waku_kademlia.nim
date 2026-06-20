@@ -1,4 +1,4 @@
-import logos_delivery/waku/compat/option_valueor
+import logos_delivery/waku/common/option_shims
 {.push raises: [].}
 
 import std/[options, sequtils, sets]
