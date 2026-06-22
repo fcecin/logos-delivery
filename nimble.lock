@@ -601,7 +601,7 @@
     "mix_rln_spam_protection": {
       "version": "#8f4db89b790c4e792836803d4d5611e46e1bfae2",
       "vcsRevision": "8f4db89b790c4e792836803d4d5611e46e1bfae2",
-      "url": "https://github.com/adklempner/mix-rln-spam-protection-plugin.git",
+      "url": "https://github.com/logos-co/mix-rln-spam-protection-plugin.git",
       "downloadMethod": "git",
       "dependencies": [
         "nim",
