@@ -696,9 +696,6 @@ proc start*(node: WakuNode) {.async.} =
   if not node.wakuRelay.isNil():
     await node.wakuRelay.start()
 
-  if not node.wakuMix.isNil():
-    await node.wakuMix.start()
-
   if not node.wakuMetadata.isNil():
     await node.wakuMetadata.start()
 
