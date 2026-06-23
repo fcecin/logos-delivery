@@ -13,9 +13,10 @@ import stew/byteutils
 
 import brokers/broker_context
 
+import logos_delivery/api/types
+import logos_delivery/api/reliable_cannel_manager_api
 import logos_delivery/waku/events/message_events as waku_message_events
 import logos_delivery/messaging/messaging_client
-import logos_delivery/api/types
 import logos_delivery/waku/waku_core/topics
 import logos_delivery/waku/persistency/sds_persistency
 
@@ -34,7 +35,7 @@ type
     ## channel API. Placeholder for now (segmentation / SDS / rate-limit defaults
     ## will move here in a follow-up PR); kept so each layer owns its own config.
 
-  ReliableChannelManager* = ref object
+  ReliableChannelManager* = ref object of IReliableChannelManager
     channels: Table[ChannelId, ReliableChannel]
     messagingClient: MessagingClient ## The channel layer chains onto messaging.
     sendHandler: SendHandler
@@ -94,13 +95,13 @@ proc sdsPersistence(): Option[Persistence] =
     return none(Persistence)
   return some(newSdsPersistence(job))
 
-proc createReliableChannel*(
+method createReliableChannel*(
     self: ReliableChannelManager,
     channelId: ChannelId,
     contentTopic: ContentTopic,
     senderId: SdsParticipantID,
     sendHandler: SendHandler = nil,
-): Result[ChannelId, string] =
+): Result[ChannelId, string] {.raises: [].} =
   ## Spec entry point. The `sendHandler` and `rng` the channel needs are
   ## sourced from the owning `ReliableChannelManager` rather than passed
   ## per call. Encryption is wired up through the `Encrypt`/`Decrypt`
@@ -146,7 +147,7 @@ proc createReliableChannel*(
   self.channels[channelId] = chn
   return ok(channelId)
 
-proc closeChannel*(
+method closeChannel*(
     self: ReliableChannelManager, channelId: ChannelId
 ): Future[Result[void, string]] {.async: (raises: []).} =
   ## Stops the channel's SDS loops and releases the channel. Persisted SDS
@@ -158,7 +159,7 @@ proc closeChannel*(
   await chn.stop()
   return ok()
 
-proc send*(
+method send*(
     self: ReliableChannelManager,
     channelId: ChannelId,
     appPayload: seq[byte],

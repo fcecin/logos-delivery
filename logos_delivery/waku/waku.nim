@@ -22,6 +22,7 @@ import
   metrics/chronos_httpserver,
   brokers/broker_context,
   logos_delivery/api/types,
+  logos_delivery/api/kernel_api,
   logos_delivery/waku/[
     waku_core,
     waku_node,
@@ -65,7 +66,7 @@ const git_version* {.strdefine.} = "n/a"
 
 const FilterOpTimeout = 5.seconds
 
-type Waku* = ref object
+type Waku* = ref object of IKernel
   stateInfo*: WakuStateInfo
   conf*: WakuConf
   rng*: crypto.Rng
@@ -577,29 +578,31 @@ proc stop*(waku: Waku): Future[Result[void, string]] {.async: (raises: []).} =
 ## Kernel API realization
 ##
 # --- topic construction ---
-proc buildContentTopic*(
+method buildContentTopic*(
     self: Waku, appName: string, appVersion: uint32, name: string, encoding: string
-): Future[Result[ContentTopic, string]] {.async.} =
+): Future[Result[ContentTopic, string]] {.async: (raises: []).} =
   try:
     return ok(ContentTopic(fmt"/{appName}/{appVersion}/{name}/{encoding}"))
   except CatchableError as e:
     return err(e.msg)
 
-proc buildPubsubTopic*(
+method buildPubsubTopic*(
     self: Waku, topicName: string
-): Future[Result[PubsubTopic, string]] {.async.} =
+): Future[Result[PubsubTopic, string]] {.async: (raises: []).} =
   try:
     return ok(PubsubTopic(fmt"/waku/2/{topicName}"))
   except CatchableError as e:
     return err(e.msg)
 
-proc defaultPubsubTopic*(self: Waku): Future[Result[PubsubTopic, string]] {.async.} =
+method defaultPubsubTopic*(
+    self: Waku
+): Future[Result[PubsubTopic, string]] {.async: (raises: []).} =
   return ok(DefaultPubsubTopic)
 
 # --- relay ---
-proc relayPublish*(
+method relayPublish*(
     self: Waku, pubsubTopic: PubsubTopic, message: WakuMessage, timeoutMs: uint32
-): Future[Result[int, string]] {.async.} =
+): Future[Result[int, string]] {.async: (raises: []).} =
   try:
     if self.node.wakuRelay.isNil():
       return err("relayPublish: WakuRelay not mounted")
@@ -611,9 +614,9 @@ proc relayPublish*(
   except CatchableError as e:
     return err(e.msg)
 
-proc relaySubscribe*(
+method relaySubscribe*(
     self: Waku, pubsubTopic: PubsubTopic
-): Future[Result[bool, string]] {.async.} =
+): Future[Result[bool, string]] {.async: (raises: []).} =
   try:
     if self.node.wakuRelay.isNil():
       return err("relaySubscribe: WakuRelay not mounted")
@@ -627,9 +630,9 @@ proc relaySubscribe*(
   except CatchableError as e:
     return err(e.msg)
 
-proc relayUnsubscribe*(
+method relayUnsubscribe*(
     self: Waku, pubsubTopic: PubsubTopic
-): Future[Result[bool, string]] {.async.} =
+): Future[Result[bool, string]] {.async: (raises: []).} =
   try:
     if self.node.wakuRelay.isNil():
       return err("relayUnsubscribe: WakuRelay not mounted")
@@ -641,9 +644,9 @@ proc relayUnsubscribe*(
   except CatchableError as e:
     return err(e.msg)
 
-proc relayAddProtectedShard*(
+method relayAddProtectedShard*(
     self: Waku, clusterId: uint16, shardId: uint16, publicKey: string
-): Future[Result[bool, string]] {.async.} =
+): Future[Result[bool, string]] {.async: (raises: []).} =
   try:
     if self.node.wakuRelay.isNil():
       return err("relayAddProtectedShard: WakuRelay not mounted")
@@ -657,9 +660,9 @@ proc relayAddProtectedShard*(
   except CatchableError as e:
     return err(e.msg)
 
-proc relayConnectedPeers*(
+method relayConnectedPeers*(
     self: Waku, pubsubTopic: PubsubTopic
-): Future[Result[seq[string], string]] {.async.} =
+): Future[Result[seq[string], string]] {.async: (raises: []).} =
   try:
     if self.node.wakuRelay.isNil():
       return err("relayConnectedPeers: WakuRelay not mounted")
@@ -671,9 +674,9 @@ proc relayConnectedPeers*(
   except CatchableError as e:
     return err(e.msg)
 
-proc relayPeersInMesh*(
+method relayPeersInMesh*(
     self: Waku, pubsubTopic: PubsubTopic
-): Future[Result[seq[string], string]] {.async.} =
+): Future[Result[seq[string], string]] {.async: (raises: []).} =
   try:
     if self.node.wakuRelay.isNil():
       return err("relayPeersInMesh: WakuRelay not mounted")
@@ -686,12 +689,12 @@ proc relayPeersInMesh*(
     return err(e.msg)
 
 # --- filter ---
-proc filterSubscribe*(
+method filterSubscribe*(
     self: Waku,
     pubsubTopic: Option[PubsubTopic],
     contentTopics: seq[ContentTopic],
     peer: string,
-): Future[Result[bool, string]] {.async.} =
+): Future[Result[bool, string]] {.async: (raises: []).} =
   try:
     if self.node.wakuFilterClient.isNil():
       return err("wakuFilterClient is not mounted")
@@ -706,12 +709,12 @@ proc filterSubscribe*(
   except CatchableError as e:
     return err(e.msg)
 
-proc filterUnsubscribe*(
+method filterUnsubscribe*(
     self: Waku,
     pubsubTopic: Option[PubsubTopic],
     contentTopics: seq[ContentTopic],
     peer: string,
-): Future[Result[bool, string]] {.async.} =
+): Future[Result[bool, string]] {.async: (raises: []).} =
   try:
     if self.node.wakuFilterClient.isNil():
       return err("wakuFilterClient is not mounted")
@@ -726,9 +729,9 @@ proc filterUnsubscribe*(
   except CatchableError as e:
     return err(e.msg)
 
-proc filterUnsubscribeAll*(
+method filterUnsubscribeAll*(
     self: Waku, peer: string
-): Future[Result[bool, string]] {.async.} =
+): Future[Result[bool, string]] {.async: (raises: []).} =
   try:
     if self.node.wakuFilterClient.isNil():
       return err("wakuFilterClient is not mounted")
@@ -744,9 +747,9 @@ proc filterUnsubscribeAll*(
     return err(e.msg)
 
 # --- lightpush ---
-proc lightpushPublish*(
+method lightpushPublish*(
     self: Waku, pubsubTopic: PubsubTopic, message: WakuMessage, peer: string
-): Future[Result[string, string]] {.async.} =
+): Future[Result[string, string]] {.async: (raises: []).} =
   try:
     if self.node.wakuLegacyLightpushClient.isNil():
       return err("wakuLegacyLightpushClient is not mounted")
@@ -766,9 +769,9 @@ proc lightpushPublish*(
     return err(e.msg)
 
 # --- store ---
-proc storeQuery*(
+method storeQuery*(
     self: Waku, request: StoreQueryRequest, peer: string, timeoutMs: int
-): Future[Result[StoreQueryResponse, string]] {.async.} =
+): Future[Result[StoreQueryResponse, string]] {.async: (raises: []).} =
   try:
     if self.node.wakuStoreClient.isNil():
       return err("wakuStoreClient is not mounted")
@@ -788,18 +791,18 @@ proc storeQuery*(
     return err(e.msg)
 
 # --- peer management ---
-proc connect*(
+method connect*(
     self: Waku, peers: seq[string], timeoutMs: uint32
-): Future[Result[bool, string]] {.async.} =
+): Future[Result[bool, string]] {.async: (raises: []).} =
   try:
     await self.node.connectToNodes(peers.mapIt(strip(it)), source = "static")
     return ok(true)
   except CatchableError as e:
     return err(e.msg)
 
-proc disconnectPeerById*(
+method disconnectPeerById*(
     self: Waku, peerId: string
-): Future[Result[bool, string]] {.async.} =
+): Future[Result[bool, string]] {.async: (raises: []).} =
   try:
     let pId = PeerId.init(peerId).valueOr:
       return err($error)
@@ -808,16 +811,18 @@ proc disconnectPeerById*(
   except CatchableError as e:
     return err(e.msg)
 
-proc disconnectAllPeers*(self: Waku): Future[Result[bool, string]] {.async.} =
+method disconnectAllPeers*(
+    self: Waku
+): Future[Result[bool, string]] {.async: (raises: []).} =
   try:
     await self.node.peerManager.disconnectAllPeers()
     return ok(true)
   except CatchableError as e:
     return err(e.msg)
 
-proc dialPeer*(
+method dialPeer*(
     self: Waku, peerAddr: string, protocol: string, timeoutMs: int
-): Future[Result[bool, string]] {.async.} =
+): Future[Result[bool, string]] {.async: (raises: []).} =
   try:
     let remotePeerInfo = parsePeerInfo(peerAddr).valueOr:
       return err($error)
@@ -828,9 +833,9 @@ proc dialPeer*(
   except CatchableError as e:
     return err(e.msg)
 
-proc dialPeerById*(
+method dialPeerById*(
     self: Waku, peerId: string, protocol: string, timeoutMs: int
-): Future[Result[bool, string]] {.async.} =
+): Future[Result[bool, string]] {.async: (raises: []).} =
   try:
     let pId = PeerId.init(peerId).valueOr:
       return err($error)
@@ -841,13 +846,17 @@ proc dialPeerById*(
   except CatchableError as e:
     return err(e.msg)
 
-proc peerIdsFromPeerstore*(self: Waku): Future[Result[seq[string], string]] {.async.} =
+method peerIdsFromPeerstore*(
+    self: Waku
+): Future[Result[seq[string], string]] {.async: (raises: []).} =
   try:
     return ok(self.node.peerManager.switch.peerStore.peers().mapIt($it.peerId))
   except CatchableError as e:
     return err(e.msg)
 
-proc connectedPeersInfo*(self: Waku): Future[Result[seq[string], string]] {.async.} =
+method connectedPeersInfo*(
+    self: Waku
+): Future[Result[seq[string], string]] {.async: (raises: []).} =
   try:
     return ok(
       self.node.peerManager.switch.peerStore
@@ -858,16 +867,18 @@ proc connectedPeersInfo*(self: Waku): Future[Result[seq[string], string]] {.asyn
   except CatchableError as e:
     return err(e.msg)
 
-proc connectedPeers*(self: Waku): Future[Result[seq[string], string]] {.async.} =
+method connectedPeers*(
+    self: Waku
+): Future[Result[seq[string], string]] {.async: (raises: []).} =
   try:
     let (inPeerIds, outPeerIds) = self.node.peerManager.connectedPeers()
     return ok(concat(inPeerIds, outPeerIds).mapIt($it))
   except CatchableError as e:
     return err(e.msg)
 
-proc peerIdsByProtocol*(
+method peerIdsByProtocol*(
     self: Waku, protocol: string
-): Future[Result[seq[string], string]] {.async.} =
+): Future[Result[seq[string], string]] {.async: (raises: []).} =
   try:
     return ok(
       self.node.peerManager.switch.peerStore
@@ -879,9 +890,9 @@ proc peerIdsByProtocol*(
     return err(e.msg)
 
 # --- discovery ---
-proc dnsDiscovery*(
+method dnsDiscovery*(
     self: Waku, enrTreeUrl: string, nameServer: string, timeoutMs: int
-): Future[Result[seq[string], string]] {.async.} =
+): Future[Result[seq[string], string]] {.async: (raises: []).} =
   try:
     let dnsNameServers = @[parseIpAddress(nameServer)]
     let discoveredPeers = (
@@ -898,9 +909,9 @@ proc dnsDiscovery*(
   except CatchableError as e:
     return err(e.msg)
 
-proc discv5UpdateBootnodes*(
+method discv5UpdateBootnodes*(
     self: Waku, bootnodes: seq[string]
-): Future[Result[bool, string]] {.async.} =
+): Future[Result[bool, string]] {.async: (raises: []).} =
   try:
     if self.wakuDiscv5.isNil():
       return err("discv5 not started")
@@ -911,7 +922,7 @@ proc discv5UpdateBootnodes*(
   except CatchableError as e:
     return err(e.msg)
 
-proc startDiscv5*(self: Waku): Future[Result[bool, string]] {.async.} =
+method startDiscv5*(self: Waku): Future[Result[bool, string]] {.async: (raises: []).} =
   try:
     if self.wakuDiscv5.isNil():
       return err("discv5 not started")
@@ -921,7 +932,7 @@ proc startDiscv5*(self: Waku): Future[Result[bool, string]] {.async.} =
   except CatchableError as e:
     return err(e.msg)
 
-proc stopDiscv5*(self: Waku): Future[Result[bool, string]] {.async.} =
+method stopDiscv5*(self: Waku): Future[Result[bool, string]] {.async: (raises: []).} =
   try:
     if self.wakuDiscv5.isNil():
       return err("discv5 not started")
@@ -930,9 +941,9 @@ proc stopDiscv5*(self: Waku): Future[Result[bool, string]] {.async.} =
   except CatchableError as e:
     return err(e.msg)
 
-proc peerExchangeRequest*(
+method peerExchangeRequest*(
     self: Waku, numPeers: uint64
-): Future[Result[int, string]] {.async.} =
+): Future[Result[int, string]] {.async: (raises: []).} =
   try:
     let numPeersRecv = (await self.node.fetchPeerExchangePeers(numPeers)).valueOr:
       return err("failed peer exchange: " & $error)
@@ -941,37 +952,39 @@ proc peerExchangeRequest*(
     return err(e.msg)
 
 # --- debug / info ---
-proc version*(self: Waku): Future[Result[string, string]] {.async.} =
+method version*(self: Waku): Future[Result[string, string]] {.async: (raises: []).} =
   return ok(WakuNodeVersionString)
 
-proc listenAddresses*(self: Waku): Future[Result[seq[string], string]] {.async.} =
+method listenAddresses*(
+    self: Waku
+): Future[Result[seq[string], string]] {.async: (raises: []).} =
   try:
     return ok(self.node.info().listenAddresses)
   except CatchableError as e:
     return err(e.msg)
 
-proc myEnr*(self: Waku): Future[Result[string, string]] {.async.} =
+method myEnr*(self: Waku): Future[Result[string, string]] {.async: (raises: []).} =
   try:
     return ok(self.node.enr.toURI())
   except CatchableError as e:
     return err(e.msg)
 
-proc myPeerId*(self: Waku): Future[Result[string, string]] {.async.} =
+method myPeerId*(self: Waku): Future[Result[string, string]] {.async: (raises: []).} =
   try:
     return ok($self.node.peerId())
   except CatchableError as e:
     return err(e.msg)
 
-proc metrics*(self: Waku): Future[Result[string, string]] {.async.} =
+method metrics*(self: Waku): Future[Result[string, string]] {.async: (raises: []).} =
   {.gcsafe.}:
     try:
       return ok(defaultRegistry.toText())
     except CatchableError as e:
       return err(e.msg)
 
-proc pingPeer*(
+method pingPeer*(
     self: Waku, peerAddr: string, timeoutMs: int
-): Future[Result[int64, string]] {.async.} =
+): Future[Result[int64, string]] {.async: (raises: []).} =
   try:
     let peerInfo = parsePeerInfo(peerAddr).valueOr:
       return err("pingPeer failed to parse peer addr: " & $error)

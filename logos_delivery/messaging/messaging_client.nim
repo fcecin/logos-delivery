@@ -2,6 +2,7 @@ import results, chronos
 import chronicles
 import
   logos_delivery/api/types,
+  logos_delivery/api/messaging_client_api,
   logos_delivery/waku/node/[waku_node, subscription_manager],
   logos_delivery/messaging/delivery_service/[recv_service, send_service],
   logos_delivery/messaging/delivery_service/send_service/delivery_task
@@ -13,7 +14,7 @@ type
     ## follow-up PR. Today it only carries the p2p reliability toggle.
     useP2PReliability*: bool
 
-  MessagingClient* = ref object
+  MessagingClient* = ref object of IMessagingClient
     node: WakuNode
     sendService*: SendService
     recvService*: RecvService
@@ -43,29 +44,29 @@ proc stop*(self: MessagingClient) {.async.} =
   await self.recvService.stopRecvService()
   self.started = false
 
-proc checkApiAvailability(mc: MessagingClient): Result[void, string] =
-  if mc.isNil():
+proc checkApiAvailability(self: MessagingClient): Result[void, string] =
+  if self.isNil():
     return err("MessagingClient is not initialized")
 
   return ok()
 
-proc subscribe*(
-    mc: MessagingClient, contentTopic: ContentTopic
-): Future[Result[void, string]] {.async.} =
-  ?checkApiAvailability(mc)
+method subscribe*(
+    self: MessagingClient, contentTopic: ContentTopic
+): Future[Result[void, string]] {.async: (raises: []).} =
+  ?checkApiAvailability(self)
 
-  return mc.node.subscriptionManager.subscribe(contentTopic)
+  return self.node.subscriptionManager.subscribe(contentTopic)
 
-proc unsubscribe*(
-    mc: MessagingClient, contentTopic: ContentTopic
-): Result[void, string] =
-  ?checkApiAvailability(mc)
+method unsubscribe*(
+    self: MessagingClient, contentTopic: ContentTopic
+): Result[void, string] {.raises: [].} =
+  ?checkApiAvailability(self)
 
-  return mc.node.subscriptionManager.unsubscribe(contentTopic)
+  return self.node.subscriptionManager.unsubscribe(contentTopic)
 
-proc send*(
+method send*(
     self: MessagingClient, envelope: MessageEnvelope
-): Future[Result[RequestId, string]] {.async.} =
+): Future[Result[RequestId, string]] {.async: (raises: []).} =
   ## High-level messaging API send. Auto-subscribes to the content topic
   ## (so the local node sees its own gossipsub broadcast), builds a
   ## `DeliveryTask`, and hands it to the send service. Returns the request
