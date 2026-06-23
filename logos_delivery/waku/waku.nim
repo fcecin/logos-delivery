@@ -11,6 +11,7 @@ import
   libp2p/wire,
   libp2p/crypto/crypto,
   libp2p/protocols/pubsub/gossipsub,
+  libp2p/protocols/ping,
   libp2p/services/autorelayservice,
   libp2p/services/hpservice,
   libp2p/peerid,
@@ -49,6 +50,9 @@ import
     factory/app_callbacks,
     persistency/persistency,
     factory/validator_signed,
+    waku_lightpush/client,
+    waku_lightpush_legacy/client,
+    waku_store/client,
   ],
   ./factory/waku_conf,
   ./factory/waku_state_info
@@ -58,6 +62,8 @@ logScope:
 
 # Git version in git describe format (defined at compile time)
 const git_version* {.strdefine.} = "n/a"
+
+const FilterOpTimeout = 5.seconds
 
 type Waku* = ref object
   stateInfo*: WakuStateInfo
