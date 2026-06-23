@@ -567,12 +567,4 @@ proc stop*(waku: Waku): Future[Result[void, string]] {.async: (raises: []).} =
 
   return ok()
 
-proc isModeCoreAvailable*(waku: Waku): bool =
-  return not waku.node.wakuRelay.isNil()
-
-proc isModeEdgeAvailable*(waku: Waku): bool =
-  return
-    waku.node.wakuRelay.isNil() and not waku.node.wakuStoreClient.isNil() and
-    not waku.node.wakuFilterClient.isNil() and not waku.node.wakuLightPushClient.isNil()
-
 {.pop.}
