@@ -13,7 +13,7 @@ import results, chronos, chronicles
 
 import logos_delivery/waku/api
 export api
-import logos_delivery/waku/factory/waku
+import logos_delivery/waku/waku
 export waku
 import logos_delivery/messaging/messaging_client
 export messaging_client

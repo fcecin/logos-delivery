@@ -3,7 +3,7 @@ import chronos, results, ffi
 import stew/byteutils
 import
   logos_delivery/waku/common/base64,
-  logos_delivery/waku/factory/waku,
+  logos_delivery/waku/waku,
   logos_delivery/waku/waku_core/topics/content_topic,
   logos_delivery/waku/api/[api, types],
   ../declare_lib

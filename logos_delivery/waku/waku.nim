@@ -49,8 +49,8 @@ import
     factory/app_callbacks,
     persistency/persistency,
   ],
-  ./waku_conf,
-  ./waku_state_info
+  ./factory/waku_conf,
+  ./factory/waku_state_info
 
 logScope:
   topics = "wakunode waku"
