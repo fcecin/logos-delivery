@@ -21,8 +21,10 @@ import logos_delivery/waku/persistency/sds_persistency
 
 import ./reliable_channel
 import ./encryption/noop_encryption
+import ./channels_conf
 
 export reliable_channel
+export channels_conf
 
 const SdsJobId = "sds"
   ## One persistency job shared by every channel's SDS state; rows are
@@ -35,6 +37,9 @@ type ReliableChannelManager* = ref object of ReliableChannelManagerInterface
     ## Default egress dispatch for channels created through this manager.
     ## Constructed at mount time as a closure over `MessagingClient.send`
     ## so the channel layer itself stays callable-only.
+  channelsConf: ChannelsConf
+    ## Configuration applied to channels created by this manager; unset fields
+    ## fall back to the component defaults.
 
 proc start*(self: ReliableChannelManager): Result[void, string] =
   ## Placeholder: per-channel listeners are installed in `ReliableChannel.new`,
@@ -63,11 +68,14 @@ proc sdsPersistence(): Option[Persistence] =
 
 BrokerImplement ReliableChannelManager of ReliableChannelManagerInterface:
   proc new(
-      T: typedesc[ReliableChannelManager], messagingClient: MessagingClientInterface
+      T: typedesc[ReliableChannelManager],
+      messagingClient: MessagingClientInterface,
+      channelsConf: ChannelsConf,
   ): T =
     T(
       channels: initTable[ChannelId, ReliableChannel](),
       messagingClient: messagingClient,
+      channelsConf: channelsConf,
     )
 
   method createReliableChannel*(
@@ -87,19 +95,26 @@ BrokerImplement ReliableChannelManager of ReliableChannelManagerInterface:
     if self.channels.hasKey(channelId):
       return err("channel already exists: " & channelId)
 
+    # Apply the channel configuration, falling back to component defaults for
+    # unset fields.
+    let cc = self.channelsConf
     let segConfig = SegmentationConfig(
-      segmentSizeBytes: DefaultSegmentSizeBytes,
-      enableReedSolomon: false,
-      persistence: nil,
+      segmentSizeBytes: cc.segmentationSegmentSizeBytes.get(DefaultSegmentSizeBytes),
+      enableReedSolomon: cc.segmentationEnableReedSolomon.get(false),
+      persistence: cc.segmentationPersistence.get(nil),
     )
     let sdsConfig = SdsConfig(
-      acknowledgementTimeoutMs: DefaultAcknowledgementTimeoutMs,
-      maxRetransmissions: DefaultMaxRetransmissions,
-      causalHistorySize: DefaultCausalHistorySize,
-      persistence: sdsPersistence(),
+      acknowledgementTimeoutMs:
+        cc.sdsAcknowledgementTimeoutMs.get(DefaultAcknowledgementTimeoutMs),
+      maxRetransmissions: cc.sdsMaxRetransmissions.get(DefaultMaxRetransmissions),
+      causalHistorySize: cc.sdsCausalHistorySize.get(DefaultCausalHistorySize),
+      persistence:
+        if cc.sdsPersistence.isSome(): cc.sdsPersistence else: sdsPersistence(),
     )
     let rateConfig = RateLimitConfig(
-      epochPeriodSec: DefaultEpochPeriodSec, messagesPerEpoch: DefaultMessagesPerEpoch
+      enabled: cc.rateLimitEnabled.get(false),
+      epochPeriodSec: cc.rateLimitEpochPeriodSec.get(DefaultEpochPeriodSec),
+      messagesPerEpoch: DefaultMessagesPerEpoch,
     )
 
     let chn = ReliableChannel.new(

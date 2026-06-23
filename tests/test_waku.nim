@@ -6,15 +6,15 @@ import chronos, testutils/unittests
 
 import logos_delivery
 import tools/confutils/cli_args
+import logos_delivery/api/messaging_conf
 import logos_delivery/waku/factory/networks_config
 import logos_delivery/waku/factory/conf_builder/conf_builder
 
 suite "Waku API - Create node":
   asyncTest "Create node with minimal configuration":
     ## Given
-    var nodeConf = defaultWakuNodeConf().valueOr:
-      raiseAssert "defaultWakuNodeConf failed: " & error
-    nodeConf.mode = some(WakuMode.Core)
+    var nodeConf = MessagingConf().toKernelConf(WakuMode.Core).valueOr:
+      raiseAssert "toKernelConf failed: " & error
     nodeConf.clusterId = some(3'u16)
     nodeConf.rest = false
 
@@ -32,9 +32,8 @@ suite "Waku API - Create node":
 
   asyncTest "Create node with full configuration":
     ## Given
-    var nodeConf = defaultWakuNodeConf().valueOr:
-      raiseAssert "defaultWakuNodeConf failed: " & error
-    nodeConf.mode = some(WakuMode.Core)
+    var nodeConf = MessagingConf().toKernelConf(WakuMode.Core).valueOr:
+      raiseAssert "toKernelConf failed: " & error
     nodeConf.clusterId = some(99'u16)
     nodeConf.rest = false
     nodeConf.numShardsInNetwork = 16
@@ -64,9 +63,8 @@ suite "Waku API - Create node":
 
   asyncTest "Create node with mixed entry nodes (enrtree, multiaddr)":
     ## Given
-    var nodeConf = defaultWakuNodeConf().valueOr:
-      raiseAssert "defaultWakuNodeConf failed: " & error
-    nodeConf.mode = some(WakuMode.Core)
+    var nodeConf = MessagingConf().toKernelConf(WakuMode.Core).valueOr:
+      raiseAssert "toKernelConf failed: " & error
     nodeConf.clusterId = some(42'u16)
     nodeConf.rest = false
     nodeConf.entryNodes = @[

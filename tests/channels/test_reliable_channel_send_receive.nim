@@ -12,6 +12,7 @@ import logos_delivery/waku/[waku_node, waku_core]
 import logos_delivery/waku/factory/waku_conf
 import logos_delivery/waku/events/message_events as waku_message_events
 import tools/confutils/cli_args
+import logos_delivery/api/messaging_conf
 
 import logos_delivery/channels/reliable_channel_manager
 import logos_delivery/channels/encryption/noop_encryption
@@ -28,9 +29,8 @@ import logos_delivery/api/messaging_client_interface
 const TestTimeout = chronos.seconds(15)
 
 proc createApiNodeConf(): WakuNodeConf =
-  var conf = defaultWakuNodeConf().valueOr:
+  var conf = MessagingConf().toKernelConf(cli_args.WakuMode.Core).valueOr:
     raiseAssert error
-  conf.mode = some(cli_args.WakuMode.Core)
   conf.listenAddress = parseIpAddress("0.0.0.0")
   conf.tcpPort = Port(0)
   conf.discv5UdpPort = Port(0)

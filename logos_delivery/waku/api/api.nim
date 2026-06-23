@@ -62,7 +62,7 @@ proc mountReliableChannelManager*(w: Waku): Result[void, string] =
     return ok()
 
   w.reliableChannelManager = ReliableChannelManager.createUnderContext(
-    w.brokerCtx, MessagingClientInterface(w.messagingClient)
+    w.brokerCtx, MessagingClientInterface(w.messagingClient), ChannelsConf()
   )
   return ok()
 

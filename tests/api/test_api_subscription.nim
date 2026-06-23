@@ -19,6 +19,7 @@ import
   ]
 import logos_delivery/waku/factory/waku_conf
 import tools/confutils/cli_args
+import logos_delivery/api/messaging_conf
 
 const TestTimeout = chronos.seconds(10)
 const NegativeTestTimeout = chronos.seconds(2)
@@ -71,9 +72,8 @@ type TestNetwork = ref object
 proc createApiNodeConf(
     mode: cli_args.WakuMode = cli_args.WakuMode.Core, numShards: uint16 = 1
 ): WakuNodeConf =
-  var conf = defaultWakuNodeConf().valueOr:
+  var conf = MessagingConf().toKernelConf(mode).valueOr:
     raiseAssert error
-  conf.mode = some(mode)
   conf.listenAddress = parseIpAddress("0.0.0.0")
   conf.tcpPort = Port(0)
   conf.discv5UdpPort = Port(0)

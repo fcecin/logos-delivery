@@ -4,6 +4,7 @@ import std/[options, strutils], results, stint, testutils/unittests
 import json_serialization, confutils, confutils/std/net
 import
   tools/confutils/cli_args,
+  logos_delivery/api/messaging_conf,
   tools/confutils/conf_from_json,
   logos_delivery/waku/api/api_conf,
   logos_delivery/waku/factory/waku_conf,
@@ -11,18 +12,13 @@ import
   logos_delivery/waku/factory/conf_builder/conf_builder,
   logos_delivery/waku/common/logging
 
-suite "WakuNodeConf - mode-driven toWakuConf":
+suite "MessagingConf mode - toKernelConf - toWakuConf":
   test "Core mode enables service protocols":
-    ## Given
-    var conf = defaultWakuNodeConf().valueOr:
+    let conf = MessagingConf(clusterId: some(1'u16)).toKernelConf(WakuMode.Core).valueOr:
       raiseAssert error
-    conf.mode = some(WakuMode.Core)
-    conf.clusterId = some(1'u16)
 
-    ## When
     let wakuConfRes = conf.toWakuConf()
 
-    ## Then
     require wakuConfRes.isOk()
     let wakuConf = wakuConfRes.get()
     require wakuConf.validate().isOk()
@@ -34,16 +30,11 @@ suite "WakuNodeConf - mode-driven toWakuConf":
       wakuConf.clusterId == 1
 
   test "Edge mode disables service protocols":
-    ## Given
-    var conf = defaultWakuNodeConf().valueOr:
+    let conf = MessagingConf(clusterId: some(1'u16)).toKernelConf(WakuMode.Edge).valueOr:
       raiseAssert error
-    conf.mode = some(WakuMode.Edge)
-    conf.clusterId = some(1'u16)
 
-    ## When
     let wakuConfRes = conf.toWakuConf()
 
-    ## Then
     require wakuConfRes.isOk()
     let wakuConf = wakuConfRes.get()
     require wakuConf.validate().isOk()
@@ -54,44 +45,6 @@ suite "WakuNodeConf - mode-driven toWakuConf":
       wakuConf.storeServiceConf.isSome() == false
       wakuConf.peerExchangeService == true
 
-  test "WakuMode.none uses explicit CLI flags as-is":
-    ## Given
-    var conf = defaultWakuNodeConf().valueOr:
-      raiseAssert error
-    conf.mode = none[WakuMode]()
-    conf.relay = true
-    conf.lightpush = false
-    conf.clusterId = some(5'u16)
-
-    ## When
-    let wakuConfRes = conf.toWakuConf()
-
-    ## Then
-    require wakuConfRes.isOk()
-    let wakuConf = wakuConfRes.get()
-    require wakuConf.validate().isOk()
-    check:
-      wakuConf.relay == true
-      wakuConf.lightPush == false
-      wakuConf.clusterId == 5
-
-  test "Core mode overrides individual protocol flags":
-    ## Given - user sets relay=false but mode=Core should override
-    var conf = defaultWakuNodeConf().valueOr:
-      raiseAssert error
-    conf.mode = some(WakuMode.Core)
-    conf.relay = false # will be overridden by Core mode
-
-    ## When
-    let wakuConfRes = conf.toWakuConf()
-
-    ## Then
-    require wakuConfRes.isOk()
-    let wakuConf = wakuConfRes.get()
-    require wakuConf.validate().isOk()
-    check:
-      wakuConf.relay == true # mode overrides
-
 suite "WakuNodeConf - JSON parsing with fieldPairs":
   test "Empty JSON produces valid default conf":
     ## Given / When
@@ -101,30 +54,8 @@ suite "WakuNodeConf - JSON parsing with fieldPairs":
     require confRes.isOk()
     let conf = confRes.get()
     check:
-      conf.mode == none[WakuMode]()
       conf.clusterId.isNone()
       conf.logLevel == logging.LogLevel.INFO
-
-  test "JSON with mode and clusterId":
-    ## Given / When
-    let confRes = parseNodeConfFromJson("""{"mode": "Core", "clusterId": 42}""")
-
-    ## Then
-    require confRes.isOk()
-    let conf = confRes.get()
-    check:
-      conf.mode == some(WakuMode.Core)
-      conf.clusterId == some(42'u16)
-
-  test "JSON with Edge mode":
-    ## Given / When
-    let confRes = parseNodeConfFromJson("""{"mode": "Edge"}""")
-
-    ## Then
-    require confRes.isOk()
-    let conf = confRes.get()
-    check:
-      conf.mode == some(WakuMode.Edge)
 
   test "JSON with logLevel":
     ## Given / When
@@ -254,49 +185,9 @@ suite "WakuNodeConf - preset integration":
     check wakuConfRes.isErr()
 
 suite "WakuNodeConf JSON -> WakuConf integration":
-  test "Core mode JSON config produces valid WakuConf":
-    ## Given
-    let confRes = parseNodeConfFromJson(
-      """{"mode": "Core", "clusterId": 55, "numShardsInNetwork": 6}"""
-    )
-    require confRes.isOk()
-    let conf = confRes.get()
-
-    ## When
-    let wakuConfRes = conf.toWakuConf()
-
-    ## Then
-    require wakuConfRes.isOk()
-    let wakuConf = wakuConfRes.get()
-    require wakuConf.validate().isOk()
-    check:
-      wakuConf.relay == true
-      wakuConf.lightPush == true
-      wakuConf.peerExchangeService == true
-      wakuConf.clusterId == 55
-      wakuConf.shardingConf.numShardsInCluster == 6
-
-  test "Edge mode JSON config produces valid WakuConf":
-    ## Given
-    let confRes = parseNodeConfFromJson("""{"mode": "Edge", "clusterId": 1}""")
-    require confRes.isOk()
-    let conf = confRes.get()
-
-    ## When
-    let wakuConfRes = conf.toWakuConf()
-
-    ## Then
-    require wakuConfRes.isOk()
-    let wakuConf = wakuConfRes.get()
-    require wakuConf.validate().isOk()
-    check:
-      wakuConf.relay == false
-      wakuConf.lightPush == false
-      wakuConf.peerExchangeService == true
-
   test "JSON with preset produces valid WakuConf":
     ## Given
-    let confRes = parseNodeConfFromJson("""{"mode": "Core", "preset": "logosdev"}""")
+    let confRes = parseNodeConfFromJson("""{"preset": "logosdev"}""")
     require confRes.isOk()
     let conf = confRes.get()
 
@@ -314,7 +205,7 @@ suite "WakuNodeConf JSON -> WakuConf integration":
   test "JSON with static nodes":
     ## Given
     let confRes = parseNodeConfFromJson(
-      """{"mode": "Core", "clusterId": 42, "staticnodes": ["/ip4/127.0.0.1/tcp/60000/p2p/16Uuu2HBmAcHvhLqQKwSSbX6BG5JLWUDRcaLVrehUVqpw7fz1hbYc"]}"""
+      """{"clusterId": 42, "staticnodes": ["/ip4/127.0.0.1/tcp/60000/p2p/16Uuu2HBmAcHvhLqQKwSSbX6BG5JLWUDRcaLVrehUVqpw7fz1hbYc"]}"""
     )
     require confRes.isOk()
     let conf = confRes.get()

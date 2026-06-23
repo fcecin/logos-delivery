@@ -15,6 +15,12 @@ import ./reliable_channel_manager_interface as ireliablechannelmanager_iface
 
 export ikernel_iface, imessagingclient_iface, ireliablechannelmanager_iface
 
+import ./messaging_conf # MessagingConf
+export messaging_conf
+
+import logos_delivery/channels/channels_conf # ChannelsConf
+export channels_conf
+
 BrokerInterface(LogosDeliveryInterface):
   EventBroker:
     type ConnectionStatusChangeEvent* = object
@@ -25,7 +31,10 @@ BrokerInterface(LogosDeliveryInterface):
 
   RequestBroker:
     proc startAsClient(
-      mode: WakuMode, preset: string
+      mode: WakuMode,
+      preset: string,
+      overrides: MessagingConf,
+      channelsConf: ChannelsConf,
     ): Future[Result[MessagingClientInterface, string]] {.async.}
 
   RequestBroker:

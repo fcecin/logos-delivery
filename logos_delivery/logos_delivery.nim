@@ -10,13 +10,14 @@
 ## does NOT start it. `kernel()` is a stub until a KernelImpl exists.
 
 import results, chronos
-import std/options # some()/Option for WakuNodeConf.mode
 import std/json # newJArray/newJObject/%*/pretty in getAvailableConfigs
 
 import brokers/broker_context, brokers/broker_interface, brokers/broker_implement
 import logos_delivery/api/logos_delivery_interface as logosdelivery_iface
 import logos_delivery/api/types as api_types
 import logos_delivery/api/kernel_interface as kernel_iface
+import logos_delivery/api/messaging_conf # MessagingConf
+import logos_delivery/api/messaging_conf_preset # resolvePreset, merge
 
 import
   logos_delivery/waku/factory/waku,
@@ -30,6 +31,7 @@ type LogosDelivery* = ref object of LogosDeliveryInterface
   waku: Waku ## the owned node facade (built in initializeRequest)
   messagingClient: MessagingClient
   reliableChannelManager: ReliableChannelManager
+  channelsConf: ChannelsConf ## set by startAsClient; applied when channels mount
 
 proc loadConf(configPath: string): Result[WakuNodeConf, string] =
   ## Delegates to cli_args' concrete loader so confutils' `load` macro expands in
@@ -59,7 +61,7 @@ proc initReliableChannelManager(
 ): Result[ReliableChannelManager, string] =
   return ok(
     ReliableChannelManager.createUnderContext(
-      globalBrokerContext(), self.messagingClient
+      globalBrokerContext(), self.messagingClient, self.channelsConf
     )
   )
 
@@ -100,6 +102,8 @@ BrokerImplement LogosDelivery of LogosDeliveryInterface:
   method startAsNode(
       self: LogosDelivery, config: string
   ): Future[Result[void, string]] {.async.} =
+    ## Load a complete node configuration from `config` and start a bare kernel
+    ## node without a messaging client.
     if not self.waku.isNil():
       return err("already initialized")
     let conf = loadConf(config).valueOr:
@@ -117,7 +121,11 @@ BrokerImplement LogosDelivery of LogosDeliveryInterface:
       return err("initialize failed: " & e.msg)
 
   method startAsClient(
-      self: LogosDelivery, mode: api_types.WakuMode, preset: string
+      self: LogosDelivery,
+      mode: api_types.WakuMode,
+      preset: string,
+      overrides: MessagingConf,
+      channelsConf: ChannelsConf,
   ): Future[Result[MessagingClientInterface, string]] {.async.} =
     if not self.messagingClient.isNil():
       return err("already initialized")
@@ -126,9 +134,14 @@ BrokerImplement LogosDelivery of LogosDeliveryInterface:
         "already started as node; cannot start as client, but you can use as client"
       )
 
+    self.channelsConf = channelsConf
     try:
-      var conf: WakuNodeConf = ?defaultWakuNodeConf()
-      conf.mode = some(mode)
+      # Resolve the preset into the messaging fields it implies, apply the caller's
+      # overrides on top, then infer the kernel configuration. The kernel still
+      # resolves the preset itself for the node-local fields a preset does not carry.
+      let base = ?resolvePreset(preset)
+      let msgConf = base.merge(overrides)
+      var conf: KernelConf = ?msgConf.toKernelConf(mode)
       conf.preset = preset
 
       self.waku = (await createNode(conf)).valueOr:

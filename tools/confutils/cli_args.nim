@@ -163,13 +163,6 @@ type WakuNodeConf* = object
     .}: seq[ProtectedShard]
 
     ## General node config
-    mode* {.
-      desc:
-        "Node operation mode. 'Core' enables relay+service protocols. 'Edge' enables client-only protocols. Default (unset): explicit CLI flags used.",
-      defaultValue: none(WakuMode),
-      name: "mode"
-    .}: Option[WakuMode]
-
     preset* {.
       desc:
         "Network preset to use. 'twn' is The RLN-protected Waku Network (cluster 1). 'logos.dev' is the Logos Dev Network (cluster 2). 'logos.test' is the Logos Test Network (cluster 2). Overrides other values.",
@@ -993,7 +986,7 @@ proc toKeystoreGeneratorConf*(n: WakuNodeConf): RlnKeystoreGeneratorConf =
     credPassword: n.rlnRelayCredPassword,
   )
 
-proc toNetworkPresetConf(
+proc toNetworkPresetConf*(
     preset: string, clusterId: Option[uint16]
 ): ConfResult[Option[NetworkPresetConf]] =
   var lcPreset = toLowerAscii(preset)
@@ -1219,26 +1212,5 @@ proc toWakuConf*(n: WakuNodeConf): ConfResult[WakuConf] =
     b.kademliaDiscoveryConf.withServiceLookupInterval(
       chronos.seconds(n.kadServiceLookupIntervalSec.int64)
     )
-
-  # Mode-driven configuration overrides. `none` (formerly `noMode`) means:
-  # use explicit CLI flags as-is.
-  if n.mode.isSome():
-    case n.mode.get()
-    of WakuMode.Core:
-      b.withRelay(true)
-      b.filterServiceConf.withEnabled(true)
-      b.withLightPush(true)
-      b.discv5Conf.withEnabled(true)
-      b.withPeerExchange(true)
-      b.withRendezvous(true)
-      b.rateLimitConf.withRateLimitsIfNotAssigned(
-        @["filter:100/1s", "lightpush:5/1s", "px:5/1s"]
-      )
-    of WakuMode.Edge:
-      b.withPeerExchange(true)
-      b.withRelay(false)
-      b.filterServiceConf.withEnabled(false)
-      b.withLightPush(false)
-      b.storeServiceConf.withEnabled(false)
 
   return b.build()

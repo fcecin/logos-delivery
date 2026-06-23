@@ -16,6 +16,7 @@ import
   logos_delivery/waku/common/waku_protocol,
   logos_delivery/waku/factory/waku_conf
 import tools/confutils/cli_args
+import logos_delivery/api/messaging_conf
 
 const TestTimeout = chronos.seconds(10)
 const DefaultShard = PubsubTopic("/waku/2/rs/3/0")
@@ -92,9 +93,8 @@ suite "LM API health checking":
     serviceNode.wakuRelay.subscribe(DefaultShard, dummyHandler)
 
     lockNewGlobalBrokerContext:
-      var conf = defaultWakuNodeConf().valueOr:
+      var conf = MessagingConf().toKernelConf(WakuMode.Core).valueOr:
         raiseAssert error
-      conf.mode = some(WakuMode.Core)
       conf.listenAddress = parseIpAddress("0.0.0.0")
       conf.tcpPort = Port(0)
       conf.discv5UdpPort = Port(0)
@@ -271,9 +271,8 @@ suite "LM API health checking":
     var edgeWaku: Waku
 
     lockNewGlobalBrokerContext:
-      var edgeConf = defaultWakuNodeConf().valueOr:
+      var edgeConf = MessagingConf().toKernelConf(WakuMode.Edge).valueOr:
         raiseAssert error
-      edgeConf.mode = some(WakuMode.Edge)
       edgeConf.listenAddress = parseIpAddress("0.0.0.0")
       edgeConf.tcpPort = Port(0)
       edgeConf.discv5UdpPort = Port(0)

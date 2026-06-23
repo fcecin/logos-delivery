@@ -8,6 +8,7 @@ import ../waku_archive/archive_utils
 import logos_delivery, logos_delivery/waku/[waku_node, waku_core, waku_relay/protocol]
 import logos_delivery/waku/factory/waku_conf
 import tools/confutils/cli_args
+import logos_delivery/api/messaging_conf
 
 type SendEventOutcome {.pure.} = enum
   Sent
@@ -120,9 +121,8 @@ proc validate(
     check requestId == expectedRequestId
 
 proc createApiNodeConf(mode: cli_args.WakuMode = cli_args.WakuMode.Core): WakuNodeConf =
-  var conf = defaultWakuNodeConf().valueOr:
+  var conf = MessagingConf().toKernelConf(mode).valueOr:
     raiseAssert error
-  conf.mode = some(mode)
   conf.listenAddress = parseIpAddress("0.0.0.0")
   conf.tcpPort = Port(0)
   conf.discv5UdpPort = Port(0)
