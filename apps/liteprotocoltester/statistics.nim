@@ -10,6 +10,7 @@ import
 
 from std/sugar import `=>`
 
+import logos_delivery/waku/compat/option_valueor
 import ./tester_message, ./lpt_metrics
 
 type
