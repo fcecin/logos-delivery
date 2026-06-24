@@ -1,13 +1,18 @@
-import logos_delivery/waku/compat/option_valueor
-import libp2p/crypto/crypto
 {.push raises: [].}
-
+import std/hashes
 import bearssl/rand, std/times, chronos
 import stew/byteutils
-import logos_delivery/waku/utils/requests as request_utils
+import libp2p/crypto/crypto
+
+import logos_delivery/waku/compat/option_valueor
+
 import logos_delivery/waku/waku_core/[topics/content_topic, message/message, time]
 
 export content_topic, message
+
+import types/sds_message_id
+
+export sds_message_id
 
 type
   MessageEnvelope* = object
@@ -26,15 +31,27 @@ type
     PartiallyConnected
     Connected
 
+  ChannelId* = SdsChannelID
+
+proc generateRequestId*(rng: crypto.Rng): string =
+  var bytes: array[10, byte]
+  rng.generate(bytes)
+  return byteutils.toHex(bytes)
+
 proc new*(T: typedesc[RequestId], rng: crypto.Rng): T =
   ## Generate a new RequestId using the provided RNG.
-  RequestId(request_utils.generateRequestId(rng))
+  RequestId(generateRequestId(rng))
 
 proc `$`*(r: RequestId): string {.inline.} =
   string(r)
 
 proc `==`*(a, b: RequestId): bool {.inline.} =
   string(a) == string(b)
+
+proc hash*(r: RequestId): Hash =
+  ## Allows `RequestId` to be used as a `Table` key.
+  hash(string(r))
+
 
 proc init*(
     T: type MessageEnvelope,

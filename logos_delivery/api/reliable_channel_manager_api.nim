@@ -1,9 +1,43 @@
 import chronos, results
-import logos_delivery/api/types
-import logos_delivery/channels/types
-import logos_delivery/channels/reliable_channel
 
-type IReliableChannelManager* = ref object of RootObj
+import brokers/event_broker
+
+import logos_delivery/api/types as api_types
+
+export event_broker, api_types
+
+type
+  IReliableChannelManager* = ref object of RootObj
+
+  SendHandler* = proc(envelope: MessageEnvelope): Future[Result[RequestId, string]] {.
+    async: (raises: [CatchableError]), gcsafe
+  .}
+    ## Egress dispatch boundary. Typically wraps `MessagingClient.send`;
+    ## tests inject a fake that records calls and returns canned
+    ## `RequestId`s so the send state machine can be exercised end-to-end
+    ## without a network.
+
+EventBroker:
+  type ChannelMessageReceivedEvent* = object
+    channelId*: ChannelId
+    senderId*: SdsParticipantID
+    payload*: seq[byte]
+
+EventBroker:
+  ## Emitted when every segment of a channel-level `send()` reached
+  ## `Confirmed`. Channel-level analogue of `MessageSentEvent`; the
+  ## `requestId` is the channel-layer parent returned by `send()`.
+  type ChannelMessageSentEvent* = object
+    channelId*: ChannelId
+    requestId*: RequestId
+
+EventBroker:
+  ## Emitted when a channel-level `send()` finalises with at least one
+  ## segment in `Failed`. Channel-level analogue of `MessageErrorEvent`.
+  type ChannelMessageErrorEvent* = object
+    channelId*: ChannelId
+    requestId*: RequestId
+    error*: string
 
 method createReliableChannel*(
     self: IReliableChannelManager,

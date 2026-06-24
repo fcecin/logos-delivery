@@ -6,6 +6,7 @@ import logos_delivery/waku/compat/option_valueor
 import std/[tables, sequtils, options, sets]
 import chronos, chronicles, libp2p/utility
 import brokers/broker_context
+import logos_delivery/api/[types, logos_delivery_api, kernel_api, messaging_client_api]
 import
   logos_delivery/waku/[
     waku_core,
@@ -13,7 +14,6 @@ import
     waku_store/client,
     waku_store/common,
     waku_filter_v2/client,
-    events/message_events,
     events/health_events,
     waku_node,
     node/subscription_manager,

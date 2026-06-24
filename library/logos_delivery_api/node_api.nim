@@ -3,9 +3,9 @@ import chronos, chronicles, results, ffi
 import
   logos_delivery,
   logos_delivery/waku/node/waku_node,
-  logos_delivery/waku/events/message_events,
+  logos_delivery/api/messaging_client_api,
   logos_delivery/api/types,
-  logos_delivery/waku/events/[message_events, health_events],
+  logos_delivery/waku/events/health_events,
   tools/confutils/conf_from_json,
   ../declare_lib,
   ../json_event
@@ -116,7 +116,7 @@ proc logosdelivery_start_node(
     chronicles.error "MessageReceivedEvent.listen failed", err = $error
     return err("MessageReceivedEvent.listen failed: " & $error)
 
-  let ConnectionStatusChangeListener = EventConnectionStatusChange.listen(
+  discard EventConnectionStatusChange.listen(
     ctx.myLib[].waku.brokerCtx,
     proc(event: EventConnectionStatusChange) {.async: (raises: []).} =
       callEventCallback(ctx, "onConnectionStatusChange"):

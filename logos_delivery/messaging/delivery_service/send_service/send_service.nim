@@ -5,6 +5,7 @@ import logos_delivery/waku/compat/option_valueor
 import std/[sequtils, tables, options, typetraits]
 import chronos, chronicles, libp2p/utility
 import brokers/broker_context
+import logos_delivery/api/messaging_client_api
 import
   ./[send_processor, relay_processor, lightpush_processor, delivery_task],
   logos_delivery/waku/[
@@ -18,7 +19,6 @@ import
     waku_rln_relay/rln_relay,
     waku_lightpush/client,
     waku_lightpush/callbacks,
-    events/message_events,
   ]
 
 logScope:

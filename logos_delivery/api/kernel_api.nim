@@ -1,18 +1,25 @@
 import std/options
 import chronos, results
-import logos_delivery/api/types
+import brokers/event_broker
+
+import logos_delivery/api/types as api_types
 import logos_delivery/waku/waku_core/topics/pubsub_topic
-import logos_delivery/waku/waku_store/common
+import logos_delivery/waku/waku_store/common as store_types
+
+export event_broker
+export api_types, pubsub_topic, store_types
 
 type IKernel* = ref object of RootObj
 
+EventBroker:
+  # Internal event emitted when a message arrives from the network via any protocol
+  type MessageSeenEvent* = object
+    topic*: PubsubTopic
+    message*: WakuMessage
+
 # --- topic construction ---
 method buildContentTopic*(
-    self: IKernel,
-    appName: string,
-    appVersion: uint32,
-    name: string,
-    encoding: string,
+    self: IKernel, appName: string, appVersion: uint32, name: string, encoding: string
 ): Future[Result[ContentTopic, string]] {.async: (raises: []), base.} =
   return err("Interface IKernel.buildContentTopic not implemented")
 

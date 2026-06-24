@@ -1,15 +1,10 @@
 import brokers/event_broker
 
-import logos_delivery/api/types
-import logos_delivery/waku/node/health_monitor/[protocol_health, topic_health]
-import logos_delivery/waku/waku_core/topics
+from logos_delivery/api/logos_delivery_api import EventConnectionStatusChange
+import logos_delivery/waku/node/health_monitor/topic_health
+from logos_delivery/waku/waku_core/topics import ContentTopic, PubsubTopic
 
-export protocol_health, topic_health
-
-# Notify health changes to node connectivity
-EventBroker:
-  type EventConnectionStatusChange* = object
-    connectionStatus*: ConnectionStatus
+export topic_health, EventConnectionStatusChange
 
 # Notify health changes to a subscribed topic
 # TODO: emit content topic health change events when subscribe/unsubscribe

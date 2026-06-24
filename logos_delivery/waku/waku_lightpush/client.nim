@@ -4,10 +4,10 @@ import logos_delivery/waku/compat/option_valueor
 
 import std/options, results, chronicles, chronos, metrics, bearssl/rand, stew/byteutils
 import libp2p/peerid, libp2p/stream/connection
+import logos_delivery/api/types
 import
   ../waku_core/peers,
   ../node/peer_manager,
-  ../utils/requests,
   ../waku_core,
   ./common,
   ./protocol_metrics,

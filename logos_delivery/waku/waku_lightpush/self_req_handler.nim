@@ -10,8 +10,8 @@
 ## that could be used also as a lightpush client, helping testing and development.
 
 import results, chronos, std/options, metrics
-import ../waku_core, ./protocol, ./common, ./rpc, ./rpc_codec, ../utils/requests
-
+import logos_delivery/api/types
+import ../waku_core, ./protocol, ./common, ./rpc, ./rpc_codec
 proc handleSelfLightPushRequest*(
     self: WakuLightPush, pubSubTopic: Option[PubsubTopic], message: WakuMessage
 ): Future[WakuLightPushResult] {.async.} =

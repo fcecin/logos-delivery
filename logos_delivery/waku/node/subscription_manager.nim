@@ -2,6 +2,7 @@ import logos_delivery/waku/compat/option_valueor
 import std/[sequtils, sets, tables, options], chronos, chronicles, metrics, results
 import libp2p/[peerid, peerinfo]
 import brokers/broker_context
+import logos_delivery/api/kernel_api
 
 import
   logos_delivery/waku/[
@@ -16,7 +17,6 @@ import
     waku_filter_v2/client as filter_client,
     waku_filter_v2/protocol as filter_protocol,
     events/health_events,
-    events/message_events,
     events/peer_events,
     requests/health_requests,
     node/peer_manager,
