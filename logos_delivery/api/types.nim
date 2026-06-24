@@ -52,7 +52,6 @@ proc hash*(r: RequestId): Hash =
   ## Allows `RequestId` to be used as a `Table` key.
   hash(string(r))
 
-
 proc init*(
     T: type MessageEnvelope,
     contentTopic: ContentTopic,
