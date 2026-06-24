@@ -47,7 +47,6 @@ proc stop*(self: MessagingClient) {.async.} =
 proc checkApiAvailability(self: MessagingClient): Result[void, string] =
   if self.isNil():
     return err("MessagingClient is not initialized")
-
   return ok()
 
 method subscribe*(
