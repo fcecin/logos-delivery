@@ -13,6 +13,7 @@ import
   libp2p/crypto/crypto,
   libp2p/protocols/ping,
   libp2p/protocols/pubsub/gossipsub,
+  libp2p/protocols/pubsub/pubsub,
   libp2p/protocols/pubsub/rpc/messages,
   libp2p/builders,
   libp2p/transports/tcptransport,
@@ -29,7 +30,6 @@ import
     waku_archive,
     waku_store_sync,
     rln,
-    rln/adapters/relay as waku_rln_adapter,
     node/waku_node,
     node/subscription_manager,
     node/peer_manager,
@@ -202,7 +202,62 @@ proc mountRlnRelay*(
     raise newException(CatchableError, "failed to mount Rln: " & error)
   if (rlnConf.userMessageLimit > rln.groupManager.rlnRelayMaxMessageLimit):
     error "rln-relay-user-message-limit can't exceed the MAX_MESSAGE_LIMIT in the rln contract"
-  let validator = generateRlnValidator(rln, spamHandler)
+
+  ## Bridges RLN's protocol-agnostic message validation into a relay
+  ## (gossipsub) validator. The core decision is made by
+  ## `validateMessageAndUpdateLog`; this maps the result to
+  ## `pubsub.ValidationResult` so the validator can be installed on
+  ## WakuRelay's validator chain.
+  proc validator(
+      topic: string, message: WakuMessage
+  ): Future[pubsub.ValidationResult] {.async.} =
+    trace "rln-relay topic validator is called"
+    rln.clearNullifierLog()
+
+    let msgProof = RateLimitProof.init(message.proof).valueOr:
+      trace "rln validator reject", error = error
+      return pubsub.ValidationResult.Reject
+
+    # validate the message and update log
+    let validationRes = await rln.validateMessageAndUpdateLog(message)
+
+    let
+      proof = byteutils.toHex(msgProof.proof)
+      epoch = fromEpoch(msgProof.epoch)
+      root = inHex(msgProof.merkleRoot)
+      shareX = inHex(msgProof.shareX)
+      shareY = inHex(msgProof.shareY)
+      nullifier = inHex(msgProof.nullifier)
+      payload = string.fromBytes(message.payload)
+    case validationRes
+    of Valid:
+      trace "message validity is verified, relaying",
+        proof = proof,
+        root = root,
+        shareX = shareX,
+        shareY = shareY,
+        nullifier = nullifier
+      waku_rln_valid_messages_total.inc(labelValues = [topic])
+      return pubsub.ValidationResult.Accept
+    of Invalid:
+      trace "message validity could not be verified, discarding",
+        proof = proof,
+        root = root,
+        shareX = shareX,
+        shareY = shareY,
+        nullifier = nullifier
+      return pubsub.ValidationResult.Reject
+    of Spam:
+      trace "A spam message is found! yay! discarding:",
+        proof = proof,
+        root = root,
+        shareX = shareX,
+        shareY = shareY,
+        nullifier = nullifier
+      if spamHandler.isSome():
+        let handler = spamHandler.get()
+        handler(message)
+      return pubsub.ValidationResult.Reject
 
   # register rln validator as default validator
   info "Registering RLN validator"
