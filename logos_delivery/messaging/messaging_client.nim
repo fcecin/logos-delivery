@@ -1,11 +1,17 @@
 import results, chronos
 import chronicles
+import brokers/[request_broker, broker_context]
 import
   logos_delivery/api/types,
   logos_delivery/api/messaging_client_api,
   logos_delivery/waku/node/[waku_node, subscription_manager],
   logos_delivery/messaging/delivery_service/[recv_service, send_service],
   logos_delivery/messaging/delivery_service/send_service/delivery_task
+
+RequestBroker:
+  proc MessagingSend(
+    envelope: MessageEnvelope
+  ): Future[Result[RequestId, string]] {.async.}
 
 type
   MessagingClientConf* = object
@@ -15,6 +21,7 @@ type
     useP2PReliability*: bool
 
   MessagingClient* = ref object of IMessagingClient
+    brokerCtx: BrokerContext
     node: WakuNode
     sendService*: SendService
     recvService*: RecvService
@@ -27,19 +34,34 @@ proc new*(
   ## `WakuNode` (Waku's core) for transport while exposing its own send/recv API.
   let sendService = ?SendService.new(conf.useP2PReliability, node)
   let recvService = RecvService.new(node)
-  ok(T(node: node, sendService: sendService, recvService: recvService))
+  ok(
+    T(
+      node: node,
+      sendService: sendService,
+      recvService: recvService,
+      brokerCtx: node.brokerCtx,
+    )
+  )
 
 proc start*(self: MessagingClient): Result[void, string] =
   if self.started:
     return ok()
   self.recvService.startRecvService()
   self.sendService.startSendService()
+
+  ?MessagingSend.setProvider(
+    self.brokerCtx,
+    proc(envelope: MessageEnvelope): Future[Result[RequestId, string]] {.async.} =
+      return await self.send(envelope)
+  )
+
   self.started = true
   ok()
 
 proc stop*(self: MessagingClient) {.async.} =
   if not self.started:
     return
+  MessagingSend.clearProvider(self.brokerCtx)
   await self.sendService.stopSendService()
   await self.recvService.stopRecvService()
   self.started = false

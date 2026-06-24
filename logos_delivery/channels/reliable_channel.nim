@@ -22,10 +22,10 @@ import stew/byteutils
 import libp2p/crypto/crypto as libp2p_crypto
 
 import logos_delivery/api/types
-import logos_delivery/messaging/delivery_service/send_service
 import logos_delivery/waku/waku_core/topics
 import logos_delivery/api/reliable_channel_manager_api
 import logos_delivery/api/messaging_client_api
+import logos_delivery/messaging/messaging_client
 
 import ./segmentation/segmentation
 import ./scalable_data_sync/scalable_data_sync
@@ -33,7 +33,7 @@ import ./rate_limit_manager/rate_limit_manager
 import ./encryption/encryption
 
 export
-  types, send_service, reliable_channel_manager_api, segmentation, scalable_data_sync,
+  types, reliable_channel_manager_api, segmentation, scalable_data_sync,
   rate_limit_manager, encryption
 
 const LipWireReliableChannelVersion* = "RELIABLE-CHANNEL-API/1"
@@ -83,7 +83,6 @@ type
     ## Spec-defined public type. Fields are private so callers cannot
     ## mutate internals and break invariants. Getters are added below
     ## for the few values consumers may need.
-    sendHandler: SendHandler
     channelId: ChannelId
     contentTopic: ContentTopic
     senderId: SdsParticipantID
@@ -262,14 +261,7 @@ proc onReadyToSend(
       meta: LipWireReliableChannelVersion.toBytes(),
     )
 
-    ## `sendHandler` is not annotated `(raises: [])`, but this listener is.
-    ## Convert any raise to a Result error so the state machine handles
-    ## both failure modes (Result.err and exception) through one path.
-    let sendRes =
-      try:
-        await self.sendHandler(envelope)
-      except CatchableError as e:
-        Result[RequestId, string].err("messaging send raised: " & e.msg)
+    let sendRes = await MessagingSend.request(self.brokerCtx, envelope)
 
     let messagingReqId = sendRes.valueOr:
       MessageErrorEvent.emit(
@@ -359,14 +351,9 @@ proc dispatchRepair(self: ReliableChannel, wire: seq[byte]) {.async: (raises: []
     meta: LipWireReliableChannelVersion.toBytes(),
   )
 
-  let sendRes =
-    try:
-      await self.sendHandler(envelope)
-    except CatchableError as e:
-      Result[RequestId, string].err("messaging send raised: " & e.msg)
-  if sendRes.isErr():
+  (await MessagingSend.request(self.brokerCtx, envelope)).isOkOr:
     debug "SDS repair rebroadcast dropped: dispatch failed",
-      channelId = self.channelId, error = sendRes.error
+      channelId = self.channelId, error = error
 
 proc onMessageReceived(
     self: ReliableChannel, messageHash: string, payload: seq[byte]
@@ -414,7 +401,6 @@ proc onMessageReceived(
 
 proc new*(
     T: type ReliableChannel,
-    sendHandler: SendHandler,
     channelId: ChannelId,
     contentTopic: ContentTopic,
     senderId: SdsParticipantID,
@@ -429,12 +415,7 @@ proc new*(
   ## should be wiring up. Encryption is delegated to the `Encrypt`/
   ## `Decrypt` request brokers, so the channel keeps no per-instance
   ## encryption state either.
-  ##
-  ## `sendHandler` is the egress dispatch. The owning `ReliableChannelManager`
-  ## typically constructs it as a closure over `MessagingClient.send`. Tests
-  ## pass a fake to drive the send state machine without touching the network.
   let chn = T(
-    sendHandler: sendHandler,
     channelId: channelId,
     contentTopic: contentTopic,
     senderId: senderId,

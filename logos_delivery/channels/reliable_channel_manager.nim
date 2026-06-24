@@ -37,10 +37,6 @@ type
   ReliableChannelManager* = ref object of IReliableChannelManager
     channels: Table[ChannelId, ReliableChannel]
     messagingClient: MessagingClient ## The channel layer chains onto messaging.
-    sendHandler: SendHandler
-      ## Default egress dispatch for channels created through this manager.
-      ## Built in `new` as a closure over `MessagingClient.send` so the channel
-      ## layer itself stays callable-only.
     brokerCtx: BrokerContext
 
 proc new*(
@@ -55,16 +51,10 @@ proc new*(
   if messagingClient.isNil():
     return err("messaging client is required")
 
-  let defaultSendHandler: SendHandler = proc(
-      envelope: MessageEnvelope
-  ): Future[Result[RequestId, string]] {.async: (raises: [CatchableError]), gcsafe.} =
-    return await messagingClient.send(envelope)
-
   return ok(
     T(
       channels: initTable[ChannelId, ReliableChannel](),
       messagingClient: messagingClient,
-      sendHandler: defaultSendHandler,
       brokerCtx: brokerCtx,
     )
   )
@@ -99,9 +89,8 @@ method createReliableChannel*(
     channelId: ChannelId,
     contentTopic: ContentTopic,
     senderId: SdsParticipantID,
-    sendHandler: SendHandler = nil,
 ): Result[ChannelId, string] {.raises: [].} =
-  ## Spec entry point. The `sendHandler` and `rng` the channel needs are
+  ## Spec entry point. The `rng` the channel needs are
   ## sourced from the owning `ReliableChannelManager` rather than passed
   ## per call. Encryption is wired up through the `Encrypt`/`Decrypt`
   ## request brokers — the application installs its own providers
@@ -109,9 +98,6 @@ method createReliableChannel*(
   ##
   ## Segmentation, SDS and rate-limit configs will eventually be read
   ## from the node's `NodeConfig`. Defaults for now.
-  ##
-  ## `sendHandler` defaults to the manager's default (constructed at mount
-  ## from `MessagingClient.send`); tests pass a fake to bypass the network.
   if self.channels.hasKey(channelId):
     return err("channel already exists: " & channelId)
 
@@ -130,10 +116,7 @@ method createReliableChannel*(
     epochPeriodSec: DefaultEpochPeriodSec, messagesPerEpoch: DefaultMessagesPerEpoch
   )
 
-  let effectiveSendHandler = if sendHandler.isNil(): self.sendHandler else: sendHandler
-
   let chn = ReliableChannel.new(
-    sendHandler = effectiveSendHandler,
     channelId = channelId,
     contentTopic = contentTopic,
     senderId = senderId,

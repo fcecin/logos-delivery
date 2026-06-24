@@ -44,7 +44,6 @@ method createReliableChannel*(
     channelId: ChannelId,
     contentTopic: ContentTopic,
     senderId: SdsParticipantID,
-    sendHandler: SendHandler = nil,
 ): Result[ChannelId, string] {.base.} =
   return err("Interface IReliableChannelManager.createReliableChannel not implemented")
 
