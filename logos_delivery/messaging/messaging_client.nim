@@ -52,7 +52,7 @@ proc start*(self: MessagingClient): Result[void, string] =
   ?MessagingSend.setProvider(
     self.brokerCtx,
     proc(envelope: MessageEnvelope): Future[Result[RequestId, string]] {.async.} =
-      return await self.send(envelope)
+      return await self.send(envelope),
   )
 
   self.started = true
