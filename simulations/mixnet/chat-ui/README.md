@@ -91,8 +91,16 @@ CHAT_UI="$HOME/Code/logos-chat-ui" ./run_chat_ui.sh A
 2. In **ClientB**: **+ new** → paste A's bundle + a first message → create.
 3. Send messages each way — they route A↔B **through the mixnet**.
 
+> ⚠️ **Expect up to ~1 minute for a message to appear on the other side locally.**
+> This is **not** mix delay — the actual forward path through the mixnet is
+> ~0.4–1.2 s end-to-end. It's the **local-sim load**: 5 mix nodes at `log-level=TRACE`
+> burn CPU and starve the desktop GUI's render loop, so the view repaints late. On
+> fleet nodes (no local logging load) messages render promptly. See the Load note below.
+
 To confirm a message actually traversed the mix, watch a mix node log for
-`onMessage - exit is destination` (the exit hop delivering to the recipient).
+`onMessage - exit is destination` (the exit hop delivering to the recipient) — the
+timestamp there is within a second or two of when the message was sent, even when
+the GUI takes longer to repaint.
 
 ## How the config flows
 
