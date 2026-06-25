@@ -91,16 +91,15 @@ CHAT_UI="$HOME/Code/logos-chat-ui" ./run_chat_ui.sh A
 2. In **ClientB**: **+ new** → paste A's bundle + a first message → create.
 3. Send messages each way — they route A↔B **through the mixnet**.
 
-> ⚠️ **Expect up to ~1 minute for a message to appear on the other side locally.**
-> This is **not** mix delay — the actual forward path through the mixnet is
-> ~0.4–1.2 s end-to-end. It's the **local-sim load**: 5 mix nodes at `log-level=TRACE`
-> burn CPU and starve the desktop GUI's render loop, so the view repaints late. On
-> fleet nodes (no local logging load) messages render promptly. See the Load note below.
+> ⏱️ **Messages arrive in ~1 s.** A mix send takes ~0.8–1.1 s end-to-end: the Sphinx
+> forward path reaches the exit hop in ~0.4–0.7 s, plus RLN proof time. (An earlier
+> build had a hardcoded 30 s per-send "root convergence" wait — a leftover from
+> dynamic on-chain membership — that made delivery take ~a minute; it was removed,
+> since static RLN membership has a fixed Merkle root with nothing to converge.)
 
 To confirm a message actually traversed the mix, watch a mix node log for
-`onMessage - exit is destination` (the exit hop delivering to the recipient) — the
-timestamp there is within a second or two of when the message was sent, even when
-the GUI takes longer to repaint.
+`onMessage - exit is destination` (the exit hop delivering to the recipient) — its
+timestamp lands within ~0.5 s of when the message was sent.
 
 ## How the config flows
 
@@ -118,10 +117,9 @@ chat config:
 
 ## Notes / limitations
 
-- **Load:** 5 mix nodes at `log-level=TRACE` (the default in `config*.toml`) write
-  multi-GB logs and can starve a desktop machine — that, not the mix or the code,
-  is what made messages take ~a minute to render in earlier testing. For real
-  testing prefer fleet nodes; locally, lower `log-level` if the UI feels sluggish.
+- **TRACE logging is heavy:** 5 mix nodes at `log-level=TRACE` (the default in
+  `config*.toml`) write multi-GB logs and burn CPU/disk — a resource concern, not a
+  correctness one. For long local runs, lower `log-level` or prefer fleet nodes.
 - **Static membership only:** the two chat slots are fixed. More clients means
   adding their peer-IDs to `setup_credentials.nim` + re-running `build_setup.sh`.
 - **No mix discovery on the client:** every mix node must be listed in
