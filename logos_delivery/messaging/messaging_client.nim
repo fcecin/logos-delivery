@@ -3,6 +3,7 @@
 ## `messaging/api.nim`.
 import results, chronos
 import
+  logos_delivery/api/messaging_client_api,
   logos_delivery/waku/node/waku_node,
   logos_delivery/messaging/delivery_service/[recv_service, send_service]
 
@@ -13,7 +14,7 @@ type
     ## follow-up PR. Today it only carries the p2p reliability toggle.
     useP2PReliability*: bool
 
-  MessagingClient* = ref object
+  MessagingClient* = ref object of IMessagingClient
     node*: WakuNode ## Waku core driven by this layer; read by `messaging/api.nim`.
     sendService*: SendService
     recvService*: RecvService

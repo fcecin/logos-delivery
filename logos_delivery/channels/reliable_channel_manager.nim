@@ -16,6 +16,7 @@ import brokers/broker_context
 import logos_delivery/messaging/messaging_client
 import logos_delivery/messaging/api/send
 import logos_delivery/api/types
+import logos_delivery/api/reliable_channel_manager_api
 
 import ./reliable_channel
 
@@ -27,7 +28,7 @@ type
     ## channel API. Placeholder for now (segmentation / SDS / rate-limit defaults
     ## will move here in a follow-up PR); kept so each layer owns its own config.
 
-  ReliableChannelManager* = ref object
+  ReliableChannelManager* = ref object of IReliableChannelManager
     channels*: Table[ChannelId, ReliableChannel] ## read by `channels/api.nim`
     messagingClient: MessagingClient ## The channel layer chains onto messaging.
     sendHandler*: SendHandler

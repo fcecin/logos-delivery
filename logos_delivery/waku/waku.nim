@@ -22,6 +22,7 @@ import
   metrics/chronos_httpserver,
   brokers/broker_context,
   logos_delivery/api/types,
+  logos_delivery/api/kernel_api,
   logos_delivery/waku/[
     waku_core,
     waku_node,
@@ -63,7 +64,7 @@ logScope:
 # Git version in git describe format (defined at compile time)
 const git_version* {.strdefine.} = "n/a"
 
-type Waku* = ref object
+type Waku* = ref object of IKernel
   stateInfo*: WakuStateInfo
   conf*: WakuConf
   rng*: crypto.Rng
