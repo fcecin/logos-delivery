@@ -36,28 +36,14 @@ type
 
   ReliableChannelManager* = ref object of IReliableChannelManager
     channels: Table[ChannelId, ReliableChannel]
-    messagingClient: MessagingClient ## The channel layer chains onto messaging.
     brokerCtx: BrokerContext
 
 proc new*(
     T: type ReliableChannelManager,
     conf: ReliableChannelManagerConf,
-    messagingClient: MessagingClient,
     brokerCtx: BrokerContext = globalBrokerContext(),
 ): Result[T, string] =
-  ## The reliable channel layer chains onto the messaging layer: its default
-  ## egress is `MessagingClient.send`, wrapped here so callers never wire the
-  ## handler themselves.
-  if messagingClient.isNil():
-    return err("messaging client is required")
-
-  return ok(
-    T(
-      channels: initTable[ChannelId, ReliableChannel](),
-      messagingClient: messagingClient,
-      brokerCtx: brokerCtx,
-    )
-  )
+  return ok(T(channels: initTable[ChannelId, ReliableChannel](), brokerCtx: brokerCtx))
 
 proc start*(self: ReliableChannelManager): Result[void, string] =
   ## Placeholder: per-channel listeners are installed in `ReliableChannel.new`,
