@@ -30,12 +30,11 @@ import
   ../../waku_lightpush as lightpush_protocol,
   ../peer_manager,
   ../../common/rate_limit/setting,
+  ../../waku_relay,
   ../../rln
 
 logScope:
   topics = "waku node lightpush api"
-
-const MountWithoutRelayError* = "cannot mount lightpush because relay is not mounted"
 
 ## Waku lightpush
 proc mountLegacyLightPush*(
@@ -43,10 +42,13 @@ proc mountLegacyLightPush*(
 ): Future[Result[void, string]] {.async.} =
   info "mounting legacy light push"
 
-  if node.wakuRelay.isNil():
-    return err(MountWithoutRelayError)
-
-  info "mounting legacy lightpush with relay"
+  let wakuRelayOpt =
+    if node.wakuRelay.isNil():
+      info "mounting legacy lightpush without relay"
+      none(WakuRelay)
+    else:
+      info "mounting legacy lightpush with relay"
+      some(node.wakuRelay)
   let rlnPeer =
     if node.rln.isNil():
       info "mounting legacy lightpush without rln-relay"
@@ -55,7 +57,7 @@ proc mountLegacyLightPush*(
       info "mounting legacy lightpush with rln-relay"
       some(node.rln)
   let pushHandler =
-    legacy_lightpush_protocol.getRelayPushHandler(node.wakuRelay, rlnPeer)
+    legacy_lightpush_protocol.getRelayPushHandler(wakuRelayOpt, rlnPeer)
 
   node.wakuLegacyLightPush =
     WakuLegacyLightPush.new(node.peerManager, node.rng, pushHandler, some(rateLimit))
@@ -154,10 +156,13 @@ proc mountLightPush*(
 ): Future[Result[void, string]] {.async.} =
   info "mounting light push"
 
-  if node.wakuRelay.isNil():
-    return err(MountWithoutRelayError)
-
-  info "mounting lightpush with relay"
+  let wakuRelayOpt =
+    if node.wakuRelay.isNil():
+      info "mounting lightpush without relay"
+      none(WakuRelay)
+    else:
+      info "mounting lightpush with relay"
+      some(node.wakuRelay)
   let rlnPeer =
     if node.rln.isNil():
       info "mounting lightpush without rln-relay"
@@ -165,7 +170,7 @@ proc mountLightPush*(
     else:
       info "mounting lightpush with rln-relay"
       some(node.rln)
-  let pushHandler = lightpush_protocol.getRelayPushHandler(node.wakuRelay, rlnPeer)
+  let pushHandler = lightpush_protocol.getRelayPushHandler(wakuRelayOpt, rlnPeer)
 
   node.wakuLightPush = WakuLightPush.new(
     node.peerManager, node.rng, pushHandler, node.wakuAutoSharding, some(rateLimit)

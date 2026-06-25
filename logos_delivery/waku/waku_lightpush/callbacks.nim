@@ -35,7 +35,7 @@ proc getNilPushHandler*(): PushMessageHandler =
     return lightpushResultInternalError("no waku relay found")
 
 proc getRelayPushHandler*(
-    wakuRelay: WakuRelay, rlnPeer: Option[Rln] = none[Rln]()
+    wakuRelay: Option[WakuRelay], rlnPeer: Option[Rln] = none[Rln]()
 ): PushMessageHandler =
   return proc(
       pubsubTopic: string, message: WakuMessage
@@ -44,10 +44,23 @@ proc getRelayPushHandler*(
     let msgWithProof = (await checkAndGenerateRLNProof(rlnPeer, message)).valueOr:
       return lighpushErrorResult(LightPushErrorCode.OUT_OF_RLN_PROOF, error)
 
-    (await wakuRelay.validateMessage(pubSubTopic, msgWithProof)).isOkOr:
-      return lighpushErrorResult(LightPushErrorCode.INVALID_MESSAGE, $error)
+    # Prefer the relay validator chain when available (preserves the full
+    # chain, including any non-RLN validators). Fall back to RLN-direct
+    # when relay is not mounted.
+    if wakuRelay.isSome():
+      (await wakuRelay.get().validateMessage(pubSubTopic, msgWithProof)).isOkOr:
+        return lighpushErrorResult(LightPushErrorCode.INVALID_MESSAGE, $error)
+    elif rlnPeer.isSome():
+      let validationRes = await rlnPeer.get().validateMessageAndUpdateLog(msgWithProof)
+      if validationRes != MessageValidationResult.Valid:
+        return lighpushErrorResult(LightPushErrorCode.INVALID_MESSAGE, $validationRes)
 
-    let publishedResult = (await wakuRelay.publish(pubsubTopic, msgWithProof)).valueOr:
+    if wakuRelay.isNone():
+      return lighpushErrorResult(
+        LightPushErrorCode.SERVICE_NOT_AVAILABLE, "no relay publish path"
+      )
+
+    let publishedResult = (await wakuRelay.get().publish(pubsubTopic, msgWithProof)).valueOr:
       let msgHash = computeMessageHash(pubsubTopic, message).to0xHex()
       notice "Lightpush request has not been published to any peers",
         msg_hash = msgHash, reason = $error

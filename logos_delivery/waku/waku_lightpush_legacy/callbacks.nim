@@ -38,7 +38,7 @@ proc getNilPushHandler*(): PushMessageHandler =
     return err("no waku relay found")
 
 proc getRelayPushHandler*(
-    wakuRelay: WakuRelay, rlnPeer: Option[Rln] = none[Rln]()
+    wakuRelay: Option[WakuRelay], rlnPeer: Option[Rln] = none[Rln]()
 ): PushMessageHandler =
   return proc(
       pubsubTopic: string, message: WakuMessage
@@ -46,9 +46,20 @@ proc getRelayPushHandler*(
     # append RLN proof
     let msgWithProof = ?(await checkAndGenerateRLNProof(rlnPeer, message))
 
-    ?(await wakuRelay.validateMessage(pubSubTopic, msgWithProof))
+    # Prefer the relay validator chain when available (preserves the full
+    # chain, including any non-RLN validators). Fall back to RLN-direct
+    # when relay is not mounted.
+    if wakuRelay.isSome():
+      ?(await wakuRelay.get().validateMessage(pubSubTopic, msgWithProof))
+    elif rlnPeer.isSome():
+      let validationRes = await rlnPeer.get().validateMessageAndUpdateLog(msgWithProof)
+      if validationRes != MessageValidationResult.Valid:
+        return err($validationRes)
 
-    (await wakuRelay.publish(pubsubTopic, msgWithProof)).isOkOr:
+    if wakuRelay.isNone():
+      return err(protocol_metrics.notPublishedAnyPeer)
+
+    (await wakuRelay.get().publish(pubsubTopic, msgWithProof)).isOkOr:
       ## Agreed change expected to the lightpush protocol to better handle such case. https://github.com/waku-org/pm/issues/93
       let msgHash = computeMessageHash(pubsubTopic, message).to0xHex()
       notice "Lightpush request has not been published to any peers",

@@ -82,7 +82,7 @@ proc setupSendProcessorChain(
         none[Rln]()
       else:
         some(rlnRelay)
-    let publishProc = getRelayPushHandler(relay, rln)
+    let publishProc = getRelayPushHandler(some(relay), rln)
 
     processors.add(RelaySendProcessor.new(isLightPushAvail, publishProc, brokerCtx))
   if isLightPushAvail:

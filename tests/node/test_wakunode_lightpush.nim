@@ -229,7 +229,7 @@ suite "Waku Lightpush message delivery":
     await allFutures(lightNode.stop(), bridgeNode.stop(), destNode.stop())
 
 suite "Waku Lightpush mounting behavior":
-  asyncTest "fails to mount when relay is not mounted":
+  asyncTest "mounts without relay":
     ## Given a node without Relay mounted
     let
       key = generateSecp256k1Key()
@@ -238,8 +238,9 @@ suite "Waku Lightpush mounting behavior":
     # Do not mount Relay on purpose
     check node.wakuRelay.isNil()
 
-    ## Then mounting Lightpush must fail
+    ## Then mounting Lightpush should succeed; the handler will return
+    ## SERVICE_NOT_AVAILABLE on push attempts as long as relay stays absent.
     let res = await node.mountLightPush()
     check:
-      res.isErr()
-      res.error == MountWithoutRelayError
+      res.isOk()
+      not node.wakuLightPush.isNil()

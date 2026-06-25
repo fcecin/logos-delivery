@@ -230,7 +230,7 @@ suite "Waku Legacy Lightpush message delivery":
     await allFutures(lightNode.stop(), bridgeNode.stop(), destNode.stop())
 
 suite "Waku Legacy Lightpush mounting behavior":
-  asyncTest "fails to mount when relay is not mounted":
+  asyncTest "mounts without relay":
     ## Given a node without Relay mounted
     let
       key = generateSecp256k1Key()
@@ -239,8 +239,10 @@ suite "Waku Legacy Lightpush mounting behavior":
     # Do not mount Relay on purpose
     check node.wakuRelay.isNil()
 
-    ## Then mounting Legacy Lightpush must fail
+    ## Then mounting Legacy Lightpush should succeed; the handler will
+    ## return notPublishedAnyPeer on push attempts as long as relay
+    ## stays absent.
     let res = await node.mountLegacyLightPush()
     check:
-      res.isErr()
-      res.error == MountWithoutRelayError
+      res.isOk()
+      not node.wakuLegacyLightPush.isNil()
