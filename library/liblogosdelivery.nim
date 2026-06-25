@@ -28,7 +28,8 @@ include
   ./events/message_events,
   ./events/connection_status_events,
   ./events/topic_health_events,
-  ./events/connection_change_events
+  ./events/connection_change_events,
+  ./channels_api/events
 
 proc listenInternalEvents(self: LogosDelivery) =
   ## Feed every FFI event from an internal nim-broker event.
@@ -37,6 +38,7 @@ proc listenInternalEvents(self: LogosDelivery) =
   self.listenConnectionStatusEvents()
   self.listenTopicHealthEvents()
   self.listenConnectionChangeEvents()
+  self.listenChannelEvents()
 
 # --- constructor / destructor ----------------------------------------------
 proc logosdelivery_create*(
@@ -68,10 +70,12 @@ proc stop*(self: LogosDelivery): Future[Result[string, string]] {.ffi.} =
     return err(error)
   return ok("")
 
-# --- operations (typed {.ffi.} procs, grouped per protocol) ----------------
+# --- operations (typed {.ffi.} procs, grouped per layer/protocol) ----------
 include
   ./messaging_api/subscriptions_api,
   ./messaging_api/send_api,
+  ./channels_api/channel_lifecycle_api,
+  ./channels_api/send_api,
   ./kernel_api/node_info_api,
   ./kernel_api/debug_node_api,
   ./kernel_api/ping_api,
