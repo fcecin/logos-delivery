@@ -5,8 +5,9 @@ Run two `logos-chat-ui` clients that exchange end-to-end messages **through the
 
 This is a full from-scratch runbook: clone → build → provision → run → message.
 
-> Running against the **live testnet-0.2 mix fleet** instead of a local sim?
-> See [README-fleet.md](README-fleet.md).
+> Want the **live testnet-0.2 mix fleet** instead of a local sim? The published
+> `chat_ui_mix` app is **self-contained** (no setup) — see its
+> [README → Try it](https://github.com/logos-co/logos-chat-ui/tree/feat/logos-testnetv02-mix#try-it).
 
 The two clients adopt the **two provisioned chat memberships** the sim generates
 (peer-IDs `…1Qx…` and `…RABscN`), via `CHAT_NODEKEY`. RLN keystores are
