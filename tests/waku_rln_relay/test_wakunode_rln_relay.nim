@@ -52,7 +52,7 @@ procSuite "WakuNode - RLN relay":
       let wakuRlnConfig1 =
         getWakuRlnConfig(manager = manager, index = MembershipIndex(1))
 
-      await node1.(wakuRlnConfig1)
+      await node1.setRlnValidator(wakuRlnConfig1)
       await node1.start()
 
       # Registration is mandatory before sending messages with rln-relay

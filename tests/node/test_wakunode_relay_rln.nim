@@ -93,7 +93,7 @@ proc setupRelayWithOnChainRln*(
     node: WakuNode, shards: seq[RelayShard], wakuRlnConfig: WakuRlnConfig
 ) {.async.} =
   await node.mountRelay(shards)
-  await node.(wakuRlnConfig)
+  await node.setRlnValidator(wakuRlnConfig)
 
 suite "Waku RlnRelay - End to End - Static":
   var
