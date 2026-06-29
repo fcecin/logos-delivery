@@ -20,51 +20,64 @@ EventBroker:
 # (ops in `waku/api/*`).
 type KernelApi* = concept w
   # --- topic construction ---
-  buildContentTopic(w, string, uint32, string, string) is
-    Future[Result[ContentTopic, string]]
-  buildPubsubTopic(w, string) is Future[Result[PubsubTopic, string]]
+  buildContentTopic(
+    w, appName = string, appVersion = uint32, name = string, encoding = string
+  ) is Future[Result[ContentTopic, string]]
+  buildPubsubTopic(w, topicName = string) is Future[Result[PubsubTopic, string]]
   defaultPubsubTopic(w) is Future[Result[PubsubTopic, string]]
 
   # --- relay ---
-  relayPublish(w, PubsubTopic, WakuMessage, uint32) is Future[Result[string, string]]
-  relaySubscribe(w, PubsubTopic) is Future[Result[bool, string]]
-  relayUnsubscribe(w, PubsubTopic) is Future[Result[bool, string]]
-  relayAddProtectedShard(w, uint16, uint16, string) is Future[Result[bool, string]]
-  relayConnectedPeers(w, PubsubTopic) is Future[Result[seq[string], string]]
-  relayPeersInMesh(w, PubsubTopic) is Future[Result[seq[string], string]]
-  relayNumPeersInMesh(w, PubsubTopic) is Future[Result[int, string]]
-  relayNumConnectedPeers(w, PubsubTopic) is Future[Result[int, string]]
+  relayPublish(w, pubsubTopic = PubsubTopic, message = WakuMessage, timeoutMs = uint32) is
+    Future[Result[string, string]]
+  relaySubscribe(w, pubsubTopic = PubsubTopic) is Future[Result[bool, string]]
+  relayUnsubscribe(w, pubsubTopic = PubsubTopic) is Future[Result[bool, string]]
+  relayAddProtectedShard(w, clusterId = uint16, shardId = uint16, publicKey = string) is
+    Future[Result[bool, string]]
+  relayConnectedPeers(w, pubsubTopic = PubsubTopic) is
+    Future[Result[seq[string], string]]
+  relayPeersInMesh(w, pubsubTopic = PubsubTopic) is Future[Result[seq[string], string]]
+  relayNumPeersInMesh(w, pubsubTopic = PubsubTopic) is Future[Result[int, string]]
+  relayNumConnectedPeers(w, pubsubTopic = PubsubTopic) is Future[Result[int, string]]
 
   # --- filter ---
-  filterSubscribe(w, PubsubTopic, seq[ContentTopic], FilterPushHandler) is
+  filterSubscribe(
+    w,
+    pubsubTopic = PubsubTopic,
+    contentTopics = seq[ContentTopic],
+    pushHandler = FilterPushHandler,
+  ) is Future[Result[bool, string]]
+  filterUnsubscribe(w, pubsubTopic = PubsubTopic, contentTopics = seq[ContentTopic]) is
     Future[Result[bool, string]]
-  filterUnsubscribe(w, PubsubTopic, seq[ContentTopic]) is Future[Result[bool, string]]
   filterUnsubscribeAll(w) is Future[Result[bool, string]]
 
   # --- lightpush ---
-  lightpushPublish(w, PubsubTopic, WakuMessage) is Future[Result[string, string]]
+  lightpushPublish(w, pubsubTopic = PubsubTopic, message = WakuMessage) is
+    Future[Result[string, string]]
 
   # --- store ---
-  storeQuery(w, StoreQueryRequest, string, int) is
+  storeQuery(w, request = StoreQueryRequest, peer = string, timeoutMs = int) is
     Future[Result[StoreQueryResponse, string]]
 
   # --- peer management ---
-  connect(w, seq[string], uint32) is Future[Result[bool, string]]
-  disconnectPeerById(w, string) is Future[Result[bool, string]]
+  connect(w, peers = seq[string], timeoutMs = uint32) is Future[Result[bool, string]]
+  disconnectPeerById(w, peerId = string) is Future[Result[bool, string]]
   disconnectAllPeers(w) is Future[Result[bool, string]]
-  dialPeer(w, string, string, int) is Future[Result[bool, string]]
-  dialPeerById(w, string, string, int) is Future[Result[bool, string]]
+  dialPeer(w, peerAddr = string, protocol = string, timeoutMs = int) is
+    Future[Result[bool, string]]
+  dialPeerById(w, peerId = string, protocol = string, timeoutMs = int) is
+    Future[Result[bool, string]]
   peerIdsFromPeerstore(w) is Future[Result[seq[string], string]]
   connectedPeersInfo(w) is Future[Result[seq[PeerConnInfo], string]]
   connectedPeers(w) is Future[Result[seq[string], string]]
-  peerIdsByProtocol(w, string) is Future[Result[seq[string], string]]
+  peerIdsByProtocol(w, protocol = string) is Future[Result[seq[string], string]]
 
   # --- discovery ---
-  dnsDiscovery(w, string, string, int) is Future[Result[seq[string], string]]
-  discv5UpdateBootnodes(w, string) is Future[Result[bool, string]]
+  dnsDiscovery(w, enrTreeUrl = string, nameServer = string, timeoutMs = int) is
+    Future[Result[seq[string], string]]
+  discv5UpdateBootnodes(w, bootnodes = string) is Future[Result[bool, string]]
   startDiscv5(w) is Future[Result[bool, string]]
   stopDiscv5(w) is Future[Result[bool, string]]
-  peerExchangeRequest(w, uint64) is Future[Result[int, string]]
+  peerExchangeRequest(w, numPeers = uint64) is Future[Result[int, string]]
 
   # --- debug / info ---
   version(w) is Future[Result[string, string]]
@@ -73,4 +86,4 @@ type KernelApi* = concept w
   myPeerId(w) is Future[Result[string, string]]
   metrics(w) is Future[Result[string, string]]
   isOnline(w) is Future[Result[bool, string]]
-  pingPeer(w, string, int) is Future[Result[int64, string]]
+  pingPeer(w, peerAddr = string, timeoutMs = int) is Future[Result[int64, string]]

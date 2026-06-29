@@ -33,6 +33,6 @@ EventBroker:
 
 # Structural API contract for a messaging client (ops in `messaging/api/*`).
 type MessagingApi* = concept c
-  subscribe(c, ContentTopic) is Future[Result[void, string]]
-  unsubscribe(c, ContentTopic) is Result[void, string]
-  send(c, MessageEnvelope) is Future[Result[RequestId, string]]
+  subscribe(c, contentTopic = ContentTopic) is Future[Result[void, string]]
+  unsubscribe(c, contentTopic = ContentTopic) is Result[void, string]
+  send(c, envelope = MessageEnvelope) is Future[Result[RequestId, string]]
