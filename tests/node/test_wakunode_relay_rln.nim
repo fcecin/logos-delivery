@@ -93,7 +93,7 @@ proc setupRelayWithOnChainRln*(
     node: WakuNode, shards: seq[RelayShard], wakuRlnConfig: WakuRlnConfig
 ) {.async.} =
   await node.mountRelay(shards)
-  await node.mountRlnRelay(wakuRlnConfig)
+  await node.setRlnValidator(wakuRlnConfig)
 
 suite "Waku RlnRelay - End to End - Static":
   var
@@ -128,22 +128,6 @@ suite "Waku RlnRelay - End to End - Static":
     await allFutures(client.stop(), server.stop())
 
   suite "Mount":
-    asyncTest "Can't mount if relay is not mounted":
-      # Given Relay and RLN are not mounted
-      check:
-        server.wakuRelay == nil
-        server.rln == nil
-
-      # When RlnRelay is mounted
-      let catchRes = catch:
-        await server.setupStaticRln(1)
-
-      # Then Relay and RLN are not mounted,and the process fails
-      check:
-        server.wakuRelay == nil
-        server.rln == nil
-        catchRes.error()[].msg == "WakuRelay protocol is not mounted, cannot mount Rln"
-
     asyncTest "Pubsub topics subscribed before mounting RlnRelay are added to it":
       # Given the node enables Relay and Rln while subscribing to a pubsub topic
       await server.setupRelayWithStaticRln(1.uint, @[pubsubTopic])
@@ -232,7 +216,7 @@ suite "Waku RlnRelay - End to End - Static":
       )
 
       try:
-        await node.mountRlnRelay(wakuRlnConfig)
+        await node.setRlnValidator(wakuRlnConfig)
       except CatchableError as e:
         check e.msg ==
           "failed to mount Rln: rln-relay-user-message-limit can't exceed the MAX_MESSAGE_LIMIT in the rln contract"
