@@ -199,6 +199,9 @@ jobs:
   # still run on docker-only PRs (no liblogosdelivery build required).
   nwaku-nwaku-interop-tests:
     needs: build-docker-image
+    # PR-only smoke test: the called workflow is built for pull-request context
+    # and breaks workflow startup on push to master. Gate it to PRs.
+    if: ${{ github.event_name == 'pull_request' }}
     uses: logos-messaging/logos-delivery-interop-tests/.github/workflows/nim_waku_PR.yml@SMOKE_TEST_2026.06.25
     with:
       node_nwaku: ${{ needs.build-docker-image.outputs.image }}
@@ -210,6 +213,9 @@ jobs:
   # Gated on `build`, so it is skipped on docker-only PRs where no lib is built.
   send-api-e2e-tests:
     needs: build
+    # PR-only smoke test (see nwaku-nwaku-interop-tests above): gate to PRs so it
+    # doesn't break the push-to-master workflow at startup.
+    if: ${{ github.event_name == 'pull_request' }}
     uses: logos-messaging/logos-delivery-interop-tests/.github/workflows/send_api_e2e_PR.yml@SMOKE_TEST_2026.06.25
     secrets: inherit
 
