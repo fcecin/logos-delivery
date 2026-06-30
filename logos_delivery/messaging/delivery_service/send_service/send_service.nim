@@ -65,7 +65,6 @@ proc setupSendProcessorChain(
     peerManager: PeerManager,
     lightpushClient: WakuLightPushClient,
     relay: WakuRelay,
-    rlnRelay: Rln,
     brokerCtx: BrokerContext,
 ): Result[BaseSendProcessor, string] =
   let isRelayAvail = not relay.isNil()
@@ -77,12 +76,7 @@ proc setupSendProcessorChain(
   var processors = newSeq[BaseSendProcessor]()
 
   if isRelayAvail:
-    let rln: Option[Rln] =
-      if rlnRelay.isNil():
-        none[Rln]()
-      else:
-        some(rlnRelay)
-    let publishProc = getRelayPushHandler(relay, rln)
+    let publishProc = getRelayPushHandler(relay)
 
     processors.add(RelaySendProcessor.new(isLightPushAvail, publishProc, brokerCtx))
   if isLightPushAvail:
@@ -107,7 +101,7 @@ proc new*(
   let checkStoreForMessages = preferP2PReliability and not w.wakuStoreClient.isNil()
 
   let sendProcessorChain = setupSendProcessorChain(
-    w.peerManager, w.wakuLightPushClient, w.wakuRelay, w.rln, w.brokerCtx
+    w.peerManager, w.wakuLightPushClient, w.wakuRelay, w.brokerCtx
   ).valueOr:
     return err("failed to setup SendProcessorChain: " & $error)
 

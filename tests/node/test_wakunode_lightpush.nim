@@ -97,6 +97,7 @@ suite "RLN Proofs as a Lightpush Service":
     client {.threadvar.}: WakuNode
     anvilProc {.threadvar.}: Process
     manager {.threadvar.}: OnchainGroupManager
+    wakuRlnConfig {.threadvar.}: WakuRlnConfig
 
     serverRemotePeerInfo {.threadvar.}: RemotePeerInfo
     pubsubTopic {.threadvar.}: PubsubTopic
@@ -116,7 +117,7 @@ suite "RLN Proofs as a Lightpush Service":
 
     # mount rln-relay
     # match prod epoch window to reduce test flake
-    let wakuRlnConfig = getWakuRlnConfig(
+    wakuRlnConfig = getWakuRlnConfig(
       manager = manager, index = MembershipIndex(1), epochSizeSec = 600
     )
 
@@ -160,9 +161,15 @@ suite "RLN Proofs as a Lightpush Service":
         newTestWakuNode(generateSecp256k1Key(), parseIpAddress("0.0.0.0"), Port(0))
       lightpushClient.mountLightPushClient()
 
+      # Attach the RLN proof. In production the client mounts RLN and generates the
+      # proof in lightpushPublish; here we generate it using the server's RLN instance
+      # since both ends share group state via the in-memory manager.
+      let msgWithProof =
+        (await checkAndGenerateRLNProof(some(server.rln), message)).get()
+
       # When the client publishes a message
       let publishResponse = await lightpushClient.lightpushPublish(
-        some(pubsubTopic), message, some(serverRemotePeerInfo)
+        some(pubsubTopic), msgWithProof, some(serverRemotePeerInfo)
       )
 
       if not publishResponse.isOk():

@@ -1,7 +1,7 @@
 {.push raises: [].}
 
-import std/[times, sequtils]
-import chronos, results, stew/byteutils
+import std/[options, times, sequtils]
+import chronos, chronicles, results, stew/byteutils
 
 import ./types, ./protocol_types, ./conversion_utils, ./group_manager, ./nonce_manager
 
@@ -63,3 +63,23 @@ proc generateRLNProof*(
   let proof = (await rlnPeer.groupManager.generateProof(input, epoch, nonce)).valueOr:
     return err("could not generate rln-v2 proof: " & $error)
   return ok(proof.encode().buffer)
+
+proc checkAndGenerateRLNProof*(
+    rlnPeer: Option[Rln], message: WakuMessage
+): Future[Result[WakuMessage, string]] {.async.} =
+  if message.proof.len > 0:
+    return ok(message)
+
+  if rlnPeer.isNone():
+    notice "Publishing message without RLN proof"
+    return ok(message)
+
+  let
+    time = getTime().toUnix()
+    senderEpochTime = float64(time)
+  var msgWithProof = message
+  msgWithProof.proof = (
+    await rlnPeer.get().generateRLNProof(msgWithProof.toRLNSignal(), senderEpochTime)
+  ).valueOr:
+    return err($error)
+  return ok(msgWithProof)
