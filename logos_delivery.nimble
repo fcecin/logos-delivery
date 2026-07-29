@@ -384,16 +384,26 @@ task libLogosDeliveryIOS, "Build the mobile bindings for iOS":
   let extraParams = "-d:chronicles_log_level=ERROR"
   buildMobileIOS srcDir, extraParams
 
-proc test(name: string, params = "-d:chronicles_log_level=DEBUG") =
+proc test(
+    name: string,
+    params = "-d:chronicles_log_level=DEBUG",
+    cacheDir = "nimcache/debug/all_tests_shared",
+) =
   # XXX: When running `> NIM_PARAMS="-d:chronicles_log_level=INFO" make test2`
   # I expect compiler flag to be overridden, however it stays with whatever is
   # specified here.
-  buildBinary name, "tests/", params
+  #
+  # Suite binaries compiled with identical flags share `cacheDir`, reusing
+  # each other's object files (the second large binary compiles ~60%
+  # faster). A suite with different defines must pass its own directory.
+  buildBinary name, "tests/", params & " --nimcache:" & cacheDir
   exec "build/" & name
 
 ### Waku common tasks
 task testcommon, "Build & run common tests":
-  test "all_tests_common", "-d:chronicles_log_level=DEBUG -d:chronosStrictException"
+  test "all_tests_common",
+    "-d:chronicles_log_level=DEBUG -d:chronosStrictException",
+    "nimcache/debug/all_tests_common"
 
 ### Waku tasks
 task wakunode2, "Build Waku v2 cli node":
