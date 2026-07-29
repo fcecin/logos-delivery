@@ -125,9 +125,13 @@ type
     wakuRendezvousClient*: rendezvous_client.WakuRendezVousClient
     announcedAddresses*: seq[MultiAddress]
     natMappedAddresses*: seq[MultiAddress]
-      ## peerInfo.addrs as produced by the switch's own address mappers
-      ## (wildcard resolver + NATService port mapping) during switch.start,
-      ## captured before waku's announce mapper takes over peerInfo.addrs
+      ## the address-mapper chain's latest output (resolved listen addresses
+      ## plus any NATService-mapped external addresses), captured by the
+      ## announce mapper on every peerInfo update
+    onAnnouncedAddressesChange*: proc() {.gcsafe, raises: [].}
+      ## invoked whenever a peerInfo update changes the announced addresses
+      ## (e.g. a NAT mapping appears, is renewed elsewhere, or goes away),
+      ## so ENR-level state can be refreshed by the layer that owns it
     extMultiAddrsOnly*: bool # When true, skip automatic IP address replacement
     started*: bool # Indicates that node has started listening
     topicSubscriptionQueue*: AsyncEventQueue[SubscriptionEvent]
@@ -509,6 +513,9 @@ proc foldNatMappedAddresses(node: WakuNode) =
   info "Replacing announced addresses with NAT-mapped external addresses",
     previous = $node.announcedAddresses, updated = $newAnnounced
   node.announcedAddresses = newAnnounced
+
+  if not node.onAnnouncedAddressesChange.isNil():
+    node.onAnnouncedAddressesChange()
 
 func hasZeroPort(ma: MultiAddress): bool =
   ## True when the address's transport port is 0. The config uses port 0 to
