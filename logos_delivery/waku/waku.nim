@@ -273,11 +273,26 @@ proc getRunningNetConfig(waku: Waku): Future[Result[NetConfig, string]] {.async.
   if quicPort.isSome() and conf.quicConf.isSome():
     conf.quicConf.get().port = quicPort.get()
 
+  # External IP and mapped ports discovered by the switch's NATService
+  # (UPnP / NAT-PMP), so the recomputed NetConfig and the ENR carry the
+  # mapped external endpoint. The external IP is only used when at least one
+  # port mapping is actually in place: a discovered IP without a mapping is
+  # not a reachable endpoint and must not be announced.
+  let natMappedAddresses = waku.node.natMappedExternalAddresses()
+  let natMappedPorts = getPorts(natMappedAddresses).valueOr:
+    return err("Could not retrieve NAT-mapped ports: " & error)
+  let natExtIp =
+    if natMappedAddresses.len > 0:
+      waku.node.natExternalIp()
+    else:
+      Opt.none(IpAddress)
+
   # Rebuild NetConfig from the bound ports already read back into `conf`.
   let netConf = (
     await networkConfiguration(
       conf.clusterId, conf.endpointConf, conf.discv5Conf, conf.webSocketConf,
-      conf.quicConf, conf.wakuFlags, conf.dnsAddrsNameServers,
+      conf.quicConf, conf.wakuFlags, conf.dnsAddrsNameServers, natExtIp,
+      natMappedPorts.tcpPort, natMappedPorts.quicPort,
     )
   ).valueOr:
     return err("Could not update NetConfig: " & error)
