@@ -20,10 +20,17 @@ type MessageIdProvider* = pubsub.MsgIdProvider
 # Waku Relay (Gossipsub) protocol's message cache and the gossiping process, and
 # as a consequence the network.
 
+const EmptyPayload: seq[byte] = @[]
+
 proc defaultMessageIdProvider*(
     message: messages.Message
 ): Result[MessageID, ValidationResult] =
-  let hash = sha256.digest(message.data)
+  ## `data[]` borrows the payload. `get` would copy it, once per message.
+  let hash =
+    if message.data.isSome:
+      sha256.digest(message.data[])
+    else:
+      sha256.digest(EmptyPayload)
   ok(@(hash.data))
 
 ## Waku message Unique ID provider
