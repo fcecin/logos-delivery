@@ -26,13 +26,11 @@ suite "Waku Keepalive":
 
     var completionFut = newFuture[bool]()
 
-    proc pingHandler(peerId: PeerID) {.async, gcsafe.} =
+    proc pingHandler(peerId: PeerID) {.async: (raises: []), gcsafe.} =
       info "Ping received"
 
-      check:
-        peerId == node1.switch.peerInfo.peerId
-
-      completionFut.complete(true)
+      # PingHandler is raises: []. The comparison travels in the future.
+      completionFut.complete(peerId == node1.switch.peerInfo.peerId)
 
     await node1.start()
     (await node1.mountRelay()).isOkOr:
