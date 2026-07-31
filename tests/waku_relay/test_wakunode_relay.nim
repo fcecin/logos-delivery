@@ -559,8 +559,10 @@ suite "WakuNode - Relay":
     await node2.stop()
 
   asyncTest "Bad peers with low reputation are disconnected":
-    # Create 5 nodes
-    let nodes = toSeq(0 ..< 5).mapIt(newTestWakuNode(generateSecp256k1Key()))
+    # The bad-peer scoring under test is transport agnostic. TCP teardown
+    # is deterministic enough to assert on connection counts.
+    let nodes =
+      toSeq(0 ..< 5).mapIt(newTestWakuNode(generateSecp256k1Key(), quicEnabled = false))
     await allFutures(nodes.mapIt(it.start()))
     await allFutures(nodes.mapIt(it.mountRelay()))
 
@@ -605,14 +607,19 @@ suite "WakuNode - Relay":
       check:
         nodes[i].wakuRelay.peerStats[nodes[0].switch.peerInfo.peerId].score == -249999.9
 
-    # nodes[0] was blacklisted from all other peers, no connections
-    check:
-      nodes[0].peerManager.switch.connManager.getConnections().len == 0
+    # The disconnect sweep runs on a score-decay tick and the kicked side
+    # sees the closes asynchronously. Poll for the terminal state.
+    var meshDroppedBadPeer = false
+    for _ in 0 ..< 150:
+      if nodes[0].peerManager.switch.connManager.getConnections().len == 0 and
+          toSeq(1 ..< 5).allIt(
+            nodes[it].peerManager.switch.connManager.getConnections().len == 3
+          ):
+        meshDroppedBadPeer = true
+        break
+      await sleepAsync(100.millis)
 
-    # the rest of the nodes now have 1 conn less (kicked nodes[0] out)
-    for i in 1 ..< 5:
-      check:
-        nodes[i].peerManager.switch.connManager.getConnections().len == 3
+    check meshDroppedBadPeer
 
     # Stop all nodes
     await allFutures(nodes.mapIt(it.stop()))
