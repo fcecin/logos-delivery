@@ -645,24 +645,22 @@ proc start*(node: WakuNode) {.async.} =
   if not node.wakuRendezvousClient.isNil():
     await node.wakuRendezvousClient.start()
 
-  ## The switch uses this mapper to update peer info addrs
-  ## with announced addrs after start
+  ## NOTE: This will dispatch gossipsub start to the WakuRelay.start method override
+  await node.switch.start()
+
+  ## The switch just bound its sockets: replace any zero-port placeholders
+  ## in the announced addresses with the resolved ones.
+  node.resolveAnnouncedAddresses()
+
+  ## The switch uses this mapper to update peer info addrs with announced
+  ## addrs. It is installed after switch.start so it is not in the mapper
+  ## chain while the switch's own services start and mutate that chain.
   let addressMapper = proc(
       listenAddrs: seq[MultiAddress]
   ): Future[seq[MultiAddress]] {.gcsafe, async: (raises: [CancelledError]).} =
     return node.announcedAddresses
   node.switch.peerInfo.addressMappers.add(addressMapper)
 
-  ## The switch will update addresses after start using the addressMapper
-  ## NOTE: This will dispatch gossipsub start to the WakuRelay.start method override
-  await node.switch.start()
-
-  ## The switch just bound its sockets: replace any zero-port placeholders
-  ## in the announced addresses with the resolved ones, then re-run the
-  ## mapper chain. `peerInfo.update` is what regenerates the signed peer
-  ## record from the new addresses; assigning `peerInfo.addrs` directly
-  ## would leave the record advertising the placeholders it just removed.
-  node.resolveAnnouncedAddresses()
   await node.switch.peerInfo.update()
 
   # Reconnect to known relay peers in the background; it waits a prune backoff
