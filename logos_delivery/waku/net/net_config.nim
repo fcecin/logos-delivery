@@ -58,11 +58,6 @@ template ipQuicEndPoint(address: IpAddress, port: Port): MultiAddress =
 template dns4QuicEndPoint(dns4DomainName: string, port: Port): MultiAddress =
   dns4Ma(dns4DomainName) & udpPortMa(port) & quicFlag()
 
-proc formatListenAddress(inputMultiAdd: MultiAddress): MultiAddress =
-  let inputStr = $inputMultiAdd
-  # If MultiAddress contains "0.0.0.0", replace it for "127.0.0.1"
-  return MultiAddress.init(inputStr.replace("0.0.0.0", "127.0.0.1")).get()
-
 proc isWsAddress*(ma: MultiAddress): bool =
   let
     isWs = ma.contains(multiCodec("ws")).get()
@@ -165,7 +160,8 @@ proc init*(
   if dns4DomainName.isSome():
     # Use dns4 for externally announced addresses
     try:
-      hostExtAddress = Opt.some(dns4TcpEndPoint(dns4DomainName.get(), extPort.get()))
+      hostExtAddress =
+        Opt.some(dns4TcpEndPoint(dns4DomainName.get(), extPort.get(bindPort)))
     except CatchableError:
       return err(getCurrentExceptionMsg())
 
@@ -215,7 +211,7 @@ proc init*(
     if hostExtAddress.isSome():
       announcedAddresses.add(hostExtAddress.get())
     else:
-      announcedAddresses.add(formatListenAddress(hostAddress))
+      announcedAddresses.add(hostAddress)
         # We always have at least a bind address for the host
 
     if wsExtAddress.isSome():
@@ -227,7 +223,7 @@ proc init*(
     if quicExtAddress.isSome():
       announcedAddresses.add(quicExtAddress.get())
     elif quicHostAddress.isSome() and not containsQuicAddress(extMultiAddrs):
-      announcedAddresses.add(formatListenAddress(quicHostAddress.get()))
+      announcedAddresses.add(quicHostAddress.get())
 
   # External multiaddrs that the operator may have configured
   if extMultiAddrs.len > 0:

@@ -13,7 +13,7 @@ import
   eth/p2p/discoveryv5/enr,
   libp2p/crypto/crypto,
   libp2p/crypto/curve25519,
-  libp2p/[multiaddress, multicodec],
+  libp2p/[multiaddress, multicodec, wire],
   libp2p/protocols/ping,
   libp2p/protocols/pubsub/gossipsub,
   libp2p/protocols/pubsub/rpc/messages,
@@ -460,13 +460,6 @@ proc mountRendezvous*(
   except LPError:
     error "failed to mount wakuRendezvous", error = getCurrentExceptionMsg()
 
-proc isBindIpWithZeroPort(inputMultiAdd: MultiAddress): bool =
-  let inputStr = $inputMultiAdd
-  if inputStr.contains("0.0.0.0/tcp/0") or inputStr.contains("127.0.0.1/tcp/0"):
-    return true
-
-  return false
-
 proc updateAnnouncedAddrWithPrimaryIpAddr*(node: WakuNode): Result[void, string] =
   # Skip automatic IP replacement if extMultiAddrsOnly is set
   # This respects the user's explicitly configured announced addresses
@@ -476,7 +469,9 @@ proc updateAnnouncedAddrWithPrimaryIpAddr*(node: WakuNode): Result[void, string]
   let peerInfo = node.switch.peerInfo
   var announcedStr = ""
   var listenStr = ""
-  var localIp = "0.0.0.0"
+  ## A wildcard bind listens on loopback; announce that when the primary
+  ## IP is unknown.
+  var localIp = "127.0.0.1"
 
   try:
     localIp = $getPrimaryIPAddr()
@@ -488,8 +483,9 @@ proc updateAnnouncedAddrWithPrimaryIpAddr*(node: WakuNode): Result[void, string]
   ## Update the WakuNode addresses
   var newAnnouncedAddresses = newSeq[MultiAddress](0)
   for address in node.announcedAddresses:
-    ## Replace "0.0.0.0" or "127.0.0.1" with the localIp
-    let newAddr = ($address).replace("0.0.0.0", localIp).replace("127.0.0.1", localIp)
+    ## Replace a wildcard host with the localIp. A loopback bind stays
+    ## loopback: nothing listens at the primary IP.
+    let newAddr = ($address).replace("0.0.0.0", localIp)
     let fulladdr = "[" & $newAddr & "/p2p/" & $peerInfo.peerId & "]"
     announcedStr &= fulladdr
     let newMultiAddr = MultiAddress.init(newAddr).valueOr:
@@ -512,6 +508,71 @@ proc updateAnnouncedAddrWithPrimaryIpAddr*(node: WakuNode): Result[void, string]
   info "DNS: discoverable ENR ", enr = node.enr.toUri()
 
   return ok()
+
+func hasZeroPort(ma: MultiAddress): bool =
+  ## Port 0 means "the kernel picks a port at bind time". The tcp or udp
+  ## component is read directly, so dns-hosted entries are covered too.
+  for code in [multiCodec("tcp"), multiCodec("udp")]:
+    let part = ma[code].valueOr:
+      continue
+    let argument = part.protoArgument().valueOr:
+      continue
+    if argument.len == 2 and argument[0] == 0 and argument[1] == 0:
+      return true
+  false
+
+func replacePort(ma: MultiAddress, port: Port): Opt[MultiAddress] =
+  ## Rebuild `ma` with its tcp or udp component set to `port`.
+  let
+    tcp = multiCodec("tcp")
+    udp = multiCodec("udp")
+  var res = MultiAddress.init()
+  for item in ma.items:
+    let part = item.valueOr:
+      return Opt.none(MultiAddress)
+    let code = part.protoCode.valueOr:
+      return Opt.none(MultiAddress)
+    if code == tcp or code == udp:
+      let portMa = MultiAddress.init(code, int(port)).valueOr:
+        return Opt.none(MultiAddress)
+      res.append(portMa).isOkOr:
+        return Opt.none(MultiAddress)
+    else:
+      res.append(part).isOkOr:
+        return Opt.none(MultiAddress)
+  Opt.some(res)
+
+proc resolveAnnouncedPorts(node: WakuNode) =
+  ## Substitute the bound ports into port-0 announced entries, per
+  ## transport. An entry whose transport did not bind is dropped.
+  if not node.announcedAddresses.anyIt(it.hasZeroPort()):
+    return
+
+  let bound = getPorts(node.switch.peerInfo.listenAddrs).valueOr:
+    error "failed to read bound ports; announced addresses keep port 0", error = error
+    return
+
+  var resolved: seq[MultiAddress]
+  for ma in node.announcedAddresses:
+    if not ma.hasZeroPort():
+      resolved.add(ma)
+      continue
+    let port = (
+      if ma.isWsAddress():
+        bound.websocketPort
+      elif ma.isQuicAddress():
+        bound.quicPort
+      else:
+        bound.tcpPort
+    ).valueOr:
+      continue
+    let substituted = ma.replacePort(port).valueOr:
+      continue
+    resolved.add(substituted)
+
+  info "Resolved dynamically allocated ports in announced addresses",
+    previous = $node.announcedAddresses, updated = $resolved
+  node.announcedAddresses = resolved
 
 proc startProvidersAndListeners*(node: WakuNode) =
   RequestRelayShard.setProvider(
@@ -596,28 +657,28 @@ proc start*(node: WakuNode) {.async.} =
   logos_delivery_version.set(1, labelValues = [git_version])
   info "Starting Waku node", version = git_version
 
-  var zeroPortPresent = false
-  for address in node.announcedAddresses:
-    if isBindIpWithZeroPort(address):
-      zeroPortPresent = true
-
   if not node.wakuStoreResume.isNil():
     await node.wakuStoreResume.start()
 
   if not node.wakuRendezvousClient.isNil():
     await node.wakuRendezvousClient.start()
 
-  ## The switch uses this mapper to update peer info addrs
-  ## with announced addrs after start
+  ## NOTE: This will dispatch gossipsub start to the WakuRelay.start method override
+  await node.switch.start()
+
+  ## The switch bound its sockets. Resolve the zero-port placeholders.
+  node.resolveAnnouncedPorts()
+
+  ## Mapper that answers with the announced addresses. Installed after
+  ## switch.start, so starting services do not walk a changing chain.
   let addressMapper = proc(
       listenAddrs: seq[MultiAddress]
   ): Future[seq[MultiAddress]] {.gcsafe, async: (raises: [CancelledError]).} =
     return node.announcedAddresses
   node.switch.peerInfo.addressMappers.add(addressMapper)
 
-  ## The switch will update addresses after start using the addressMapper
-  ## NOTE: This will dispatch gossipsub start to the WakuRelay.start method override
-  await node.switch.start()
+  ## `update` also regenerates the signed peer record.
+  await node.switch.peerInfo.update()
 
   # Reconnect to known relay peers in the background; it waits a prune backoff
   # and must not block startup.
@@ -639,11 +700,8 @@ proc start*(node: WakuNode) {.async.} =
   node.subscriptionManager.start().isOkOr:
     error "failed to start subscription manager", error = error
 
-  if not zeroPortPresent:
-    updateAnnouncedAddrWithPrimaryIpAddr(node).isOkOr:
-      error "failed update announced addr", error = $error
-  else:
-    info "Listening port is dynamically allocated, address and ENR generation postponed"
+  updateAnnouncedAddrWithPrimaryIpAddr(node).isOkOr:
+    error "failed update announced addr", error = $error
 
   info "Node started successfully"
 
