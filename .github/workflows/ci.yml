@@ -200,6 +200,13 @@ jobs:
   # still run on docker-only PRs (no liblogosdelivery build required).
   nwaku-nwaku-interop-tests:
     needs: build-docker-image
+    # Pinned to a commit, not the SMOKE_TEST_2026.06.25 tag. That tag is an
+    # annotated tag, and GitHub cannot resolve the nested `./...` workflow call
+    # inside nim_waku_PR.yml when the outer ref is one: on push it aborts the
+    # whole run before any job is scheduled ("workflow was not found"), which is
+    # why master had no CI at all from 2026-06-26 onward. pull_request events
+    # tolerate it, so this only ever showed up on master.
+    # Commit below is SMOKE_TEST_2026.06.25. Re-pin when bumping the smoke tests.
     uses: logos-messaging/logos-delivery-interop-tests/.github/workflows/nim_waku_PR.yml@6980880dba70aebe443b1ea1864891940980ecea
     with:
       node_nwaku: ${{ needs.build-docker-image.outputs.image }}
