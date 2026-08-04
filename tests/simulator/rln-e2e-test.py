@@ -197,7 +197,9 @@ def _publish_until_ok(node_url: str, attempts: int = 20, spacing: float = 5.0) -
     return False
 
 
-def scenario_warmup(nodes: list[str], attempts: int = 20) -> Result:
+def scenario_warmup(
+    nodes: list[str], attempts: int = 20, mesh_deadline_sec: int = 60
+) -> Result:
     """Readiness gate: every node must successfully publish at least once.
     This absorbs mesh-formation churn so PROPAGATION/RATE_LIMIT aren't
     judging a not-yet-connected fleet. Consumes 1 nonce/node — well within
@@ -205,11 +207,50 @@ def scenario_warmup(nodes: list[str], attempts: int = 20) -> Result:
     with cf.ThreadPoolExecutor(max_workers=min(8, len(nodes))) as ex:
         ready = list(ex.map(lambda n: _publish_until_ok(url_of(n), attempts), nodes))
     not_ready = [n for n, ok in zip(nodes, ready) if not ok]
+    if not_ready:
+        return Result(
+            "WARMUP",
+            False,
+            f"{len(nodes) - len(not_ready)}/{len(nodes)} nodes publishing"
+            f"; never ready: {not_ready[:5]}",
+        )
+
+    # A 200 does not mean the message went anywhere: gossipsub drops a publish
+    # made with an empty mesh, silently and without retransmitting. So probe
+    # until one publish actually lands on every receiver. That, not HTTP 200,
+    # is what "the fleet is connected" means, and it is what PROPAGATION is
+    # entitled to assume when it asserts a single publish reaches everyone.
+    sender, receivers = nodes[0], nodes[1:]
+    if not receivers:
+        return Result("WARMUP", True, f"{len(nodes)}/{len(nodes)} nodes publishing")
+
+    deadline = time.time() + mesh_deadline_sec
+    unreached = list(receivers)
+    while time.time() < deadline and unreached:
+        probe = f"warmup-probe-{time.time_ns()}".encode()
+        if waku_publish(url_of(sender), probe, timeout=10.0) != 200:
+            time.sleep(2)
+            continue
+        encoded = base64.b64encode(probe).decode().rstrip("=")
+        time.sleep(3)
+        with cf.ThreadPoolExecutor(max_workers=min(32, len(unreached))) as ex:
+            inboxes = list(ex.map(waku_get_messages, [url_of(r) for r in unreached]))
+        unreached = [
+            r
+            for r, inbox in zip(unreached, inboxes)
+            if inbox is None
+            or not any((m.get("payload") or "").rstrip("=") == encoded for m in inbox)
+        ]
+
     return Result(
         "WARMUP",
-        not not_ready,
-        f"{len(nodes) - len(not_ready)}/{len(nodes)} nodes publishing"
-        + (f"; never ready: {not_ready[:5]}" if not_ready else ""),
+        not unreached,
+        f"{len(nodes)}/{len(nodes)} nodes publishing"
+        + (
+            f"; mesh never reached: {unreached[:5]}"
+            if unreached
+            else f", mesh confirmed to all {len(receivers)} receivers"
+        ),
     )
 
 
@@ -271,51 +312,25 @@ def scenario_propagation(
 ) -> Result:
     """Send one message on `sender`, expect it visible in every receiver's
     REST inbox within settle_sec."""
-    # Re-publish on each attempt instead of publishing once and polling.
-    #
-    # WARMUP only proves a node *accepts* a publish: it returns 200 with an
-    # empty gossipsub mesh, and a message published with no mesh peers is
-    # dropped, never queued and never retransmitted. On a loaded runner the
-    # mesh needs a few seconds more, and a marker published inside that window
-    # reaches nobody -- observed in CI as the publisher's first two messages
-    # reaching 0/5 receivers while everything from ~6s later reached all of
-    # them. Polling for that first marker cannot work; only a fresh publish can.
-    #
-    # Each receiver is dropped from the check once it has seen its marker,
-    # because the REST inbox GET drains the cache.
-    seen: dict[str, bool] = {r: False for r in receivers}
-    detail: dict[str, str] = {r: "never checked" for r in receivers}
-    deadline = time.time() + max(settle_sec, 60)
-    attempt = 0
+    marker = f"propagation-marker-{time.time_ns()}".encode()
+    code = waku_publish(url_of(sender), marker)
+    if code != 200:
+        return Result("PROPAGATION", False, f"sender publish returned {code}")
 
-    while time.time() < deadline and not all(seen.values()):
-        attempt += 1
-        marker = f"propagation-marker-{time.time_ns()}".encode()
-        code = waku_publish(url_of(sender), marker)
-        if code != 200:
-            for r in receivers:
-                if not seen[r]:
-                    detail[r] = f"sender publish returned {code}"
-            time.sleep(2)
+    time.sleep(settle_sec)
+
+    encoded_marker = base64.b64encode(marker).decode().rstrip("=")
+    missing = []
+    with cf.ThreadPoolExecutor(max_workers=min(32, len(receivers))) as ex:
+        inboxes = list(ex.map(waku_get_messages, [url_of(r) for r in receivers]))
+    for r, inbox in zip(receivers, inboxes):
+        if inbox is None:
+            missing.append((r, "GET failed"))
             continue
-        encoded_marker = base64.b64encode(marker).decode().rstrip("=")
-
-        time.sleep(min(settle_sec, 5))
-
-        pending = [r for r in receivers if not seen[r]]
-        with cf.ThreadPoolExecutor(max_workers=min(32, len(pending))) as ex:
-            inboxes = list(ex.map(waku_get_messages, [url_of(r) for r in pending]))
-        for r, inbox in zip(pending, inboxes):
-            if inbox is None:
-                detail[r] = "GET failed"
-                continue
-            if any((m.get("payload") or "").rstrip("=") == encoded_marker
-                   for m in inbox):
-                seen[r] = True
-            else:
-                detail[r] = f"{len(inbox)} msgs, marker not present (attempt {attempt})"
-
-    missing = [(r, detail[r]) for r in receivers if not seen[r]]
+        if any((m.get("payload") or "").rstrip("=") == encoded_marker
+               for m in inbox):
+            continue
+        missing.append((r, f"{len(inbox)} msgs, marker not present"))
 
     return Result(
         "PROPAGATION",
