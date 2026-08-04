@@ -9,6 +9,8 @@ on:
 
 env:
   NPROC: 2
+  NIM_VERSION: '2.2.4'
+  NIMBLE_VERSION: '0.22.3'
 
 jobs:
   # Release gate: the pushed tag MUST exactly match logos_delivery.nimble's version,
@@ -55,6 +57,21 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
+
+      # Same toolchain gap as ci-daily and pre-release had: no nim/nimble on the
+      # runner, so `make` died with "nimble: No such file or directory". Only
+      # macos hit it; the ubuntu image ships a usable nim. Every tagged release
+      # since 2026-05 failed here.
+      - name: Install Nim ${{ env.NIM_VERSION }}
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ env.NIM_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Nimble ${{ env.NIMBLE_VERSION }}
+        run: |
+          cd /tmp && nimble install "nimble@${{ env.NIMBLE_VERSION }}" -y
+          echo "$HOME/.nimble/bin" >> $GITHUB_PATH
 
       - name: Get submodules hash
         id: submodules
