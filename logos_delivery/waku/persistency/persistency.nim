@@ -144,7 +144,6 @@ proc reset*(T: type Persistency) {.gcsafe.} =
     defer:
       release(gPersistencyLock)
     if gPersistency != nil:
-
       # Close first: refc emits no incref for `let p = gPersistency`, so
       # nulling the global frees the object before close() can read it.
       gPersistency.close()
