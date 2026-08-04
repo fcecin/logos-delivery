@@ -146,8 +146,20 @@ jobs:
             cp library/liblogosdelivery.h pkg/usr/local/include/
             cp library/liblogosdelivery_kernel.h pkg/usr/local/include/
 
+            # Debian versions must start with a digit, and our tags are vX.Y.Z,
+            # so the leading v has to go. A workflow_dispatch from a branch has
+            # no version at all, so synthesise one rather than emit an invalid
+            # control file. This step has never completed successfully -- the
+            # workflow has three runs in its history, all failures -- so the
+            # invalid 'Version: v0.38.1' was never reached until now.
+            DEB_VERSION="${VERSION#v}"
+            case "$DEB_VERSION" in
+              [0-9]*) ;;
+              *) DEB_VERSION="0.0.0+${DEB_VERSION}" ;;
+            esac
+
             echo "Package: logosdelivery" >> pkg/DEBIAN/control
-            echo "Version: ${VERSION}" >> pkg/DEBIAN/control
+            echo "Version: ${DEB_VERSION}" >> pkg/DEBIAN/control
             echo "Priority: optional" >> pkg/DEBIAN/control
             echo "Section: libs" >> pkg/DEBIAN/control
             echo "Architecture: ${{matrix.arch}}" >> pkg/DEBIAN/control
