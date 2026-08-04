@@ -27,7 +27,12 @@ jobs:
     - name: Vars
       id: vars
       run: |
-        TAG=$([[ "${{github.ref}}" == "refs/heads/master" ]] && echo "${{env.RELEASE_NAME}}" || echo ${{github.ref}} | sed 's#refs/tags/##')
+        # master -> RELEASE_NAME, tag push -> the tag. Anything else (a
+        # workflow_dispatch from a branch, which is the only way to test this
+        # workflow before merging) used to fall through with refs/heads/ intact,
+        # so the artifact name contained slashes and `tar` failed at the very
+        # end of an otherwise good build.
+        TAG=$([[ "${{github.ref}}" == "refs/heads/master" ]] && echo "${{env.RELEASE_NAME}}" || echo "${{github.ref}}" | sed 's#refs/tags/##; s#refs/heads/##; s#/#-#g')
         echo "tag=${TAG}" >> $GITHUB_OUTPUT
     outputs:
       tag: ${{steps.vars.outputs.tag}}
