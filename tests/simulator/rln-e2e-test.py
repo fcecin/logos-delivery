@@ -276,23 +276,36 @@ def scenario_propagation(
     if code != 200:
         return Result("PROPAGATION", False, f"sender publish returned {code}")
 
-    time.sleep(settle_sec)
-    missing = []
-    with cf.ThreadPoolExecutor(max_workers=min(32, len(receivers))) as ex:
-        inboxes = list(ex.map(waku_get_messages, [url_of(r) for r in receivers]))
-
     encoded_marker = base64.b64encode(marker).decode().rstrip("=")
-    for r, inbox in zip(receivers, inboxes):
-        if inbox is None:
-            missing.append((r, "GET failed"))
-            continue
-        # Look for our marker payload in any message
-        found = any(
-            (m.get("payload") or "").rstrip("=") == encoded_marker
-            for m in inbox
-        )
-        if not found:
-            missing.append((r, f"{len(inbox)} msgs, marker not present"))
+
+    # Poll rather than sleep once. WARMUP only proves each node *accepts* a
+    # publish; a node returns 200 with no mesh peers at all, so the fleet can
+    # still be unconnected here. Messages published in that window are simply
+    # dropped -- observed as ~6s of publishes that never reach any receiver,
+    # after which every message propagates. A single sleep lands the marker in
+    # that window and fails a fleet that is merely still forming its mesh.
+    #
+    # Each receiver is only checked until it has seen the marker: the REST
+    # inbox GET drains the cache, so a second GET would not see it again.
+    seen: dict[str, bool] = {r: False for r in receivers}
+    inbox_sizes: dict[str, str] = {r: "no GET yet" for r in receivers}
+    deadline = time.time() + max(settle_sec, 30)
+    while time.time() < deadline and not all(seen.values()):
+        time.sleep(2)
+        pending = [r for r in receivers if not seen[r]]
+        with cf.ThreadPoolExecutor(max_workers=min(32, len(pending))) as ex:
+            inboxes = list(ex.map(waku_get_messages, [url_of(r) for r in pending]))
+        for r, inbox in zip(pending, inboxes):
+            if inbox is None:
+                inbox_sizes[r] = "GET failed"
+                continue
+            if any((m.get("payload") or "").rstrip("=") == encoded_marker
+                   for m in inbox):
+                seen[r] = True
+            else:
+                inbox_sizes[r] = f"{len(inbox)} msgs, marker not present"
+
+    missing = [(r, inbox_sizes[r]) for r in receivers if not seen[r]]
 
     return Result(
         "PROPAGATION",
