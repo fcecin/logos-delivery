@@ -144,9 +144,12 @@ proc reset*(T: type Persistency) {.gcsafe.} =
     defer:
       release(gPersistencyLock)
     if gPersistency != nil:
-      let p = gPersistency
+
+      # Close first: refc emits no incref for `let p = gPersistency`, so
+      # nulling the global frees the object before close() can read it.
+      gPersistency.close()
+
       gPersistency = nil
-      p.close()
 
 proc instance*(
     T: type Persistency, rootDir: string
@@ -179,6 +182,12 @@ proc instance*(
       )
 
     let p = ?Persistency.new(rootDir)
+
+    # Pin it for the process lifetime. Nodes run on pooled FFI threads, so this
+    # gets created on one thread and released on another, and under refc that
+    # frees into the wrong thread's heap. Leaks one small object per reset.
+    GC_ref(p)
+
     gPersistency = p
     return ok(p)
 
