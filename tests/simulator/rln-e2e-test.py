@@ -271,28 +271,51 @@ def scenario_propagation(
 ) -> Result:
     """Send one message on `sender`, expect it visible in every receiver's
     REST inbox within settle_sec."""
-    marker = f"propagation-marker-{time.time_ns()}".encode()
-    code = waku_publish(url_of(sender), marker)
-    if code != 200:
-        return Result("PROPAGATION", False, f"sender publish returned {code}")
+    # Re-publish on each attempt instead of publishing once and polling.
+    #
+    # WARMUP only proves a node *accepts* a publish: it returns 200 with an
+    # empty gossipsub mesh, and a message published with no mesh peers is
+    # dropped, never queued and never retransmitted. On a loaded runner the
+    # mesh needs a few seconds more, and a marker published inside that window
+    # reaches nobody -- observed in CI as the publisher's first two messages
+    # reaching 0/5 receivers while everything from ~6s later reached all of
+    # them. Polling for that first marker cannot work; only a fresh publish can.
+    #
+    # Each receiver is dropped from the check once it has seen its marker,
+    # because the REST inbox GET drains the cache.
+    seen: dict[str, bool] = {r: False for r in receivers}
+    detail: dict[str, str] = {r: "never checked" for r in receivers}
+    deadline = time.time() + max(settle_sec, 60)
+    attempt = 0
 
-    time.sleep(settle_sec)
-    missing = []
-    with cf.ThreadPoolExecutor(max_workers=min(32, len(receivers))) as ex:
-        inboxes = list(ex.map(waku_get_messages, [url_of(r) for r in receivers]))
-
-    encoded_marker = base64.b64encode(marker).decode().rstrip("=")
-    for r, inbox in zip(receivers, inboxes):
-        if inbox is None:
-            missing.append((r, "GET failed"))
+    while time.time() < deadline and not all(seen.values()):
+        attempt += 1
+        marker = f"propagation-marker-{time.time_ns()}".encode()
+        code = waku_publish(url_of(sender), marker)
+        if code != 200:
+            for r in receivers:
+                if not seen[r]:
+                    detail[r] = f"sender publish returned {code}"
+            time.sleep(2)
             continue
-        # Look for our marker payload in any message
-        found = any(
-            (m.get("payload") or "").rstrip("=") == encoded_marker
-            for m in inbox
-        )
-        if not found:
-            missing.append((r, f"{len(inbox)} msgs, marker not present"))
+        encoded_marker = base64.b64encode(marker).decode().rstrip("=")
+
+        time.sleep(min(settle_sec, 5))
+
+        pending = [r for r in receivers if not seen[r]]
+        with cf.ThreadPoolExecutor(max_workers=min(32, len(pending))) as ex:
+            inboxes = list(ex.map(waku_get_messages, [url_of(r) for r in pending]))
+        for r, inbox in zip(pending, inboxes):
+            if inbox is None:
+                detail[r] = "GET failed"
+                continue
+            if any((m.get("payload") or "").rstrip("=") == encoded_marker
+                   for m in inbox):
+                seen[r] = True
+            else:
+                detail[r] = f"{len(inbox)} msgs, marker not present (attempt {attempt})"
+
+    missing = [(r, detail[r]) for r in receivers if not seen[r]]
 
     return Result(
         "PROPAGATION",
