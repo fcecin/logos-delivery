@@ -53,6 +53,13 @@ def url_of(host: str, port: int = 8645) -> str:
     return f"http://{host}:{port}"
 
 
+# Accepted publishes per node URL. Every 200 spends one RLN nonce from that
+# node's per-epoch quota, so RATE_LIMIT has to know what earlier scenarios
+# already spent -- otherwise its burst starts with a smaller budget than it
+# thinks and the node looks like it under-published.
+PUBLISHED: dict[str, int] = {}
+
+
 def waku_publish(node_url: str, payload: bytes, timeout: float = 5.0) -> int:
     body = {
         "payload": base64.b64encode(payload).decode("ascii"),
@@ -68,6 +75,8 @@ def waku_publish(node_url: str, payload: bytes, timeout: float = 5.0) -> int:
             timeout=timeout,
             headers={"content-type": "application/json"},
         )
+        if r.status_code == 200:
+            PUBLISHED[node_url] = PUBLISHED.get(node_url, 0) + 1
         return r.status_code
     except requests.RequestException:
         return -1
@@ -269,6 +278,10 @@ def scenario_rate_limit(nodes: list[str], msg_limit: int, tolerance: int = 3) ->
     # Cap concurrency: firing len(nodes)*(msg_limit+3) publishes all at once
     # saturates small CI runners (2 vCPU) and causes publish-path timeouts
     # that masquerade as rate-limit failures.
+    # What each node has already spent this epoch (WARMUP's publishes, and its
+    # mesh probes on the probe sender).
+    spent = {n: PUBLISHED.get(url_of(n), 0) for n in nodes}
+
     with cf.ThreadPoolExecutor(max_workers=min(5, len(nodes))) as ex:
         per_node = list(
             ex.map(lambda n: _burst_until_blocked(url_of(n), msg_limit), nodes)
@@ -277,15 +290,24 @@ def scenario_rate_limit(nodes: list[str], msg_limit: int, tolerance: int = 3) ->
     rate_failures = []   # genuine RLN misbehaviour
     timing_skews = []    # epoch straddled mid-burst — inconclusive
     for node, (n_200, n_500, n_err, after_block) in zip(nodes, per_node):
+        # Budget left after earlier scenarios. If the epoch happens to roll
+        # between them and the burst the quota is back to msg_limit, so accept
+        # anything from the conservative budget up to the hard limit; exceeding
+        # msg_limit is still a real invariant breach.
+        budget = msg_limit - spent[node]
         if n_200 > msg_limit or after_block:
             timing_skews.append(
                 (node, f"{n_200} ok, epoch rolled mid-burst (raise epoch_sec)")
             )
         elif n_500 == 0:
             rate_failures.append((node, f"no 500 ceiling ({n_200} ok, {n_err} err)"))
-        elif n_200 < msg_limit - tolerance:
+        elif n_200 < budget - tolerance:
             rate_failures.append(
-                (node, f"only {n_200}/{msg_limit} ok ({n_err} transport err)")
+                (
+                    node,
+                    f"only {n_200}/{budget} ok "
+                    f"({spent[node]} spent earlier, {n_err} transport err)",
+                )
             )
 
     if timing_skews and not rate_failures:
