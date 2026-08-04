@@ -116,6 +116,15 @@ jobs:
   js-waku-node:
     needs: build-docker-image
     uses: logos-messaging/logos-delivery-js/.github/workflows/test-node.yml@master
+    # test-node.yml declares `actions: read, checks: write`. A caller that says
+    # nothing inherits the repo default, and if that default is read-only the
+    # whole run dies at startup ("is only allowed 'actions: none, checks: none'")
+    # before a single job is scheduled. Granting it here keeps the workflow
+    # working regardless of the repo/org default, forks included.
+    permissions:
+      contents: read
+      actions: read
+      checks: write
     with:
       nim_wakunode_image: ${{ needs.build-docker-image.outputs.image }}
       test_type: node
@@ -124,6 +133,10 @@ jobs:
   js-waku-node-optional:
     needs: build-docker-image
     uses: logos-messaging/logos-delivery-js/.github/workflows/test-node.yml@master
+    permissions:
+      contents: read
+      actions: read
+      checks: write
     with:
       nim_wakunode_image: ${{ needs.build-docker-image.outputs.image }}
       test_type: node-optional
