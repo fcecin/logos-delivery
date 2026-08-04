@@ -136,9 +136,9 @@ proc ensureRootDir(p: Persistency): Result[void, PersistencyError] =
   return ok()
 
 proc reset*(T: type Persistency) {.gcsafe.} =
-  ## Tear down the singleton: close every open job, clear the Teardown
-  ## provider, and free the slot so a subsequent ``Persistency.instance``
-  ## starts fresh. Idempotent. Tests use this in `defer`;.
+  ## Tear down the singleton: close every open job and free the slot so a
+  ## subsequent ``Persistency.instance`` starts fresh. Idempotent. Tests
+  ## use this in `defer`.
   {.cast(gcsafe).}:
     acquire(gPersistencyLock)
     defer:
