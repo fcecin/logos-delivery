@@ -158,7 +158,11 @@ jobs:
           fi
 
           if [[ "${{ runner.os }}" == "macOS" ]]; then
-            tar -cvzf ${{steps.vars.outputs.liblogosdelivery}} ./build/liblogosdelivery.dylib ./build/liblogosdelivery.a ./liblogosdelivery/liblogosdelivery.h
+            # Headers live in library/, not liblogosdelivery/. The Linux
+            # branch above already gets this right and ships both headers;
+            # macOS pointed at a directory that has never existed, so the
+            # tar failed the moment the build got far enough to reach it.
+            tar -cvzf ${{steps.vars.outputs.liblogosdelivery}} ./build/liblogosdelivery.dylib ./build/liblogosdelivery.a ./library/liblogosdelivery.h ./library/liblogosdelivery_kernel.h
           fi
 
       - name: Upload waku artifact
