@@ -32,7 +32,10 @@ jobs:
         # workflow before merging) used to fall through with refs/heads/ intact,
         # so the artifact name contained slashes and `tar` failed at the very
         # end of an otherwise good build.
-        TAG=$([[ "${{github.ref}}" == "refs/heads/master" ]] && echo "${{env.RELEASE_NAME}}" || echo "${{github.ref}}" | sed 's#refs/tags/##; s#refs/heads/##; s#/#-#g')
+        # $GITHUB_REF from the environment, not ${{github.ref}} interpolated
+        # into the script: ref names are user-controlled text and don't belong
+        # spliced into shell source.
+        TAG=$([[ "$GITHUB_REF" == "refs/heads/master" ]] && echo "$RELEASE_NAME" || echo "$GITHUB_REF" | sed 's#refs/tags/##; s#refs/heads/##; s#/#-#g')
         echo "tag=${TAG}" >> $GITHUB_OUTPUT
     outputs:
       tag: ${{steps.vars.outputs.tag}}
