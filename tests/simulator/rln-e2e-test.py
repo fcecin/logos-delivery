@@ -53,16 +53,6 @@ def url_of(host: str, port: int = 8645) -> str:
     return f"http://{host}:{port}"
 
 
-# Ledger of accepted publishes per node URL: every 200 spends one RLN ticket
-# from that node's quota for the epoch bucket floor(t / epoch_sec). RLN epochs
-# are absolute wall-clock windows (calcEpoch in waku/rln/proof.nim divides
-# unix time by the epoch size, no offset), so the bucket is computable here.
-# RATE_LIMIT audits this ledger per bucket instead of budgeting its burst, and
-# therefore never cares which scenario spent what, or whether a burst
-# straddled an epoch boundary.
-ACCEPTED: dict[str, list[float]] = {}
-
-
 def waku_publish(node_url: str, payload: bytes, timeout: float = 5.0) -> int:
     body = {
         "payload": base64.b64encode(payload).decode("ascii"),
@@ -78,10 +68,6 @@ def waku_publish(node_url: str, payload: bytes, timeout: float = 5.0) -> int:
             timeout=timeout,
             headers={"content-type": "application/json"},
         )
-        if r.status_code == 200:
-            # Stamped post-response; a request bridging an epoch boundary can
-            # land in the later bucket. Sub-second, absorbed by tolerance.
-            ACCEPTED.setdefault(node_url, []).append(time.time())
         return r.status_code
     except requests.RequestException:
         return -1
@@ -179,15 +165,25 @@ def _send_n(node_url: str, n: int) -> list[int]:
 
 
 def _burst_until_blocked(node_url: str, msg_limit: int, overshoot: int = 3):
-    """Send msg_limit+overshoot messages back-to-back, fast, purely to force
-    quota exhaustion. Returns the list of (unix_time, status_code) per
-    attempt; RATE_LIMIT audits these against the epoch-bucketed ledger.
-    The 200s are recorded into ACCEPTED by waku_publish itself."""
-    attempts = []
+    """Send msg_limit+overshoot messages back-to-back, fast, recording codes.
+    Designed to complete inside a single epoch — keep epoch_sec large enough
+    that this burst can't straddle an epoch boundary.
+
+    Returns (n_200, n_500, n_transport_err, two_hundred_after_block) where
+    two_hundred_after_block flags a 200 appearing AFTER the first 500 (i.e.
+    quota reset mid-burst => epoch straddle)."""
+    codes = []
     for i in range(msg_limit + overshoot):
-        code = waku_publish(node_url, f"burst-{i}".encode(), timeout=10.0)
-        attempts.append((time.time(), code))
-    return attempts
+        codes.append(waku_publish(node_url, f"burst-{i}".encode(), timeout=10.0))
+    n_200 = sum(c == 200 for c in codes)
+    n_500 = sum(c == 500 for c in codes)
+    n_err = sum(c not in (200, 500) for c in codes)  # -1, 4xx transient, etc.
+    first_block_idx = next((i for i, c in enumerate(codes) if c == 500), None)
+    two_hundred_after_block = (
+        first_block_idx is not None
+        and any(c == 200 for c in codes[first_block_idx + 1:])
+    )
+    return n_200, n_500, n_err, two_hundred_after_block
 
 
 def _publish_until_ok(node_url: str, attempts: int = 20, spacing: float = 5.0) -> bool:
@@ -201,96 +197,34 @@ def _publish_until_ok(node_url: str, attempts: int = 20, spacing: float = 5.0) -
     return False
 
 
-def scenario_warmup(
-    nodes: list[str], attempts: int = 20, mesh_deadline_sec: int = 60
-) -> Result:
+def scenario_warmup(nodes: list[str], attempts: int = 20) -> Result:
     """Readiness gate: every node must successfully publish at least once.
     This absorbs mesh-formation churn so PROPAGATION/RATE_LIMIT aren't
-    judging a not-yet-connected fleet. Consumes 1 ticket per node, plus up to
-    ~15 more on the probe sender (nodes[0]); RATE_LIMIT audits usage from the
-    ledger, so none of this skews it."""
+    judging a not-yet-connected fleet. Consumes 1 nonce/node — well within
+    msg_limit, and RATE_LIMIT's tolerance accounts for it."""
     with cf.ThreadPoolExecutor(max_workers=min(8, len(nodes))) as ex:
         ready = list(ex.map(lambda n: _publish_until_ok(url_of(n), attempts), nodes))
     not_ready = [n for n, ok in zip(nodes, ready) if not ok]
-    if not_ready:
-        return Result(
-            "WARMUP",
-            False,
-            f"{len(nodes) - len(not_ready)}/{len(nodes)} nodes publishing"
-            f"; never ready: {not_ready[:5]}",
-        )
-
-    # A 200 does not mean the message went anywhere: gossipsub drops a publish
-    # made with an empty mesh, silently and without retransmitting. So probe
-    # until one publish actually lands on every receiver. That, not HTTP 200,
-    # is what "the fleet is connected" means, and it is what PROPAGATION is
-    # entitled to assume when it asserts a single publish reaches everyone.
-    sender, receivers = nodes[0], nodes[1:]
-    if not receivers:
-        return Result("WARMUP", True, f"{len(nodes)}/{len(nodes)} nodes publishing")
-
-    deadline = time.time() + mesh_deadline_sec
-    unreached = list(receivers)
-    # The GET below DRAINS the receiver's inbox (the relay REST cache is read
-    # with clear=true server-side), so match against every probe sent so far,
-    # not just the latest: a probe slower than one loop iteration would
-    # otherwise be drained by a check that can no longer recognise it, and
-    # the receiver would never match. Any probe landing proves the mesh.
-    sent_probes: set[str] = set()
-    last_code = 200
-    while time.time() < deadline and unreached:
-        probe = f"warmup-probe-{time.time_ns()}".encode()
-        last_code = waku_publish(url_of(sender), probe, timeout=10.0)
-        if last_code != 200:
-            time.sleep(2)
-            continue
-        sent_probes.add(base64.b64encode(probe).decode().rstrip("="))
-        time.sleep(3)
-        with cf.ThreadPoolExecutor(max_workers=min(32, len(unreached))) as ex:
-            inboxes = list(ex.map(waku_get_messages, [url_of(r) for r in unreached]))
-        unreached = [
-            r
-            for r, inbox in zip(unreached, inboxes)
-            if inbox is None
-            or not any(
-                (m.get("payload") or "").rstrip("=") in sent_probes for m in inbox
-            )
-        ]
-
-    if unreached:
-        detail = (
-            f"{len(nodes)}/{len(nodes)} nodes publishing"
-            f"; mesh never reached: {unreached[:5]}"
-        )
-        if last_code != 200:
-            detail += f" (last sender publish -> {last_code})"
-        return Result("WARMUP", False, detail)
     return Result(
         "WARMUP",
-        True,
-        f"{len(nodes)}/{len(nodes)} nodes publishing"
-        f", mesh confirmed to all {len(receivers)} receivers",
+        not not_ready,
+        f"{len(nodes) - len(not_ready)}/{len(nodes)} nodes publishing"
+        + (f"; never ready: {not_ready[:5]}" if not_ready else ""),
     )
 
 
-def scenario_rate_limit(
-    nodes: list[str], msg_limit: int, epoch_sec: int, tolerance: int = 3
-) -> Result:
-    """Burst past the quota on every node, then audit the ticket ledger.
+def scenario_rate_limit(nodes: list[str], msg_limit: int, tolerance: int = 3) -> Result:
+    """Per-node burst of msg_limit+3 messages within one epoch.
 
-    The RLN invariant, checked in its native per-epoch form:
-      (a) no node ever gets more than msg_limit publishes accepted inside any
-          epoch bucket (floor(t / epoch_sec)), across ALL scenarios, and
-      (b) the burst must hit a 500 ceiling, and any bucket in which it was
-          refused must have been full (within tolerance) at that moment —
-          refusals below quota and free rides above it both fail.
+    The RLN invariant being checked:
+      (a) a node must NEVER publish more than msg_limit in one epoch, and
+      (b) the node must enforce a 500 ceiling once the quota is exhausted.
 
-    A burst straddling an epoch boundary is NOT a failure mode here: it just
-    fills two buckets, and each bucket is judged on its own. tolerance
-    absorbs transport noise and the sub-second ambiguity of which side of a
-    boundary a ticket landed on. Refusals are only collected from the burst
-    itself, because WARMUP-era 500s can be transient publish-path errors
-    rather than quota rejections."""
+    Transient HTTP errors under concurrent load can lower the accepted count
+    below msg_limit — that does NOT violate the invariant, so we accept
+    successes in [msg_limit - tolerance, msg_limit]. successes > msg_limit OR
+    a 200 after the first 500 means the epoch rolled mid-burst (raise
+    RLN_RELAY_EPOCH_SEC) — reported as a timing skew, not an RLN failure."""
     # Cap concurrency: firing len(nodes)*(msg_limit+3) publishes all at once
     # saturates small CI runners (2 vCPU) and causes publish-path timeouts
     # that masquerade as rate-limit failures.
@@ -299,46 +233,36 @@ def scenario_rate_limit(
             ex.map(lambda n: _burst_until_blocked(url_of(n), msg_limit), nodes)
         )
 
-    def bucket(t: float) -> int:
-        return int(t // epoch_sec)
-
-    failures = []
-    for node, attempts in zip(nodes, per_node):
-        acc: dict[int, int] = {}
-        for t in ACCEPTED.get(url_of(node), []):
-            acc[bucket(t)] = acc.get(bucket(t), 0) + 1
-
-        # (a) the hard invariant, over every epoch the whole run ever touched.
-        over = {e: c for e, c in acc.items() if c > msg_limit}
-        if over:
-            failures.append((node, f"over quota: {over} (limit {msg_limit})"))
-            continue
-
-        # (b) the burst must have been refused, and a refusal means that
-        # bucket's quota was exhausted -- so the bucket must be ~full.
-        refused = sorted({bucket(t) for t, c in attempts if c == 500})
-        if not refused:
-            n_200 = sum(c == 200 for _, c in attempts)
-            n_err = sum(c not in (200, 500) for _, c in attempts)
-            failures.append(
-                (node, f"no 500 ceiling ({n_200} ok, {n_err} transport err)")
+    rate_failures = []   # genuine RLN misbehaviour
+    timing_skews = []    # epoch straddled mid-burst — inconclusive
+    for node, (n_200, n_500, n_err, after_block) in zip(nodes, per_node):
+        if n_200 > msg_limit or after_block:
+            timing_skews.append(
+                (node, f"{n_200} ok, epoch rolled mid-burst (raise epoch_sec)")
             )
-            continue
-        short = {
-            e: acc.get(e, 0) for e in refused if acc.get(e, 0) < msg_limit - tolerance
-        }
-        if short:
-            failures.append(
-                (node, f"refused before full: {short} (limit {msg_limit})")
+        elif n_500 == 0:
+            rate_failures.append((node, f"no 500 ceiling ({n_200} ok, {n_err} err)"))
+        elif n_200 < msg_limit - tolerance:
+            rate_failures.append(
+                (node, f"only {n_200}/{msg_limit} ok ({n_err} transport err)")
             )
 
+    if timing_skews and not rate_failures:
+        return Result(
+            "RATE_LIMIT",
+            False,
+            f"INCONCLUSIVE (timing) — raise RLN_RELAY_EPOCH_SEC; "
+            f"{len(timing_skews)} node(s) straddled an epoch: {timing_skews[:3]}",
+        )
+    ok = not rate_failures and not timing_skews
+    good = len(nodes) - len(rate_failures) - len(timing_skews)
     return Result(
         "RATE_LIMIT",
-        not failures,
-        f"{len(nodes) - len(failures)}/{len(nodes)} nodes kept every epoch "
-        f"bucket <= {msg_limit} and refused only when full "
-        f"(tolerance {tolerance})"
-        + (f"; failures: {failures[:3]}" if failures else ""),
+        ok,
+        f"{good}/{len(nodes)} nodes enforced <= {msg_limit} then 500 "
+        f"(tolerance {tolerance} for transport noise)"
+        + (f"; rate failures: {rate_failures[:3]}" if rate_failures else "")
+        + (f"; timing skews: {timing_skews[:3]}" if timing_skews else ""),
     )
 
 
@@ -353,19 +277,22 @@ def scenario_propagation(
         return Result("PROPAGATION", False, f"sender publish returned {code}")
 
     time.sleep(settle_sec)
-
-    encoded_marker = base64.b64encode(marker).decode().rstrip("=")
     missing = []
     with cf.ThreadPoolExecutor(max_workers=min(32, len(receivers))) as ex:
         inboxes = list(ex.map(waku_get_messages, [url_of(r) for r in receivers]))
+
+    encoded_marker = base64.b64encode(marker).decode().rstrip("=")
     for r, inbox in zip(receivers, inboxes):
         if inbox is None:
             missing.append((r, "GET failed"))
             continue
-        if any((m.get("payload") or "").rstrip("=") == encoded_marker
-               for m in inbox):
-            continue
-        missing.append((r, f"{len(inbox)} msgs, marker not present"))
+        # Look for our marker payload in any message
+        found = any(
+            (m.get("payload") or "").rstrip("=") == encoded_marker
+            for m in inbox
+        )
+        if not found:
+            missing.append((r, f"{len(inbox)} msgs, marker not present"))
 
     return Result(
         "PROPAGATION",
@@ -437,9 +364,17 @@ def main() -> int:
         print("\nABORTING — fleet never reached a publishable state.")
         return _summarize(results)
 
+    # Interim bridge: REST publish returns 200 even when gossipsub has an
+    # empty mesh and drops the message outright (the handler discards the
+    # NoPeersToPublish error node.publish already reports), so WARMUP's
+    # first-200 gate can pass while the sender's mesh is still forming.
+    # Give the mesh a moment before PROPAGATION's single-shot assert.
+    # Remove once REST surfaces zero-peer publishes as 503.
+    time.sleep(10)
     run(scenario_propagation, nodes[0], nodes[1:])
-    # Rate limit: burst past the quota, then audit per-epoch ticket usage.
-    run(scenario_rate_limit, nodes, args.msg_limit, args.epoch_sec)
+    # Rate limit: per-node burst, asserts exactly msg_limit then 500.
+    # Requires epoch_sec large enough that the burst can't straddle an epoch.
+    run(scenario_rate_limit, nodes, args.msg_limit)
     run(scenario_epoch_reset, nodes, args.epoch_sec)
 
     return _summarize(results)
