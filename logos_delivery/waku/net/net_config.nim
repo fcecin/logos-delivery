@@ -58,6 +58,21 @@ template ipQuicEndPoint(address: IpAddress, port: Port): MultiAddress =
 template dns4QuicEndPoint(dns4DomainName: string, port: Port): MultiAddress =
   dns4Ma(dns4DomainName) & udpPortMa(port) & quicFlag()
 
+func enrRemainder*(
+    announced: seq[MultiAddress], enrIp: Opt[IpAddress], enrPort: Opt[Port]
+): seq[MultiAddress] =
+  ## The ENR multiaddrs field (RFC 31): the announced addresses that the
+  ## scalar ip/tcp fields do not express and remote peers can dial.
+  let remote = deduplicate(announced.filterIt(it.isPublicMA() or it.isCircuitRelayMA()))
+  if enrIp.isNone() or enrPort.isNone():
+    return remote
+  let scalar =
+    try:
+      ip4TcpEndPoint(enrIp.get(), enrPort.get())
+    except CatchableError:
+      return remote
+  remote.filterIt(it != scalar)
+
 proc isWsAddress*(ma: MultiAddress): bool =
   let
     isWs = ma.contains(multiCodec("ws")).get()
@@ -231,15 +246,7 @@ proc init*(
 
   announcedAddresses = announcedAddresses.deduplicate()
 
-  let
-    # enrMultiaddrs are just addresses which cannot be represented in ENR, as described in
-    # https://rfc.vac.dev/spec/31/#many-connection-types
-    enrMultiaddrs = deduplicate(
-      announcedAddresses.filterIt(
-        it.hasProtocol("dns4") or it.hasProtocol("dns6") or it.hasProtocol("ws") or
-          it.hasProtocol("wss") or it.hasProtocol("quic-v1")
-      )
-    )
+  let enrMultiaddrs = enrRemainder(announcedAddresses, enrIp, enrPort)
 
   ok(
     NetConfig(

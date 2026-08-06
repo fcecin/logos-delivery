@@ -94,7 +94,8 @@ type EndpointConf* = object
 ## sanity checks beyond type enforcement.
 ## If `Opt` is `some` it means the related protocol is enabled.
 type WakuConf* {.requiresInit.} = ref object
-  # ref because `getRunningNetConfig` modifies it
+  # The start sequence writes resolved state back in: the NAT strategy
+  # in setupNode and the bound ports in captureNetConfig.
   nodeKey*: crypto.PrivateKey
 
   clusterId*: uint16

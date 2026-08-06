@@ -11,9 +11,9 @@ import
 import logos_delivery/waku/[net/net_config, waku_enr, waku_core], ./waku_conf
 
 proc tryBuildEnrRecord(
-    conf: WakuConf, netConfig: NetConfig, multiaddrs: seq[MultiAddress]
+    conf: WakuConf, netConfig: NetConfig, multiaddrs: seq[MultiAddress], seqNum: uint64
 ): Result[enr.Record, string] =
-  var enrBuilder = EnrBuilder.init(conf.nodeKey)
+  var enrBuilder = EnrBuilder.init(conf.nodeKey, seqNum)
 
   enrBuilder.withIpAddressAndPorts(
     netConfig.enrIp, netConfig.enrPort, netConfig.discv5UdpPort
@@ -36,11 +36,13 @@ proc tryBuildEnrRecord(
   return ok(record)
 
 proc enrConfiguration*(
-    conf: WakuConf, netConfig: NetConfig
+    conf: WakuConf, netConfig: NetConfig, seqNum: uint64 = 1
 ): Result[enr.Record, string] =
+  ## Build an ENR from the NetConfig's ENR fields. Multiaddrs trim from
+  ## the tail to fit, and seqNum must exceed the previous record's.
   for retained in countdown(netConfig.enrMultiaddrs.len, 0):
     let multiaddrs = netConfig.enrMultiaddrs[0 ..< retained]
-    let record = tryBuildEnrRecord(conf, netConfig, multiaddrs).valueOr:
+    let record = tryBuildEnrRecord(conf, netConfig, multiaddrs, seqNum).valueOr:
       if retained > 0:
         warn "failed to create enr record, retrying with fewer multiaddrs",
           error = error,

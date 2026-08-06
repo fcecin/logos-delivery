@@ -585,9 +585,6 @@ proc updateAnnouncedAddrWithPrimaryIpAddr*(node: WakuNode): Result[void, string]
   for address in node.announcedAddresses:
     announcedStr &= "[" & $address & "/p2p/" & $peerInfo.peerId & "]"
 
-  ## Update the Switch addresses
-  node.switch.peerInfo.addrs = node.announcedAddresses
-
   for transport in node.switch.transports:
     for address in transport.addrs:
       let fulladdr = "[" & $address & "/p2p/" & $peerInfo.peerId & "]"
@@ -801,6 +798,9 @@ proc start*(node: WakuNode) {.async.} =
 
   updateAnnouncedAddrWithPrimaryIpAddr(node).isOkOr:
     error "failed update announced addr", error = $error
+  ## `update` regenerates peerInfo.addrs and the signed peer record
+  ## from the rewritten announced addresses.
+  await node.switch.peerInfo.update()
 
   info "Node started successfully"
 
