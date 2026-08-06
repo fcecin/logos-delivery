@@ -387,3 +387,30 @@ suite "Announced addresses - derived pipeline":
       mapped notin node.announcedAddresses
 
     await node.stop()
+
+suite "Announced addresses - ENR multiaddrs field":
+  test "the multiaddrs field is the announced set minus the scalar endpoint":
+    let scalar = MultiAddress.init("/ip4/203.0.113.9/tcp/60000").get()
+    let secondHome = MultiAddress.init("/ip4/198.51.100.7/tcp/60000").get()
+    let circuit = MultiAddress
+      .init(
+        "/ip4/93.184.216.34/tcp/4001/p2p/" &
+          "16Uiu2HAm7YEh2wwbYNvayrSQe2bdm1aL4FnhCLkvSNaScMxcgt4n/p2p-circuit"
+      )
+      .get()
+    let ws = MultiAddress.init("/ip4/203.0.113.9/tcp/60001/ws").get()
+
+    let loopback = MultiAddress.init("/ip4/127.0.0.1/tcp/60000").get()
+
+    check:
+      enrRemainder(
+        @[scalar, secondHome, circuit, ws, loopback],
+        Opt.some(parseIpAddress("203.0.113.9")),
+        Opt.some(Port(60000)),
+      ) == @[secondHome, circuit, ws]
+
+  test "without scalar fields every announced address is carried":
+    let a = MultiAddress.init("/ip4/203.0.113.9/tcp/60000").get()
+    let b = MultiAddress.init("/ip4/198.51.100.7/tcp/60000").get()
+    check:
+      enrRemainder(@[a, b], Opt.none(IpAddress), Opt.none(Port)) == @[a, b]

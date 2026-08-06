@@ -58,6 +58,25 @@ template ipQuicEndPoint(address: IpAddress, port: Port): MultiAddress =
 template dns4QuicEndPoint(dns4DomainName: string, port: Port): MultiAddress =
   dns4Ma(dns4DomainName) & udpPortMa(port) & quicFlag()
 
+func enrRemainder*(
+    announced: seq[MultiAddress], enrIp: Opt[IpAddress], enrPort: Opt[Port]
+): seq[MultiAddress] =
+  ## The content of the ENR's multiaddrs field: the announced addresses
+  ## the ENR's scalar ip/tcp fields do not already express (RFC 31).
+  ## Membership is by identity against the scalar endpoint, so a
+  ## multihomed node's second direct endpoint and circuit-relay
+  ## addresses are carried. Loopback addresses are not: the ENR is read
+  ## by remote peers, and a loopback address is not dialable remotely.
+  let remote = deduplicate(announced.filterIt(not it.isLoopbackMA()))
+  if enrIp.isNone() or enrPort.isNone():
+    return remote
+  let scalar =
+    try:
+      ip4TcpEndPoint(enrIp.get(), enrPort.get())
+    except CatchableError:
+      return remote
+  remote.filterIt(it != scalar)
+
 proc formatListenAddress(inputMultiAdd: MultiAddress): MultiAddress =
   let inputStr = $inputMultiAdd
   # If MultiAddress contains "0.0.0.0", replace it for "127.0.0.1"
@@ -235,15 +254,7 @@ proc init*(
 
   announcedAddresses = announcedAddresses.deduplicate()
 
-  let
-    # enrMultiaddrs are just addresses which cannot be represented in ENR, as described in
-    # https://rfc.vac.dev/spec/31/#many-connection-types
-    enrMultiaddrs = deduplicate(
-      announcedAddresses.filterIt(
-        it.hasProtocol("dns4") or it.hasProtocol("dns6") or it.hasProtocol("ws") or
-          it.hasProtocol("wss") or it.hasProtocol("quic-v1")
-      )
-    )
+  let enrMultiaddrs = enrRemainder(announcedAddresses, enrIp, enrPort)
 
   ok(
     NetConfig(
