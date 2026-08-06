@@ -97,14 +97,10 @@ proc setupSwitchServices(
     info "circuit relay handler new reserve event",
       addrs_before = $(waku.node.announcedAddresses), addrs = $addresses
 
-    waku.node.announcedAddresses.setLen(0) ## remove previous addresses
-    waku.node.announcedAddresses.add(addresses)
+    waku.node.addressSources.relayReserved = addresses
+    waku.node.recomputeAnnouncedAddresses()
     info "waku node announced addresses updated",
       announcedAddresses = waku.node.announcedAddresses
-
-    if not isNil(waku.wakuDiscv5):
-      waku.wakuDiscv5.updateAnnouncedMultiAddress(addresses).isOkOr:
-        error "failed to update announced multiaddress", error = $error
 
   let autonatService = getAutonatService(rng)
   let newService =
@@ -268,7 +264,8 @@ proc getRunningNetConfig(waku: Waku): Future[Result[NetConfig, string]] {.async.
   if quicPort.isSome() and conf.quicConf.isSome():
     conf.quicConf.get().port = quicPort.get()
 
-  # Rebuild NetConfig from the bound ports already read back into `conf`.
+  # Rebuild the configured NetConfig from the bound ports already read back
+  # into `conf`.
   let netConf = (
     await networkConfiguration(
       conf.clusterId, conf.endpointConf, conf.discv5Conf, conf.webSocketConf,
@@ -290,9 +287,11 @@ proc updateEnr(waku: Waku): Future[Result[void, string]] {.async.} =
 
   waku.node.enr = record
 
-  # If TCP/WS was configured with port 0, node.announcedAddresses was built
-  # pre-bind with a port value of 0. In any case, the resync is harmless.
-  waku.node.announcedAddresses = netConf.announcedAddresses
+  # A config with a port 0 built announcedAddresses pre-bind, with the
+  # placeholder ports. Replace the configured source with the recomputed
+  # list and derive again.
+  waku.node.setConfigAnnouncedAddresses(netConf.announcedAddresses)
+  waku.node.recomputeAnnouncedAddresses(notify = false)
 
   return ok()
 
@@ -451,6 +450,11 @@ proc start*(waku: Waku): Future[Result[void, string]] {.async: (raises: []).} =
       return err("Error in start: " & $error)
   except CatchableError:
     return err("Caught exception in start: " & getCurrentExceptionMsg())
+
+  ## Keep the ENR matching the announced addresses as they change.
+  waku.node.onAnnouncedAddressesChange = proc() {.gcsafe, raises: [].} =
+    updateAddressInENR(waku).isOkOr:
+      error "failed to refresh ENR after announced address change", error = error
 
   waku.node.subscriptionManager.subscribeAllAutoshards().isOkOr:
     return err("failed to auto-subscribe autosharding shards: " & $error)
