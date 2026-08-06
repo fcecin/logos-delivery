@@ -223,6 +223,14 @@ type WakuNodeConf* = object
       name: "nat"
     .}: string
 
+    natDiscoveryTimeoutMs* {.
+      desc:
+        "Time limit in milliseconds for NAT gateway discovery. " &
+        "0 selects the default.",
+      defaultValue: 0,
+      name: "nat-discovery-timeout-ms"
+    .}: uint32
+
     extMultiAddrs* {.
       desc:
         "External multiaddresses to advertise to the network. Argument may be repeated.",
@@ -1053,7 +1061,10 @@ proc toWakuConf*(n: WakuNodeConf): ConfResult[WakuConf] =
   b.withP2pListenAddress(n.listenAddress)
   b.withP2pTcpPort(n.tcpPort)
   b.withPortsShift(n.portsShift)
-  b.withNatStrategy(n.nat)
+  if n.nat != "":
+    b.withNatStrategy(n.nat)
+  if n.natDiscoveryTimeoutMs != 0:
+    b.withNatDiscoveryTimeoutMs(n.natDiscoveryTimeoutMs)
   b.withExtMultiAddrs(n.extMultiAddrs)
   b.withExtMultiAddrsOnly(n.extMultiAddrsOnly)
   b.withMaxConnections(n.maxConnections)

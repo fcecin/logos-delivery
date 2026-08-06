@@ -21,6 +21,7 @@ import
   ../waku_enr/sharding,
   ../waku_node,
   ../net/net_config,
+  ../net/nat_config,
   ../waku_core,
   ../waku_core/codecs,
   ../rln,
@@ -102,6 +103,12 @@ proc initNode(
     agentString = Opt.some(conf.agentString),
   )
   builder.withColocationLimit(conf.colocationLimit)
+  builder.withNatConfig(
+    natConfig(
+      conf.endpointConf.natStrategy,
+      conf.endpointConf.natDiscoveryTimeoutMs.int64.milliseconds,
+    )
+  )
 
   if conf.maxRelayPeers.isSome():
     let
@@ -458,11 +465,19 @@ proc startNode*(
 proc setupNode*(
     wakuConf: WakuConf, rng: crypto.Rng = crypto.newRng(), relay: Relay
 ): Future[Result[WakuNode, string]] {.async.} =
+  ## An `any` NAT strategy is resolved once, here, and the winner is
+  ## written back into the conf: the switch's NATService and the discv5
+  ## mapping in waku.nim both read the same resolved strategy.
+  wakuConf.endpointConf.natStrategy = await resolveNatStrategy(
+    wakuConf.endpointConf.natStrategy,
+    wakuConf.endpointConf.natDiscoveryTimeoutMs.int64.milliseconds,
+  )
+
   let netConfig = (
     await networkConfiguration(
       wakuConf.clusterId, wakuConf.endpointConf, wakuConf.discv5Conf,
       wakuConf.webSocketConf, wakuConf.quicConf, wakuConf.wakuFlags,
-      wakuConf.dnsAddrsNameServers, clientId,
+      wakuConf.dnsAddrsNameServers,
     )
   ).valueOr:
     error "failed to create internal config", error = error
