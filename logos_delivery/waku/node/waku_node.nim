@@ -95,6 +95,19 @@ type
     enrUri*: string #multiaddrStrings*: seq[string]
     mixPubKey*: Opt[string]
 
+  AddressSources* = object
+    ## The sources of the announced addresses. The configured source is
+    ## what the operator wrote. Granted state comes from another party.
+    configAnnounced*: seq[MultiAddress]
+      ## Configured: the addresses configuration says to announce, with
+      ## placeholders resolved and the primary IP applied.
+    natMapped*: seq[MultiAddress]
+      ## Granted: the latest mapper chain output. The mapped addresses
+      ## when mappings exist, else the listen addresses.
+    relayReserved*: seq[MultiAddress]
+      ## Granted: circuit-relay reservation addresses. While present, the
+      ## node announces only these.
+
   # NOTE based on Eth2Node in NBC eth2_network.nim
   WakuNode* = ref object
     peerManager*: PeerManager
@@ -124,6 +137,14 @@ type
     wakuRendezvous*: WakuRendezVous
     wakuRendezvousClient*: rendezvous_client.WakuRendezVousClient
     announcedAddresses*: seq[MultiAddress]
+      ## Derived from `addressSources` by recomputeAnnouncedAddresses, its
+      ## only writer. Do not assign directly.
+    addressSources*: AddressSources
+      ## The declared inputs of the announced-address derivation. Write a
+      ## field, then call recomputeAnnouncedAddresses.
+    onAnnouncedAddressesChange*: proc() {.gcsafe, raises: [].}
+      ## Runs when a recompute changes the announced addresses, so the
+      ## owning layer can refresh the ENR.
     extMultiAddrsOnly*: bool # When true, skip automatic IP address replacement
     started*: bool # Indicates that node has started listening
     topicSubscriptionQueue*: AsyncEventQueue[SubscriptionEvent]
@@ -460,6 +481,65 @@ proc mountRendezvous*(
   except LPError:
     error "failed to mount wakuRendezvous", error = getCurrentExceptionMsg()
 
+proc natExternalIp*(node: WakuNode): Opt[IpAddress] =
+  ## External IP discovered by the switch's NATService, if any.
+  let natSvc = natService(node.switch).valueOr:
+    return Opt.none(IpAddress)
+  return natSvc.externalIp
+
+func ipOf(ma: MultiAddress): Opt[IpAddress] =
+  ## The IP of an /ip4 or /ip6 multiaddress, none for every other kind.
+  ## libp2p offers no conversion, so extraction uses TransportAddress.
+  let ta = initTAddress(ma).valueOr:
+    return Opt.none(IpAddress)
+  try:
+    return Opt.some(ta.address())
+  except ValueError:
+    return Opt.none(IpAddress)
+
+proc natMappedExternalAddresses*(node: WakuNode): seq[MultiAddress] =
+  ## The live NAT mappings: the natMapped entries that carry the external
+  ## IP. Empty when discovery found no gateway.
+  let externalIp = node.natExternalIp().valueOr:
+    return @[]
+  return node.addressSources.natMapped.filterIt(it.ipOf() == Opt.some(externalIp))
+
+proc setConfigAnnouncedAddresses*(node: WakuNode, addresses: seq[MultiAddress]) =
+  ## Set the configured source of the derivation. The caller passes
+  ## addresses derived from configuration alone.
+  node.addressSources.configAnnounced = addresses
+
+proc recomputeAnnouncedAddresses*(node: WakuNode, notify = true) =
+  ## The only writer of announcedAddresses after start. Precedence: relay
+  ## reservations, then extMultiAddrsOnly, then configured plus mappings.
+  let sources = node.addressSources
+  let newAnnounced =
+    if sources.relayReserved.len > 0:
+      sources.relayReserved
+    elif node.extMultiAddrsOnly:
+      sources.configAnnounced
+    else:
+      let mapped = node.natMappedExternalAddresses()
+      if mapped.len == 0:
+        sources.configAnnounced
+      else:
+        var addrs = mapped
+        for address in sources.configAnnounced:
+          if address.isPublicMA() and address notin addrs:
+            addrs.add(address)
+        addrs
+
+  if newAnnounced == node.announcedAddresses:
+    return
+
+  info "Recomputed announced addresses",
+    previous = $node.announcedAddresses, updated = $newAnnounced
+  node.announcedAddresses = newAnnounced
+
+  ## `notify = false` when the caller refreshes the ENR itself right after.
+  if notify and not node.onAnnouncedAddressesChange.isNil():
+    node.onAnnouncedAddressesChange()
+
 proc updateAnnouncedAddrWithPrimaryIpAddr*(node: WakuNode): Result[void, string] =
   # Skip automatic IP replacement if extMultiAddrsOnly is set
   # This respects the user's explicitly configured announced addresses
@@ -469,33 +549,44 @@ proc updateAnnouncedAddrWithPrimaryIpAddr*(node: WakuNode): Result[void, string]
   let peerInfo = node.switch.peerInfo
   var announcedStr = ""
   var listenStr = ""
+
   ## A wildcard bind listens on loopback; announce that when the primary
   ## IP is unknown.
-  var localIp = "127.0.0.1"
-
-  try:
-    localIp = $getPrimaryIPAddr()
-  except Exception as e:
-    warn "Could not retrieve localIp", msg = e.msg
+  const LoopbackIp = parseIpAddress("127.0.0.1")
+  let primaryIp =
+    try:
+      getPrimaryIPAddr()
+    except Exception as e:
+      warn "Could not retrieve the primary IP address", msg = e.msg
+      LoopbackIp
 
   info "PeerInfo", peerId = peerInfo.peerId, addrs = peerInfo.addrs
 
-  ## Update the WakuNode addresses
-  var newAnnouncedAddresses = newSeq[MultiAddress](0)
-  for address in node.announcedAddresses:
-    ## Replace a wildcard host with the localIp. A loopback bind stays
-    ## loopback: nothing listens at the primary IP.
-    let newAddr = ($address).replace("0.0.0.0", localIp)
-    let fulladdr = "[" & $newAddr & "/p2p/" & $peerInfo.peerId & "]"
-    announcedStr &= fulladdr
-    let newMultiAddr = MultiAddress.init(newAddr).valueOr:
-      return err("error in updateAnnouncedAddrWithPrimaryIpAddr: " & $error)
-    newAnnouncedAddresses.add(newMultiAddr)
+  ## Replace a wildcard host with the primary IP in the configured source.
+  ## A loopback bind stays loopback: nothing listens at the primary IP.
+  const RewrittenHosts =
+    [static(parseIpAddress("0.0.0.0")), static(parseIpAddress("::"))]
+  var substituted = newSeq[MultiAddress](0)
+  for address in node.addressSources.configAnnounced:
+    let ip = address.getIp().valueOr:
+      substituted.add(address)
+      continue
+    if ip notin RewrittenHosts:
+      substituted.add(address)
+      continue
+    let rewritten = address.replaceIp(primaryIp).valueOr:
+      substituted.add(address)
+      continue
+    substituted.add(rewritten)
+  node.addressSources.configAnnounced = substituted
 
-  node.announcedAddresses = newAnnouncedAddresses
+  node.recomputeAnnouncedAddresses(notify = false)
+
+  for address in node.announcedAddresses:
+    announcedStr &= "[" & $address & "/p2p/" & $peerInfo.peerId & "]"
 
   ## Update the Switch addresses
-  node.switch.peerInfo.addrs = newAnnouncedAddresses
+  node.switch.peerInfo.addrs = node.announcedAddresses
 
   for transport in node.switch.transports:
     for address in transport.addrs:
@@ -503,7 +594,9 @@ proc updateAnnouncedAddrWithPrimaryIpAddr*(node: WakuNode): Result[void, string]
       listenStr &= fulladdr
 
   info "Listening on",
-    full = listenStr, localIp = localIp, switchAddress = $(node.switch.peerInfo.addrs)
+    full = listenStr,
+    localIp = $primaryIp,
+    switchAddress = $(node.switch.peerInfo.addrs)
   info "Announcing addresses", full = announcedStr
   info "DNS: discoverable ENR ", enr = node.enr.toUri()
 
@@ -669,11 +762,17 @@ proc start*(node: WakuNode) {.async.} =
   ## The switch bound its sockets. Resolve the zero-port placeholders.
   node.resolveAnnouncedPorts()
 
-  ## Mapper that answers with the announced addresses. Installed after
-  ## switch.start, so starting services do not walk a changing chain.
+  ## The boot NetConfig output, with the zero-port placeholders resolved,
+  ## becomes the configured source.
+  node.setConfigAnnouncedAddresses(node.announcedAddresses)
+
+  ## The mapper chain's last stage: capture the chain output and recompute.
+  ## Installed after switch.start, so starting services see a stable chain.
   let addressMapper = proc(
       listenAddrs: seq[MultiAddress]
   ): Future[seq[MultiAddress]] {.gcsafe, async: (raises: [CancelledError]).} =
+    node.addressSources.natMapped = listenAddrs
+    node.recomputeAnnouncedAddresses()
     return node.announcedAddresses
   node.switch.peerInfo.addressMappers.add(addressMapper)
 
