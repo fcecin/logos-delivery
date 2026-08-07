@@ -37,6 +37,10 @@ jobs:
   build-and-publish:
     needs: tag-name
     strategy:
+      # Without this, the first leg to fail cancels the other two and the run
+      # reports one real failure plus two cancellations, hiding whether the
+      # other platforms were fine. ci.yml already sets it.
+      fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-15]
         arch: [amd64]
@@ -82,7 +86,16 @@ jobs:
           make V=1 CI=false NIMFLAGS="-d:disableMarchNative --os:${OS} --cpu:${{matrix.arch}}" \
             update
 
-          make V=1 CI=false POSTGRES=1\
+          # -j1: each of these targets shells out to `nimble <task>`. Under the
+          # job-level MAKEFLAGS=-j2 two nimble invocations re-resolve git deps
+          # concurrently and clobber each other in the shared package dir — the
+          # 2026-08-07 nightly died on a torn read of
+          # nimbledeps/pkgs2/libp2p-*/nimblemeta.json ("{ expected"), and the
+          # target that lost the race was whichever got there second.
+          # Serializing removes it; Nim's own --parallelBuild still parallelizes
+          # compilation. Same fix as `make V=1 -j1 all` in ci.yml and the
+          # sequential invocations in container-image.yml.
+          make V=1 -j1 CI=false POSTGRES=1\
             NIMFLAGS="-d:disableMarchNative --os:${OS} --cpu:${{matrix.arch}}" \
             wakunode2\
             logosdeliverynode\
