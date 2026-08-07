@@ -42,16 +42,24 @@ jobs:
       # other platforms were fine. ci.yml already sets it.
       fail-fast: false
       matrix:
-        # macos-15 runners are arm64. logos_delivery.nimble's getMyCPU() picks the
-        # arch from the HOST at nimble-script compile time, and the Makefile reads
-        # NIM_PARAMS, not the NIMFLAGS this workflow passes — so a `macos-15 +
-        # amd64` leg silently compiled `--cpu:arm64 --passC:"-arch arm64"` and
-        # shipped an arm64 binary named nwaku-amd64-macos-*.tar.gz. Build amd64 on
-        # an Intel runner instead so the label matches the bytes.
+        # There is no macOS amd64 leg, deliberately.
+        #
+        # It used to be `macos-15 + amd64`, but macos-15 runners are arm64:
+        # getMyCPU() in logos_delivery.nimble resolves the arch from the HOST at
+        # nimble-script compile time, and the Makefile reads NIM_PARAMS rather
+        # than the NIMFLAGS this workflow passes. That leg therefore compiled
+        # `--cpu:arm64 --passC:"-arch arm64"` and published an arm64 binary named
+        # nwaku-amd64-macos-*.tar.gz — a mislabelled duplicate of the arm64 leg.
+        #
+        # Every GitHub-hosted macOS image is now arm64 (macos-13, the last Intel
+        # one, no longer schedules — verified 2026-08-07: the job sat queued 11
+        # minutes while its siblings started immediately). Producing a real
+        # darwin/amd64 artifact would need actual cross-compilation, with
+        # -arch x86_64 threaded through librln, BoringSSL and the nat libs too.
+        # Until someone does that, ship two honest platforms rather than three
+        # with one lie.
         include:
         - os: ubuntu-22.04
-          arch: amd64
-        - os: macos-13
           arch: amd64
         - os: macos-15
           arch: arm64
@@ -222,10 +230,10 @@ jobs:
             find /tmp/x -type f -exec file {} \;
             echo
           done
-          echo "### assertion: one tarball per platform ###"
+          echo "### assertion: one tarball per matrix leg ###"
           n=$(ls wakunode2/*.tar.gz | wc -l)
-          echo "wakunode2 tarballs: $n (expected 3)"
-          [ "$n" -eq 3 ] || { echo "FAIL: artifact collision still present"; exit 1; }
+          echo "wakunode2 tarballs: $n (expected 2 — linux/amd64, macos/arm64)"
+          [ "$n" -eq 2 ] || { echo "FAIL: artifact collision still present"; exit 1; }
 
       # LOCAL-FORK-TEST: publishing disabled — `gh release delete/create` writes to
       # GitHub Releases and the sv4git image is pulled from Docker Hub.
