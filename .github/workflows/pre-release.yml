@@ -30,6 +30,7 @@ jobs:
       id: vars
       run: |
         # master -> nightly; other refs use their bare name, "/" replaced by "-".
+        # TAG=$([[ "${{github.ref}}" == "refs/heads/master" ]] && echo "${{env.RELEASE_NAME}}" || echo ${{github.ref}} | sed 's#refs/tags/##')
         TAG=$([[ "${{github.ref}}" == "refs/heads/master" ]] && echo "${{env.RELEASE_NAME}}" || echo "${{github.ref_name}}" | tr '/' '-')
         echo "tag=${TAG}" >> $GITHUB_OUTPUT
     outputs:
@@ -86,7 +87,6 @@ jobs:
 
           # -j1: each target starts one nimble process. Two parallel nimble
           # processes corrupt the shared package metadata (nimblemeta.json).
-          # Nim itself continues to compile in parallel.
           make V=1 -j1 CI=false POSTGRES=1\
             wakunode2\
             logosdeliverynode\
