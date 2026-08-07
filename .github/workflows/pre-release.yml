@@ -29,7 +29,15 @@ jobs:
     - name: Vars
       id: vars
       run: |
-        TAG=$([[ "${{github.ref}}" == "refs/heads/master" ]] && echo "${{env.RELEASE_NAME}}" || echo ${{github.ref}} | sed 's#refs/tags/##')
+        # github.ref_name is already the bare name — the tag for a tag push, the
+        # branch for a branch. The previous form used github.ref and stripped only
+        # `refs/tags/`, so a workflow_dispatch from any branch other than master
+        # yielded a TAG of `refs/heads/<branch>`. That went straight into the
+        # artifact filenames, and `tar -cvzf nwaku-amd64-linux-refs/heads/x.tar.gz`
+        # died with "Cannot open: No such file or directory" — making this workflow
+        # impossible to validate on a branch, which is the one place you would want
+        # to validate it. tr guards against slashes in branch names (feat/foo).
+        TAG=$([[ "${{github.ref}}" == "refs/heads/master" ]] && echo "${{env.RELEASE_NAME}}" || echo "${{github.ref_name}}" | tr '/' '-')
         echo "tag=${TAG}" >> $GITHUB_OUTPUT
     outputs:
       tag: ${{steps.vars.outputs.tag}}
