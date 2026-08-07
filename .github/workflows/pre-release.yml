@@ -152,32 +152,17 @@ jobs:
       image_tag: ${{ needs.tag-name.outputs.tag }}
     secrets: inherit
 
-  # LOCAL-FORK-TEST: both js-waku jobs call a workflow in another repo
-  # (logos-messaging/logos-delivery-js) and pull the nightly image from quay,
-  # which we no longer push. Disabled.
-  # js-waku-node:
-  #   needs: build-docker-image
-  #   uses: logos-messaging/logos-delivery-js/.github/workflows/test-node.yml@master
-  #   permissions:
-  #     contents: read
-  #     actions: read
-  #     checks: write
-  #   with:
-  #     nim_wakunode_image: ${{ needs.build-docker-image.outputs.image }}
-  #     test_type: node
-  #     debug: waku*
+  # The js-waku-node / js-waku-node-optional jobs were removed here. They called
+  # logos-messaging/logos-delivery-js/.github/workflows/test-node.yml@master
+  # against the freshly published nightly image. js-waku-node had failed
+  # identically — 451 passing, 51 failing — every single nightly since at least
+  # 2026-07-27, so it carried no signal, and a permanently red job trains people
+  # to stop reading the nightly. That is precisely how four stacked build bugs
+  # survived for weeks behind it. The equivalent jobs were already dropped from
+  # PR CI; this was the last reference to that repo from here.
   #
-  # js-waku-node-optional:
-  #   needs: build-docker-image
-  #   uses: logos-messaging/logos-delivery-js/.github/workflows/test-node.yml@master
-  #   permissions:
-  #     contents: read
-  #     actions: read
-  #     checks: write
-  #   with:
-  #     nim_wakunode_image: ${{ needs.build-docker-image.outputs.image }}
-  #     test_type: node-optional
-  #     debug: waku*
+  # The coverage itself is not this repo's to schedule: logos-delivery-js owns
+  # that suite and can run it against a published image on its own cadence.
 
   create-release-candidate:
     runs-on: ubuntu-22.04
