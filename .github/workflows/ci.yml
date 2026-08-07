@@ -224,22 +224,13 @@ jobs:
     secrets: inherit
 
   # Docker subset; an empty node_image falls back to DEFAULT_NWAKU (fork PRs lack the quay secrets).
-  # LOCAL-FORK-TEST: disabled. This job runs its docker peers from
-  # `needs.build-docker-image.outputs.image`, i.e. it PULLS quay.io/wakuorg/
-  # nwaku-pr:<sha> from the registry — which this fork no longer pushes to.
-  # It therefore fails deterministically with
-  #   docker.errors.ImageNotFound: 404 ... No such image: quay.io/wakuorg/nwaku-pr:<sha>
-  # rather than for any code reason. The non-docker subset still runs and covers
-  # the wrapper suite. To restore coverage without a registry, the build job
-  # would need to `docker save` the image as an artifact and this job to
-  # `docker load` it.
-  # send-api-e2e-docker-tests:
-  #   needs: [build, build-docker-image]
-  #   uses: ./.github/workflows/e2e-api-tests.yml
-  #   with:
-  #     subset: docker
-  #     node_image: ${{ needs.build-docker-image.outputs.image }}
-  #   secrets: inherit
+  send-api-e2e-docker-tests:
+    needs: [build, build-docker-image]
+    uses: ./.github/workflows/e2e-api-tests.yml
+    with:
+      subset: docker
+      node_image: ${{ needs.build-docker-image.outputs.image }}
+    secrets: inherit
 
   lint:
     name: "Lint"
