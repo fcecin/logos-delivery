@@ -36,23 +36,17 @@ jobs:
     outputs:
       image: ${{ steps.build.outputs.image }}
     steps:
-      # LOCAL-FORK-TEST: the fork has no QUAY_* secrets, so the original gate would
-      # `exit 1` and skip every step below — the docker build would never be tested.
-      # Forced to succeed here; the login/push steps are commented out separately,
-      # so nothing is published regardless.
       - name: Check secrets
         id: secrets
         continue-on-error: true
         run: |
-          echo "LOCAL-FORK-TEST: secrets gate bypassed; build runs, publish is disabled"
-        # run: |
-        #   if [[ -z "$QUAY_PASSWORD" || -z "$QUAY_USER" ]]; then
-        #     echo "User does not have access to secrets, skipping workflow"
-        #     exit 1
-        #   fi
-        # env:
-        #   QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
-        #   QUAY_USER: ${{ secrets.QUAY_USER }}
+          if [[ -z "$QUAY_PASSWORD" || -z "$QUAY_USER" ]]; then
+            echo "User does not have access to secrets, skipping workflow"
+            exit 1
+          fi
+        env:
+          QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
+          QUAY_USER: ${{ secrets.QUAY_USER }}
 
       - name: Checkout code
         if: ${{ steps.secrets.outcome == 'success' }}
@@ -113,33 +107,29 @@ jobs:
           echo "ld_image=${LD_IMAGE}" >> $GITHUB_OUTPUT
           echo "commit_hash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
-          # LOCAL-FORK-TEST: registry login + push disabled. The builds still run,
-          # so a broken Dockerfile/binary is still caught; the images just stay on
-          # the runner and are discarded with it.
-          # docker login -u ${QUAY_USER} -p ${QUAY_PASSWORD} quay.io
+          docker login -u ${QUAY_USER} -p ${QUAY_PASSWORD} quay.io
           docker build -t ${IMAGE} -f docker/binaries/Dockerfile.bn.amd64 --label quay.expires-after=30d .
-          # docker push ${IMAGE}
+          docker push ${IMAGE}
 
           # logosdeliverynode image (same generic Dockerfile, selected via MAKE_TARGET)
           docker build -t ${LD_IMAGE} --build-arg MAKE_TARGET=logosdeliverynode -f docker/binaries/Dockerfile.bn.amd64 --label quay.expires-after=30d .
-          # docker push ${LD_IMAGE}
+          docker push ${LD_IMAGE}
         env:
           QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
           QUAY_USER: ${{ secrets.QUAY_USER }}
           PR_NUMBER: ${{ inputs.image_tag}}
 
-      # LOCAL-FORK-TEST: posts a comment via the GitHub API — disabled.
-      # - name: Comment PR
-      #   uses: thollander/actions-comment-pull-request@v2
-      #   if: ${{ github.event_name == 'pull_request' && steps.secrets.outcome == 'success' }}
-      #   with:
-      #     message: |
-      #       You can find the images built from this PR at
-      #
-      #       ```
-      #       ${{steps.build.outputs.image}}
-      #       ${{steps.build.outputs.ld_image}}
-      #       ```
-      #
-      #       Built from ${{ steps.build.outputs.commit_hash }}
-      #     comment_tag: execution-rln-v${{ matrix.rln_version }}
+      - name: Comment PR
+        uses: thollander/actions-comment-pull-request@v2
+        if: ${{ github.event_name == 'pull_request' && steps.secrets.outcome == 'success' }}
+        with:
+          message: |
+            You can find the images built from this PR at
+
+            ```
+            ${{steps.build.outputs.image}}
+            ${{steps.build.outputs.ld_image}}
+            ```
+
+            Built from ${{ steps.build.outputs.commit_hash }}
+          comment_tag: execution-rln-v${{ matrix.rln_version }}
