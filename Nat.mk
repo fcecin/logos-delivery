@@ -44,6 +44,24 @@ ifeq ($(OS), Windows_NT)
 		CFLAGS="-Wall -Wno-cpp -Os -fPIC -DWIN32 -DNATPMP_STATICLIB -DENABLE_STRNATPMPERR -DNATPMP_MAX_RETRIES=4 $(CFLAGS)" \
 		libnatpmp.a $(HANDLE_OUTPUT)
 else
+# Drop the archives nat_traversal's own nimble install hook already produced
+# (with a different CC) before nimble copied the package into nimbledeps/pkgs2/.
+#
+# Both vendored Makefiles archive with `$?` — *only the out-of-date
+# prerequisites* — and on macOS the rule is `libtool -static -o $@ $?`, which
+# CREATES a fresh archive instead of updating one. nimble's install copy does
+# not preserve mtimes, so build/miniupnpcstrings.h can land newer than only
+# some of the build/*.d files; `$(DEPS): $(BUILDINCLUDES)` regenerates that
+# subset, a matching subset of objects recompiles, and the archive is rewritten
+# containing ONLY those. The rest silently vanish and the link fails with
+# undefined _UPNP_* / _connecthostport / _soapPostSubmit / _addr_is_reserved.
+#
+# GNU make treats every prerequisite as out of date when the target is missing,
+# so deleting the archive first makes `$?` expand to the full object list again.
+# Linux is immune (`ar crs` merges into the existing archive) but the removal is
+# harmless there — it re-archives existing objects without recompiling.
+	@rm -f "$(NAT_TRAVERSAL_NIMBLEDEPS_DIR)/vendor/miniupnp/miniupnpc/build/libminiupnpc.a" \
+	       "$(NAT_TRAVERSAL_NIMBLEDEPS_DIR)/vendor/libnatpmp-upstream/libnatpmp.a"
 	+ "$(MAKE)" -C "$(NAT_TRAVERSAL_NIMBLEDEPS_DIR)/vendor/miniupnp/miniupnpc" \
 		CC=$(CC) CFLAGS="-Os -fPIC $(PORTABLE_NAT_MARCH)" build/libminiupnpc.a $(HANDLE_OUTPUT)
 	+ "$(MAKE)" CFLAGS="-Wall -Wno-cpp -Os -fPIC $(PORTABLE_NAT_MARCH) -DENABLE_STRNATPMPERR -DNATPMP_MAX_RETRIES=4 $(CFLAGS)" \
