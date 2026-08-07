@@ -15,7 +15,10 @@ env:
 
   NPROC: 2
   MAKEFLAGS: "-j${NPROC}"
-  NIMFLAGS: "--parallelBuild:${NPROC}"
+  # The Makefile and the nimble tasks read NIM_PARAMS. They ignore NIMFLAGS.
+  # Without -d:disableMarchNative, config.nims applies -march=native and the
+  # binaries can crash on CPUs older than the CI runner.
+  NIM_PARAMS: "-d:disableMarchNative"
   NIM_VERSION: '2.2.4'
   NIMBLE_VERSION: '0.22.3'
 
@@ -29,14 +32,10 @@ jobs:
     - name: Vars
       id: vars
       run: |
-        # github.ref_name is already the bare name — the tag for a tag push, the
-        # branch for a branch. The previous form used github.ref and stripped only
-        # `refs/tags/`, so a workflow_dispatch from any branch other than master
-        # yielded a TAG of `refs/heads/<branch>`. That went straight into the
-        # artifact filenames, and `tar -cvzf nwaku-amd64-linux-refs/heads/x.tar.gz`
-        # died with "Cannot open: No such file or directory" — making this workflow
-        # impossible to validate on a branch, which is the one place you would want
-        # to validate it. tr guards against slashes in branch names (feat/foo).
+        # github.ref_name is the tag name or the branch name. The old code
+        # removed only "refs/tags/" from github.ref. A dispatch from a branch
+        # then put "refs/heads/<branch>" into the file names and tar failed.
+        # tr replaces "/" in branch names.
         TAG=$([[ "${{github.ref}}" == "refs/heads/master" ]] && echo "${{env.RELEASE_NAME}}" || echo "${{github.ref_name}}" | tr '/' '-')
         echo "tag=${TAG}" >> $GITHUB_OUTPUT
     outputs:
@@ -45,27 +44,17 @@ jobs:
   build-and-publish:
     needs: tag-name
     strategy:
-      # Without this, the first leg to fail cancels the other two and the run
-      # reports one real failure plus two cancellations, hiding whether the
-      # other platforms were fine. ci.yml already sets it.
+      # Without fail-fast: false, one failed job cancels the other jobs and
+      # hides their results.
       fail-fast: false
       matrix:
-        # There is no macOS amd64 leg, deliberately.
-        #
-        # It used to be `macos-15 + amd64`, but macos-15 runners are arm64:
-        # getMyCPU() in logos_delivery.nimble resolves the arch from the HOST at
-        # nimble-script compile time, and the Makefile reads NIM_PARAMS rather
-        # than the NIMFLAGS this workflow passes. That leg therefore compiled
-        # `--cpu:arm64 --passC:"-arch arm64"` and published an arm64 binary named
-        # nwaku-amd64-macos-*.tar.gz — a mislabelled duplicate of the arm64 leg.
-        #
-        # Every GitHub-hosted macOS image is now arm64 (macos-13, the last Intel
-        # one, no longer schedules — verified 2026-08-07: the job sat queued 11
-        # minutes while its siblings started immediately). Producing a real
-        # darwin/amd64 artifact would need actual cross-compilation, with
-        # -arch x86_64 threaded through librln, BoringSSL and the nat libs too.
-        # Until someone does that, ship two honest platforms rather than three
-        # with one lie.
+        # There is no macOS amd64 build. All available GitHub macOS runners
+        # have arm64 CPUs (macos-13 Intel runners do not start jobs, test of
+        # 2026-08-07). The build uses the CPU of the host, because the
+        # Makefile reads NIM_PARAMS and ignores NIMFLAGS. The old macos-15
+        # amd64 job thus made arm64 binaries with amd64 names. A real
+        # darwin/amd64 build needs cross-compilation of librln, BoringSSL,
+        # and the NAT libraries.
         include:
         - os: ubuntu-22.04
           arch: amd64
@@ -105,22 +94,13 @@ jobs:
       - name: build artifacts
         id: build
         run: |
-          OS=$([[ "${{runner.os}}" == "macOS" ]] && echo "macosx" || echo "linux")
+          make V=1 CI=false update
 
-          make V=1 CI=false NIMFLAGS="-d:disableMarchNative --os:${OS} --cpu:${{matrix.arch}}" \
-            update
-
-          # -j1: each of these targets shells out to `nimble <task>`. Under the
-          # job-level MAKEFLAGS=-j2 two nimble invocations re-resolve git deps
-          # concurrently and clobber each other in the shared package dir — the
-          # 2026-08-07 nightly died on a torn read of
-          # nimbledeps/pkgs2/libp2p-*/nimblemeta.json ("{ expected"), and the
-          # target that lost the race was whichever got there second.
-          # Serializing removes it; Nim's own --parallelBuild still parallelizes
-          # compilation. Same fix as `make V=1 -j1 all` in ci.yml and the
-          # sequential invocations in container-image.yml.
+          # -j1: each target starts one nimble process. Two parallel nimble
+          # processes corrupt the shared package metadata (nimblemeta.json).
+          # Nim itself continues to compile in parallel. This is the same fix
+          # as in ci.yml and container-image.yml.
           make V=1 -j1 CI=false POSTGRES=1\
-            NIMFLAGS="-d:disableMarchNative --os:${OS} --cpu:${{matrix.arch}}" \
             wakunode2\
             logosdeliverynode\
             chat2\
@@ -129,13 +109,9 @@ jobs:
           tar -cvzf ${{steps.vars.outputs.nwaku}} ./build/wakunode2 ./build/logosdeliverynode ./build/chat2
           tar -cvzf ${{steps.vars.outputs.nwakutools}} ./build/wakucanary ./build/networkmonitor
 
-      # Artifact names must be unique per matrix leg. All three legs used to
-      # upload as plain `wakunode2`/`wakutools`; download-artifact@v4 with no
-      # `name:` puts each artifact in a directory named after it, so three
-      # same-named artifacts collapse into one and only the last upload
-      # survived. create-release-candidate then published a single platform —
-      # verified in run 31178778182, where the job received only
-      # nwaku-amd64-macos-nightly.tar.gz and the 212MB Linux build was lost.
+      # Each matrix job must use a unique artifact name. With one shared
+      # name, download-artifact@v4 keeps only the last upload and the release
+      # loses platforms (the nightly of 2026-06-04 had only Linux).
       - name: upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -152,28 +128,40 @@ jobs:
 
   build-docker-image:
     needs: tag-name
-    # Was `logos-messaging/logos-delivery/.github/workflows/container-image.yml@master`.
-    # An absolute owner/repo@master reference resolves against the DEFAULT BRANCH,
-    # not the ref being built, so a PR that modifies container-image.yml was
-    # silently tested against master's copy of it — and a fork could not exercise
-    # its own version at all. ci.yml already uses the relative form (ci.yml:196);
-    # this makes pre-release consistent with it.
+    # An <owner>/<repo>@master reference runs the workflow file from the
+    # default branch, not from the ref under test. Use the local file, as
+    # ci.yml does.
     uses: ./.github/workflows/container-image.yml
     with:
       image_tag: ${{ needs.tag-name.outputs.tag }}
     secrets: inherit
 
-  # The js-waku-node / js-waku-node-optional jobs were removed here. They called
-  # logos-messaging/logos-delivery-js/.github/workflows/test-node.yml@master
-  # against the freshly published nightly image. js-waku-node had failed
-  # identically — 451 passing, 51 failing — every single nightly since at least
-  # 2026-07-27, so it carried no signal, and a permanently red job trains people
-  # to stop reading the nightly. That is precisely how four stacked build bugs
-  # survived for weeks behind it. The equivalent jobs were already dropped from
-  # PR CI; this was the last reference to that repo from here.
-  #
-  # The coverage itself is not this repo's to schedule: logos-delivery-js owns
-  # that suite and can run it against a published image on its own cadence.
+  # js-waku-node is disabled, not deleted. The suite fails against every
+  # nightly image since 2026-07-27 (451 pass, 51 fail). Enable it again when
+  # logos-delivery-js repairs the store tests.
+  # js-waku-node:
+  #   needs: build-docker-image
+  #   uses: logos-messaging/logos-delivery-js/.github/workflows/test-node.yml@master
+  #   permissions:
+  #     contents: read
+  #     actions: read
+  #     checks: write
+  #   with:
+  #     nim_wakunode_image: ${{ needs.build-docker-image.outputs.image }}
+  #     test_type: node
+  #     debug: waku*
+
+  js-waku-node-optional:
+    needs: build-docker-image
+    uses: logos-messaging/logos-delivery-js/.github/workflows/test-node.yml@master
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    with:
+      nim_wakunode_image: ${{ needs.build-docker-image.outputs.image }}
+      test_type: node-optional
+      debug: waku*
 
   create-release-candidate:
     runs-on: ubuntu-22.04
@@ -185,9 +173,7 @@ jobs:
           fetch-depth: 0
           ref: master
 
-      # `merge-multiple: true` flattens every matching artifact into one
-      # directory, so `wakunode2/*` and `wakutools/*` below still resolve — but
-      # now to all three platforms instead of whichever uploaded last.
+      # merge-multiple puts all matching artifacts into one directory.
       - name: download node artifacts
         uses: actions/download-artifact@v4
         with:
@@ -209,20 +195,16 @@ jobs:
 
           echo "ref=${REF}" >> $GITHUB_OUTPUT
 
-      # PERMANENT — not fork scaffolding. This is the gate that makes a silent
-      # packaging bug loud. Before it existed, three matrix legs uploaded under
-      # the same artifact name, download-artifact kept one, and the nightly
-      # published a single platform without failing anything; separately, the
-      # macOS "amd64" leg shipped an arm64 binary under an amd64 name. Neither
-      # defect could ever fail a build. Now they do: this asserts one tarball per
-      # matrix leg and prints the real arch of every binary, before publishing.
+      # Gate before publish. Make sure that each platform sent one tarball
+      # and that each binary has the correct CPU type. Without this gate,
+      # these two faults do not stop the release.
       - name: verify release artifacts
         run: |
           set -e
           echo "### artifacts received ###"
           ls -lR wakunode2 wakutools
           echo
-          echo "### per-tarball contents and REAL binary arch ###"
+          echo "### tarball contents and binary CPU type ###"
           for t in wakunode2/*.tar.gz wakutools/*.tar.gz; do
             echo "== $t =="
             tar -tzf "$t"
@@ -230,10 +212,13 @@ jobs:
             find /tmp/x -type f -exec file {} \;
             echo
           done
-          echo "### assertion: one tarball per matrix leg ###"
+          echo "### tarball count check ###"
+          # One node tarball for each entry in the build matrix. If you
+          # change the matrix, update EXPECTED.
+          EXPECTED=2
           n=$(ls wakunode2/*.tar.gz | wc -l)
-          echo "wakunode2 tarballs: $n (expected 2 — linux/amd64, macos/arm64)"
-          [ "$n" -eq 2 ] || { echo "FAIL: artifact collision still present"; exit 1; }
+          echo "wakunode2 tarballs: $n (expected $EXPECTED)"
+          [ "$n" -eq "$EXPECTED" ] || { echo "FAIL: expected $EXPECTED tarballs, found $n"; exit 1; }
 
       # LOCAL-FORK-TEST: publishing disabled — `gh release delete/create` writes to
       # GitHub Releases and the sv4git image is pulled from Docker Hub.
