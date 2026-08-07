@@ -1,17 +1,21 @@
 name: Sync labels
 on:
-  push:
-    branches:
-      - master
-    paths:
-      - .github/labels.yml
+  # LOCAL-FORK-TEST: rewrites the repo's label set via the GitHub API. Trigger
+  # reduced to manual-only and the syncer step disabled.
+  # push:
+  #   branches:
+  #     - master
+  #   paths:
+  #     - .github/labels.yml
+  workflow_dispatch:
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v2
-      - uses: micnncim/action-label-syncer@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          manifest: .github/labels.yml
+      - run: echo "LOCAL-FORK-TEST -- label syncer disabled"
+      # - uses: micnncim/action-label-syncer@v1
+      #   env:
+      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      #   with:
+      #     manifest: .github/labels.yml

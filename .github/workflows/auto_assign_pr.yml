@@ -1,12 +1,15 @@
 name: Auto Assign PR to Creator
 
 on:
-  pull_request:
-    types:
-      - opened
+  # LOCAL-FORK-TEST: assigns PRs via the GitHub API. Manual-only, step disabled.
+  # pull_request:
+  #   types:
+  #     - opened
+  workflow_dispatch:
 
 jobs:
   assign_creator:
     runs-on: ubuntu-22.04
     steps:
-      - uses: toshimaru/auto-author-assign@v1.6.2
+      - run: echo "LOCAL-FORK-TEST -- auto-assign disabled"
+      # - uses: toshimaru/auto-author-assign@v1.6.2

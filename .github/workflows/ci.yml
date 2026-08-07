@@ -198,15 +198,19 @@ jobs:
 
   # Docker-based interop smoke tests. Gated only on the docker image so they
   # still run on docker-only PRs (no liblogosdelivery build required).
-  nwaku-nwaku-interop-tests:
-    needs: build-docker-image
-    # The commit is tag SMOKE_TEST_2026.06.25; annotated tag refs break nested
-    # workflow resolution on push events, so pin the commit. Re-pin on bumps.
-    uses: logos-messaging/logos-delivery-interop-tests/.github/workflows/nim_waku_PR.yml@6980880dba70aebe443b1ea1864891940980ecea
-    with:
-      node_nwaku: ${{ needs.build-docker-image.outputs.image }}
-
-    secrets: inherit
+  #
+  # LOCAL-FORK-TEST: disabled — calls a workflow in another repo
+  # (logos-messaging/logos-delivery-interop-tests) and consumes the quay image
+  # we no longer push.
+  # nwaku-nwaku-interop-tests:
+  #   needs: build-docker-image
+  #   # The commit is tag SMOKE_TEST_2026.06.25; annotated tag refs break nested
+  #   # workflow resolution on push events, so pin the commit. Re-pin on bumps.
+  #   uses: logos-messaging/logos-delivery-interop-tests/.github/workflows/nim_waku_PR.yml@6980880dba70aebe443b1ea1864891940980ecea
+  #   with:
+  #     node_nwaku: ${{ needs.build-docker-image.outputs.image }}
+  #
+  #   secrets: inherit
 
   # Send API E2E tests run the in-repo tests-e2e/ wrapper suite against the
   # liblogosdelivery.so built by the `build` job (downloaded as the
