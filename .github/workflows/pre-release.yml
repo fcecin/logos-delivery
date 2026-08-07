@@ -144,9 +144,12 @@ jobs:
 
   build-docker-image:
     needs: tag-name
-    # LOCAL-FORK-TEST: was `logos-messaging/logos-delivery/...@master`, which pulls
-    # the workflow from UPSTREAM and would therefore ignore the fork's edits (and
-    # still try to push to quay). Repointed at the in-repo copy.
+    # Was `logos-messaging/logos-delivery/.github/workflows/container-image.yml@master`.
+    # An absolute owner/repo@master reference resolves against the DEFAULT BRANCH,
+    # not the ref being built, so a PR that modifies container-image.yml was
+    # silently tested against master's copy of it — and a fork could not exercise
+    # its own version at all. ci.yml already uses the relative form (ci.yml:196);
+    # this makes pre-release consistent with it.
     uses: ./.github/workflows/container-image.yml
     with:
       image_tag: ${{ needs.tag-name.outputs.tag }}
@@ -198,10 +201,14 @@ jobs:
 
           echo "ref=${REF}" >> $GITHUB_OUTPUT
 
-      # LOCAL-FORK-TEST: stand-in for "generate release notes". The original step
-      # deletes+recreates a GitHub Release and pulls docker.io/wakuorg/sv4git.
-      # This one just proves the artifacts arrived and reports what WOULD ship.
-      - name: inspect artifacts (no publish)
+      # PERMANENT — not fork scaffolding. This is the gate that makes a silent
+      # packaging bug loud. Before it existed, three matrix legs uploaded under
+      # the same artifact name, download-artifact kept one, and the nightly
+      # published a single platform without failing anything; separately, the
+      # macOS "amd64" leg shipped an arm64 binary under an amd64 name. Neither
+      # defect could ever fail a build. Now they do: this asserts one tarball per
+      # matrix leg and prints the real arch of every binary, before publishing.
+      - name: verify release artifacts
         run: |
           set -e
           echo "### artifacts received ###"
