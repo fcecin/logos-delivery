@@ -99,9 +99,12 @@ jobs:
         run: |
           # Use full tag, e.g., v0.37.0
           echo "version=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-          # Same strip as verify-version's TAG_VERSION; dpkg rejects a version
-          # that does not start with a digit.
-          echo "deb_version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          # dpkg needs a version that starts with a digit. A dispatch from a
+          # branch gives a branch name here. Use 0.0.0~<branch> for such test
+          # builds, so the workflow also runs from a branch.
+          DEB_VERSION="${GITHUB_REF_NAME#v}"
+          [[ "$DEB_VERSION" =~ ^[0-9] ]] || DEB_VERSION="0.0.0~${DEB_VERSION//\//-}"
+          echo "deb_version=${DEB_VERSION}" >> $GITHUB_OUTPUT
 
       - name: Prep variables
         id: vars
