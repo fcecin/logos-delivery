@@ -15,9 +15,6 @@ env:
 
   NPROC: 2
   MAKEFLAGS: "-j${NPROC}"
-  # The Makefile and the nimble tasks read NIM_PARAMS. They ignore NIMFLAGS.
-  # Without -d:disableMarchNative, config.nims applies -march=native and the
-  # binaries can crash on CPUs older than the CI runner.
   NIM_PARAMS: "-d:disableMarchNative"
   NIM_VERSION: '2.2.4'
   NIMBLE_VERSION: '0.22.3'
@@ -32,10 +29,7 @@ jobs:
     - name: Vars
       id: vars
       run: |
-        # github.ref_name is the tag name or the branch name. The old code
-        # removed only "refs/tags/" from github.ref. A dispatch from a branch
-        # then put "refs/heads/<branch>" into the file names and tar failed.
-        # tr replaces "/" in branch names.
+        # master -> nightly; other refs use their bare name, "/" replaced by "-".
         TAG=$([[ "${{github.ref}}" == "refs/heads/master" ]] && echo "${{env.RELEASE_NAME}}" || echo "${{github.ref_name}}" | tr '/' '-')
         echo "tag=${TAG}" >> $GITHUB_OUTPUT
     outputs:
@@ -48,13 +42,7 @@ jobs:
       # hides their results.
       fail-fast: false
       matrix:
-        # There is no macOS amd64 build. All available GitHub macOS runners
-        # have arm64 CPUs (macos-13 Intel runners do not start jobs, test of
-        # 2026-08-07). The build uses the CPU of the host, because the
-        # Makefile reads NIM_PARAMS and ignores NIMFLAGS. The old macos-15
-        # amd64 job thus made arm64 binaries with amd64 names. A real
-        # darwin/amd64 build needs cross-compilation of librln, BoringSSL,
-        # and the NAT libraries.
+        # GitHub macOS runners are arm64 only; darwin/amd64 needs a cross-compilation setup.
         include:
         - os: ubuntu-22.04
           arch: amd64
@@ -98,8 +86,7 @@ jobs:
 
           # -j1: each target starts one nimble process. Two parallel nimble
           # processes corrupt the shared package metadata (nimblemeta.json).
-          # Nim itself continues to compile in parallel. This is the same fix
-          # as in ci.yml and container-image.yml.
+          # Nim itself continues to compile in parallel.
           make V=1 -j1 CI=false POSTGRES=1\
             wakunode2\
             logosdeliverynode\
@@ -111,7 +98,7 @@ jobs:
 
       # Each matrix job must use a unique artifact name. With one shared
       # name, download-artifact@v4 keeps only the last upload and the release
-      # loses platforms (the nightly of 2026-06-04 had only Linux).
+      # loses platforms.
       - name: upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -128,17 +115,12 @@ jobs:
 
   build-docker-image:
     needs: tag-name
-    # An <owner>/<repo>@master reference runs the workflow file from the
-    # default branch, not from the ref under test. Use the local file, as
-    # ci.yml does.
+    # uses: logos-messaging/logos-delivery/.github/workflows/container-image.yml@master
     uses: ./.github/workflows/container-image.yml
     with:
       image_tag: ${{ needs.tag-name.outputs.tag }}
     secrets: inherit
 
-  # js-waku-node is disabled, not deleted. The suite fails against every
-  # nightly image since 2026-07-27 (451 pass, 51 fail). Enable it again when
-  # logos-delivery-js repairs the store tests.
   # js-waku-node:
   #   needs: build-docker-image
   #   uses: logos-messaging/logos-delivery-js/.github/workflows/test-node.yml@master

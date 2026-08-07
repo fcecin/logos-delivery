@@ -9,9 +9,6 @@ on:
 
 env:
   NPROC: 2
-  # The Makefile and the nimble tasks read NIM_PARAMS. They ignore NIMFLAGS.
-  # Without -d:disableMarchNative, config.nims applies -march=native and the
-  # binaries can crash on CPUs older than the CI runner.
   NIM_PARAMS: "-d:disableMarchNative"
   NIM_VERSION: '2.2.4'
   NIMBLE_VERSION: '0.22.3'
@@ -47,13 +44,7 @@ jobs:
   build-and-upload:
     needs: verify-version
     strategy:
-      # There is no macOS amd64 build. All available GitHub macOS runners
-      # have arm64 CPUs (macos-13 Intel runners do not start jobs, test of
-      # 2026-08-07). The build uses the CPU of the host, because the
-      # Makefile reads NIM_PARAMS and ignores NIMFLAGS. The old macos-15
-      # amd64 job thus put arm64 binaries into amd64 release assets. A real
-      # darwin/amd64 build needs cross-compilation of librln, BoringSSL,
-      # and the NAT libraries.
+      # GitHub macOS runners are arm64 only; darwin/amd64 needs a cross-compilation setup.
       fail-fast: false
       matrix:
         include:
@@ -133,8 +124,7 @@ jobs:
       - name: Build Waku artifacts
         run: |
           # One make target for each line. Two parallel nimble processes
-          # corrupt the shared package metadata. This is the same fix as in
-          # ci.yml and container-image.yml.
+          # corrupt the shared package metadata.
           make -j${NPROC} V=1 update
           make -j${NPROC} POSTGRES=1 CI=false wakunode2
           make -j${NPROC} CI=false chat2
