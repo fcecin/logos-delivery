@@ -43,10 +43,23 @@ jobs:
   build-and-upload:
     needs: verify-version
     strategy:
+      # There is no macOS amd64 leg, deliberately — same reasoning as
+      # pre-release.yml. macos-15 runners are arm64, getMyCPU() in
+      # logos_delivery.nimble resolves the arch from the HOST at nimble-script
+      # compile time, and the Makefile reads NIM_PARAMS, not the NIMFLAGS this
+      # workflow passes on line ~122. A `macos-15 + amd64` leg therefore compiled
+      # --cpu:arm64 and uploaded an arm64 binary as waku-<version>-amd64-macOS —
+      # and unlike the nightly, these are TAGGED RELEASE assets.
+      #
+      # macos-13 (the last Intel image) no longer schedules, and every remaining
+      # hosted macOS runner is arm64, so a real darwin/amd64 artifact needs
+      # genuine cross-compilation (-arch x86_64 through librln, BoringSSL and the
+      # nat libs). Until then, ship what is real.
+      fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-15]
-        arch: [amd64]
         include:
+        - os: ubuntu-22.04
+          arch: amd64
         - os: macos-15
           arch: arm64
     runs-on: ${{ matrix.os }}
