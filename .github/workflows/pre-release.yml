@@ -83,8 +83,6 @@ jobs:
       - name: build artifacts
         id: build
         run: |
-          make V=1 CI=false update
-
           # -j1: each target starts one nimble process. Two parallel nimble
           # processes corrupt the shared package metadata (nimblemeta.json).
           make V=1 -j1 CI=false POSTGRES=1\
@@ -133,17 +131,17 @@ jobs:
   #     test_type: node
   #     debug: waku*
 
-  js-waku-node-optional:
-    needs: build-docker-image
-    uses: logos-messaging/logos-delivery-js/.github/workflows/test-node.yml@master
-    permissions:
-      contents: read
-      actions: read
-      checks: write
-    with:
-      nim_wakunode_image: ${{ needs.build-docker-image.outputs.image }}
-      test_type: node-optional
-      debug: waku*
+  # LOCAL-FORK-TEST: external logos-delivery-js workflow disabled on the fork.
+  #   needs: build-docker-image
+  #   uses: logos-messaging/logos-delivery-js/.github/workflows/test-node.yml@master
+  #   permissions:
+  #     contents: read
+  #     actions: read
+  #     checks: write
+  #   with:
+  #     nim_wakunode_image: ${{ needs.build-docker-image.outputs.image }}
+  #     test_type: node-optional
+  #     debug: waku*
 
   create-release-candidate:
     runs-on: ubuntu-22.04
@@ -177,9 +175,13 @@ jobs:
 
           echo "ref=${REF}" >> $GITHUB_OUTPUT
 
-      # Gate before publish. Make sure that each platform sent one tarball
-      # and that each binary has the correct CPU type. Without this gate,
-      # these two faults do not stop the release.
+      # This step examines the release artifacts before the publish steps.
+      # If this step finds a fault, this step stops the release.
+      # This step makes sure that:
+      #   - tar can read each tarball (tar stops on a truncated tarball)
+      #   - each tarball contains one or more regular files
+      #   - the CPU type in each binary agrees with the arch in the tarball name
+      #   - the node count and the tools count agree with the build matrix.
       - name: verify release artifacts
         run: |
           set -e
@@ -191,45 +193,100 @@ jobs:
             echo "== $t =="
             tar -tzf "$t"
             rm -rf /tmp/x && mkdir -p /tmp/x && tar -xzf "$t" -C /tmp/x
-            find /tmp/x -type f -exec file {} \;
+
+            # The file command writes one line for each regular file:
+            # "path: <CPU type>". The log and the two checks that follow
+            # use this one output.
+            types=$(find /tmp/x -type f -exec file {} \;)
+            echo "$types"
+
+            # The tarball name (nwaku-<arch>-<os>-<tag>.tar.gz) shows the
+            # correct arch for the binaries in it. The case statement
+            # changes this arch into the text that the file command writes.
+            # For arm64 binaries, macOS shows "arm64" and Linux shows
+            # "aarch64". If the name shows an unknown arch, this step
+            # stops the release.
+            case "$t" in
+              *-amd64-*) want='x86-64' ;;
+              *-arm64-*) want='arm64|aarch64' ;;
+              *) echo "FAIL: unknown arch in name: $t"; exit 1 ;;
+            esac
+
+            # The pattern examines only the text after the ":" that the
+            # file command writes. Thus a file name that contains the arch
+            # text has no effect on the check. grep -Ev writes each line
+            # that does not have the correct arch text there. This step
+            # stops the release if a tarball is empty or if grep finds
+            # one or more of these lines.
+            if [ -z "$types" ] || echo "$types" | grep -Ev ": .*($want)"; then
+              echo "FAIL: $t is empty or has a wrong CPU type (want: $want)"
+              exit 1
+            fi
+
+            # Each node tarball must contain the three node binaries.
+            # Each tools tarball must contain the two tools binaries.
+            # This check finds a tarball with a missing binary.
+            case "$t" in
+              wakunode2/*) need="wakunode2 logosdeliverynode chat2" ;;
+              wakutools/*) need="wakucanary networkmonitor" ;;
+            esac
+            for b in $need; do
+              [ -f "/tmp/x/build/$b" ] || { echo "FAIL: $t does not contain build/$b"; exit 1; }
+            done
             echo
           done
           echo "### tarball count check ###"
-          # One node tarball for each entry in the build matrix. If you
-          # change the matrix, update EXPECTED.
+          # The build matrix makes one node tarball and one tools tarball
+          # for each matrix entry. If you change the matrix, change EXPECTED.
           EXPECTED=2
           n=$(ls wakunode2/*.tar.gz | wc -l)
-          echo "wakunode2 tarballs: $n (expected $EXPECTED)"
-          [ "$n" -eq "$EXPECTED" ] || { echo "FAIL: expected $EXPECTED tarballs, found $n"; exit 1; }
+          m=$(ls wakutools/*.tar.gz | wc -l)
+          echo "wakunode2 tarballs: $n, wakutools tarballs: $m (expected $EXPECTED each)"
+          [ "$n" -eq "$EXPECTED" ] || { echo "FAIL: expected $EXPECTED node tarballs, found $n"; exit 1; }
+          [ "$m" -eq "$EXPECTED" ] || { echo "FAIL: expected $EXPECTED tools tarballs, found $m"; exit 1; }
 
-      # LOCAL-FORK-TEST: publishing disabled — `gh release delete/create` writes to
-      # GitHub Releases and the sv4git image is pulled from Docker Hub.
-      # - name: generate release notes
-      #   env:
-      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      #   run: |
-      #     set -x
-      #     gh release view ${{ needs.tag-name.outputs.tag }} &>/dev/null &&\
-      #       gh release delete -y ${{ needs.tag-name.outputs.tag }} &&\
-      #       [[ "${{ needs.tag-name.outputs.tag }}" == "nightly" ]] && git tag -d ${{ needs.tag-name.outputs.tag }}
-      #
-      #     RELEASE_NOTES_TAG=$([[ "${{ needs.tag-name.outputs.tag }}" != "nightly" ]] && echo "-t ${{steps.vars.outputs.ref}}" || echo "")
-      #
-      #     docker run \
-      #         -t \
-      #         --rm \
-      #         -v ${PWD}:/opt/sv4git/repo:z \
-      #         -u $(id -u) \
-      #         docker.io/wakuorg/sv4git:latest \
-      #           release-notes ${RELEASE_NOTES_TAG} --previous $(git tag -l --sort -creatordate | grep -e "^v[0-9]*\.[0-9]*\.[0-9]*$") |\
-      #           sed -E 's@#([0-9]+)@[#\1](https://github.com/logos-messaging/logos-delivery/issues/\1)@g' > release_notes.md
-      #
-      #     sed -i "s/^## .*/Generated at $(date)/" release_notes.md
-      #
-      #     cat release_notes.md
-      #
-      #     TARGET=$([[ "${{ needs.tag-name.outputs.tag }}" == "nightly" ]] && echo "--target ${{steps.vars.outputs.ref}}" || echo "")
-      #
-      #     gh release create ${{ needs.tag-name.outputs.tag }} --prerelease ${TARGET} \
-      #       --title ${{ needs.tag-name.outputs.tag }} --notes-file release_notes.md \
-      #       wakunode2/* wakutools/*
+      - name: generate release notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -x
+          TAG="${{ needs.tag-name.outputs.tag }}"
+          # This block deletes the old release and, for the nightly tag,
+          # the remote tag. The create step reuses an existing tag and
+          # ignores --target. Thus the nightly tag must go away here, so
+          # that the create step makes a new tag at master, and the
+          # nightly tag moves with master each night. A release can be
+          # absent while its tag exists, thus the tag deletion is
+          # separate from the release deletion. A version tag keeps its
+          # tag: it already points at the correct commit, and only the
+          # release is made again.
+          if gh release view "$TAG" &>/dev/null; then
+            gh release delete -y "$TAG"
+          fi
+          if [[ "$TAG" == "nightly" ]]; then
+            if git ls-remote --exit-code origin "refs/tags/$TAG" >/dev/null; then
+              git push origin ":refs/tags/$TAG"
+            fi
+            git tag -d "$TAG" || true
+          fi
+
+          RELEASE_NOTES_TAG=$([[ "${{ needs.tag-name.outputs.tag }}" != "nightly" ]] && echo "-t ${{steps.vars.outputs.ref}}" || echo "")
+
+          docker run \
+              -t \
+              --rm \
+              -v ${PWD}:/opt/sv4git/repo:z \
+              -u $(id -u) \
+              docker.io/wakuorg/sv4git:latest \
+                release-notes ${RELEASE_NOTES_TAG} --previous $(git tag -l --sort -creatordate | grep -e "^v[0-9]*\.[0-9]*\.[0-9]*$") |\
+                sed -E 's@#([0-9]+)@[#\1](https://github.com/logos-messaging/logos-delivery/issues/\1)@g' > release_notes.md
+
+          sed -i "s/^## .*/Generated at $(date)/" release_notes.md
+
+          cat release_notes.md
+
+          TARGET=$([[ "${{ needs.tag-name.outputs.tag }}" == "nightly" ]] && echo "--target ${{steps.vars.outputs.ref}}" || echo "")
+
+          gh release create ${{ needs.tag-name.outputs.tag }} --prerelease ${TARGET} \
+            --title ${{ needs.tag-name.outputs.tag }} --notes-file release_notes.md \
+            wakunode2/* wakutools/*
