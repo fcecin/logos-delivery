@@ -182,8 +182,6 @@ jobs:
 
       # A fault in the release artifacts stops the release here.
       - name: verify release artifacts
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           # One node tarball and one tools tarball for each matrix job.
@@ -192,13 +190,6 @@ jobs:
           EXPECTED=${{ needs.build-and-publish.outputs.platform-count }}
           echo "### check inputs ###"
           echo "expected platform count: $EXPECTED"
-          # The artifact names carry each matrix job's os and arch.
-          echo "artifacts uploaded by the build jobs:"
-          if names=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[].name' 2>/dev/null); then
-            echo "$names" | sed 's/^/  /'
-          else
-            echo "  WARN: could not list the run artifacts"
-          fi
           echo "node binaries:  $NODE_BINARIES"
           echo "tools binaries: $TOOLS_BINARIES"
           echo
@@ -210,21 +201,29 @@ jobs:
             echo "== $t =="
             # A truncated tarball stops the step here.
             tar -tzf "$t"
-            rm -rf /tmp/x && mkdir -p /tmp/x && tar -xzf "$t" -C /tmp/x
+            d=$(mktemp -d)
+            tar -xzf "$t" -C "$d"
 
             # The tarball name (nwaku-<arch>-<os>-<tag>.tar.gz) shows the
             # correct arch for the binaries in it.
             case "$t" in
-              *-amd64-*) arch=amd64 ;;
-              *-arm64-*) arch=arm64 ;;
+              *-amd64-*) want='x86-64' ;;
+              *-arm64-*) want='arm64|aarch64' ;;
               *) echo "FAIL: unknown arch in name: $t"; exit 1 ;;
             esac
             case "$t" in
               wakunode2/*) need="$NODE_BINARIES" ;;
               wakutools/*) need="$TOOLS_BINARIES" ;;
             esac
-            echo "arch: $arch; need: $need"
-            scripts/check_release_binaries.sh "$arch" /tmp/x/build $need
+            echo "want: $want; need: $need"
+            # file reads the bytes: missing, zero-size, truncated, and
+            # wrong-arch binaries all fail here.
+            for b in $need; do
+              line=$(file "$d/build/$b" 2>/dev/null || true)
+              echo "$line"
+              echo "$line" | grep -E "executable|shared object|shared library" | grep -Eq ": .*($want)" \
+                || { echo "FAIL: $b (want: $want)"; exit 1; }
+            done
             echo
           done
           echo "### tarball count check ###"

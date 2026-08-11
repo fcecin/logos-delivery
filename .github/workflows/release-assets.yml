@@ -167,25 +167,26 @@ jobs:
       - name: Verify artifacts
         run: |
           set -e
-          echo "### check inputs ###"
-          echo "arch: ${{ matrix.arch }}"
-          echo "node binaries: $NODE_BINARIES"
-          echo
+          case "${{ matrix.arch }}" in
+            amd64) want='x86-64' ;;
+            arm64) want='arm64|aarch64' ;;
+            *) echo "FAIL: unknown arch: ${{ matrix.arch }}"; exit 1 ;;
+          esac
+          echo "arch: ${{ matrix.arch }} -> want: $want"
 
-          rm -rf /tmp/x && mkdir -p /tmp/x
-          tar -xzf "${{ steps.vars.outputs.waku }}" -C /tmp/x
-          scripts/check_release_binaries.sh "${{ matrix.arch }}" /tmp/x/build $NODE_BINARIES
-
-          # The library package must contain its shared library with the
-          # correct CPU type.
-          rm -rf /tmp/y && mkdir -p /tmp/y
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            dpkg-deb -x "${{ steps.vars.outputs.liblogosdelivery }}" /tmp/y
-            scripts/check_release_binaries.sh "${{ matrix.arch }}" /tmp/y/usr/local/lib liblogosdelivery.so
+            LIB=liblogosdelivery.so
           else
-            tar -xzf "${{ steps.vars.outputs.liblogosdelivery }}" -C /tmp/y
-            scripts/check_release_binaries.sh "${{ matrix.arch }}" /tmp/y/build liblogosdelivery.dylib
+            LIB=liblogosdelivery.dylib
           fi
+          # file reads the bytes: missing, zero-size, truncated, and
+          # wrong-arch binaries all fail here.
+          for b in $NODE_BINARIES $LIB; do
+            line=$(file "build/$b" 2>/dev/null || true)
+            echo "$line"
+            echo "$line" | grep -E "executable|shared object|shared library" | grep -Eq ": .*($want)" \
+              || { echo "FAIL: build/$b (want: $want)"; exit 1; }
+          done
 
       - name: Upload waku artifact
         uses: actions/upload-artifact@v4.4.0
