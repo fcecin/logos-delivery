@@ -8,8 +8,6 @@ on:
   workflow_dispatch:
 
 env:
-  # One definition of the node binary set for this workflow. The verify
-  # step checks these inside the waku tarball.
   NODE_BINARIES: "wakunode2 logosdeliverynode chat2"
 
   NPROC: 2
@@ -169,49 +167,25 @@ jobs:
       - name: Verify artifacts
         run: |
           set -e
-          # The matrix arch names the CPU type that each binary must have.
-          case "${{ matrix.arch }}" in
-            amd64) want='x86-64' ;;
-            arm64) want='arm64|aarch64' ;;
-            *) echo "FAIL: unknown arch: ${{ matrix.arch }}"; exit 1 ;;
-          esac
           echo "### check inputs ###"
-          echo "arch: ${{ matrix.arch }} -> want: $want"
+          echo "arch: ${{ matrix.arch }}"
           echo "node binaries: $NODE_BINARIES"
           echo
 
-          # Each binary from the shared definition must be present, must
-          # be a binary, and must have the correct CPU type. The file
-          # command reads the bytes, thus a zero-size or truncated file
-          # fails here. The pattern examines only the text after the ":"
-          # that the file command writes.
-          binok() {
-            file "$1" 2>/dev/null \
-              | grep -E "executable|shared object|shared library" \
-              | grep -Eq ": .*($want)"
-          }
-
           rm -rf /tmp/x && mkdir -p /tmp/x
           tar -xzf "${{ steps.vars.outputs.waku }}" -C /tmp/x
-          find /tmp/x -type f -exec file {} \;
-          for b in $NODE_BINARIES; do
-            binok "/tmp/x/build/$b" \
-              || { echo "FAIL: waku tarball: build/$b is missing, is not a binary, or has a wrong CPU type (want: $want)"; exit 1; }
-          done
+          scripts/check_release_binaries.sh "${{ matrix.arch }}" /tmp/x/build $NODE_BINARIES
 
           # The library package must contain its shared library with the
           # correct CPU type.
           rm -rf /tmp/y && mkdir -p /tmp/y
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             dpkg-deb -x "${{ steps.vars.outputs.liblogosdelivery }}" /tmp/y
-            lib="/tmp/y/usr/local/lib/liblogosdelivery.so"
+            scripts/check_release_binaries.sh "${{ matrix.arch }}" /tmp/y/usr/local/lib liblogosdelivery.so
           else
             tar -xzf "${{ steps.vars.outputs.liblogosdelivery }}" -C /tmp/y
-            lib="/tmp/y/build/liblogosdelivery.dylib"
+            scripts/check_release_binaries.sh "${{ matrix.arch }}" /tmp/y/build liblogosdelivery.dylib
           fi
-          find /tmp/y -type f -exec file {} \;
-          binok "$lib" \
-            || { echo "FAIL: library package: $(basename $lib) is missing, is not a binary, or has a wrong CPU type (want: $want)"; exit 1; }
 
       - name: Upload waku artifact
         uses: actions/upload-artifact@v4.4.0

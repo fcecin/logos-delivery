@@ -13,8 +13,6 @@ on:
 env:
   RELEASE_NAME: nightly
 
-  # One definition of the release binary sets. The build step makes and
-  # tars these, and the verify step checks them.
   NODE_BINARIES: "wakunode2 logosdeliverynode chat2"
   TOOLS_BINARIES: "wakucanary networkmonitor"
 
@@ -43,15 +41,11 @@ jobs:
 
   build-and-publish:
     needs: tag-name
-    # The number of matrix jobs, read from the run itself. The verify
-    # step compares the tarball count against this. Each matrix job
-    # writes the same value, thus the last-writer-wins rule for matrix
-    # outputs has no effect.
+    # Matrix job count for the verify step; every matrix job writes the same value.
     outputs:
       platform-count: ${{ strategy.job-total }}
     strategy:
-      # Without fail-fast: false, one failed job cancels the other jobs and
-      # hides their results.
+      # Keep the other jobs running when one fails.
       fail-fast: false
       matrix:
         # GitHub macOS runners are arm64 only; darwin/amd64 needs a cross-compilation setup.
@@ -154,10 +148,6 @@ jobs:
   create-release-candidate:
     runs-on: ubuntu-22.04
     needs: [ tag-name, build-and-publish ]
-    # contents:write covers the release create/delete calls and the
-    # nightly tag push. actions:read covers the artifact downloads.
-    # An explicit block keeps the job independent of the repository's
-    # default token permissions.
     permissions:
       contents: write
       actions: read
@@ -190,13 +180,7 @@ jobs:
 
           echo "ref=${REF}" >> $GITHUB_OUTPUT
 
-      # This step examines the release artifacts before the publish steps.
-      # If this step finds a fault, this step stops the release.
-      # This step makes sure that:
-      #   - tar can read each tarball (tar stops on a truncated tarball)
-      #   - each tarball contains each binary from the shared definition
-      #   - each binary has the CPU type that the tarball name shows
-      #   - the node count and the tools count agree with the build matrix.
+      # A fault in the release artifacts stops the release here.
       - name: verify release artifacts
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -208,9 +192,7 @@ jobs:
           EXPECTED=${{ needs.build-and-publish.outputs.platform-count }}
           echo "### check inputs ###"
           echo "expected platform count: $EXPECTED"
-          # Each matrix job writes its os and arch into its artifact
-          # name, thus this list shows the platforms that built and
-          # uploaded in this run.
+          # The artifact names carry each matrix job's os and arch.
           echo "artifacts uploaded by the build jobs:"
           if names=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[].name' 2>/dev/null); then
             echo "$names" | sed 's/^/  /'
@@ -226,39 +208,23 @@ jobs:
           echo "### tarball contents and binary CPU type ###"
           for t in wakunode2/*.tar.gz wakutools/*.tar.gz; do
             echo "== $t =="
+            # A truncated tarball stops the step here.
             tar -tzf "$t"
             rm -rf /tmp/x && mkdir -p /tmp/x && tar -xzf "$t" -C /tmp/x
 
-            find /tmp/x -type f -exec file {} \;
-
             # The tarball name (nwaku-<arch>-<os>-<tag>.tar.gz) shows the
-            # correct arch for the binaries in it. The case statement
-            # changes this arch into the text that the file command writes.
-            # For arm64 binaries, macOS shows "arm64" and Linux shows
-            # "aarch64". If the name shows an unknown arch, this step
-            # stops the release.
+            # correct arch for the binaries in it.
             case "$t" in
-              *-amd64-*) want='x86-64' ;;
-              *-arm64-*) want='arm64|aarch64' ;;
+              *-amd64-*) arch=amd64 ;;
+              *-arm64-*) arch=arm64 ;;
               *) echo "FAIL: unknown arch in name: $t"; exit 1 ;;
             esac
             case "$t" in
               wakunode2/*) need="$NODE_BINARIES" ;;
               wakutools/*) need="$TOOLS_BINARIES" ;;
             esac
-            echo "want: $want; need: $need"
-
-            # Each binary from the shared definition must be present,
-            # must be a binary, and must have the correct CPU type. The
-            # file command reads the bytes, thus a zero-size or
-            # truncated file fails here. The pattern examines only the
-            # text after the ":" that the file command writes.
-            for b in $need; do
-              file "/tmp/x/build/$b" 2>/dev/null \
-                | grep -E "executable|shared object|shared library" \
-                | grep -Eq ": .*($want)" \
-                || { echo "FAIL: $t: build/$b is missing, is not a binary, or has a wrong CPU type (want: $want)"; exit 1; }
-            done
+            echo "arch: $arch; need: $need"
+            scripts/check_release_binaries.sh "$arch" /tmp/x/build $need
             echo
           done
           echo "### tarball count check ###"
@@ -277,25 +243,21 @@ jobs:
         run: |
           set -x
           TAG="${{ needs.tag-name.outputs.tag }}"
-          # Each run replaces the nightly release and moves the nightly
-          # tag. Every other release is permanent: this workflow makes
-          # such a release one time and never replaces it.
           if [[ "$TAG" == "nightly" ]]; then
+            # The nightly release and its tag are replaced on every run.
             if gh release view "$TAG" &>/dev/null; then
               gh release delete -y "$TAG"
             fi
-            # The create step reuses an existing tag and ignores
-            # --target. Thus this block must delete the nightly tag, so
-            # that the create step makes a new tag at master. A release
-            # can be absent while its tag exists, thus the tag deletion
-            # is separate from the release deletion.
+            # gh release create reuses an existing tag and ignores --target,
+            # so the old tag must be deleted even when the release is absent.
             if git ls-remote --exit-code origin "refs/tags/$TAG" >/dev/null; then
               git push origin ":refs/tags/$TAG"
             fi
             git tag -d "$TAG" || true
           else
+            # Any other release is permanent; a re-run must not replace it.
             if gh release view "$TAG" &>/dev/null; then
-              echo "FAIL: release $TAG already exists. This workflow never replaces a published release. Delete it by hand, or use a new tag."
+              echo "FAIL: release $TAG already exists."
               exit 1
             fi
           fi
