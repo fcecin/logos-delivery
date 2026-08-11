@@ -13,6 +13,11 @@ on:
 env:
   RELEASE_NAME: nightly
 
+  # One definition of the release binary sets. The build step makes and
+  # tars these, and the verify gate checks them.
+  NODE_BINARIES: "wakunode2 logosdeliverynode chat2"
+  TOOLS_BINARIES: "wakucanary networkmonitor"
+
   NPROC: 2
   MAKEFLAGS: "-j${NPROC}"
   NIM_PARAMS: "-d:disableMarchNative"
@@ -85,14 +90,10 @@ jobs:
         run: |
           # -j1: each target starts one nimble process. Two parallel nimble
           # processes corrupt the shared package metadata (nimblemeta.json).
-          make V=1 -j1 CI=false POSTGRES=1\
-            wakunode2\
-            logosdeliverynode\
-            chat2\
-            tools
+          make V=1 -j1 CI=false POSTGRES=1 $NODE_BINARIES tools
 
-          tar -cvzf ${{steps.vars.outputs.nwaku}} ./build/wakunode2 ./build/logosdeliverynode ./build/chat2
-          tar -cvzf ${{steps.vars.outputs.nwakutools}} ./build/wakucanary ./build/networkmonitor
+          tar -cvzf ${{steps.vars.outputs.nwaku}} $(printf './build/%s ' $NODE_BINARIES)
+          tar -cvzf ${{steps.vars.outputs.nwakutools}} $(printf './build/%s ' $TOOLS_BINARIES)
 
       # Each matrix job must use a unique artifact name. With one shared
       # name, download-artifact@v4 keeps only the last upload and the release
@@ -132,6 +133,7 @@ jobs:
   #     debug: waku*
 
   # LOCAL-FORK-TEST: external logos-delivery-js workflow disabled on the fork.
+  # js-waku-node-optional:
   #   needs: build-docker-image
   #   uses: logos-messaging/logos-delivery-js/.github/workflows/test-node.yml@master
   #   permissions:
@@ -146,6 +148,13 @@ jobs:
   create-release-candidate:
     runs-on: ubuntu-22.04
     needs: [ tag-name, build-and-publish ]
+    # contents:write covers the release create/delete calls and the
+    # nightly tag push. actions:read covers the artifact downloads.
+    # An explicit block keeps the job independent of the repository's
+    # default token permissions.
+    permissions:
+      contents: write
+      actions: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -194,11 +203,7 @@ jobs:
             tar -tzf "$t"
             rm -rf /tmp/x && mkdir -p /tmp/x && tar -xzf "$t" -C /tmp/x
 
-            # The file command writes one line for each regular file:
-            # "path: <CPU type>". The log and the two checks that follow
-            # use this one output.
-            types=$(find /tmp/x -type f -exec file {} \;)
-            echo "$types"
+            find /tmp/x -type f -exec file {} \;
 
             # The tarball name (nwaku-<arch>-<os>-<tag>.tar.gz) shows the
             # correct arch for the binaries in it. The case statement
@@ -211,34 +216,31 @@ jobs:
               *-arm64-*) want='arm64|aarch64' ;;
               *) echo "FAIL: unknown arch in name: $t"; exit 1 ;;
             esac
-
-            # The pattern examines only the text after the ":" that the
-            # file command writes. Thus a file name that contains the arch
-            # text has no effect on the check. grep -Ev writes each line
-            # that does not have the correct arch text there. This step
-            # stops the release if a tarball is empty or if grep finds
-            # one or more of these lines.
-            if [ -z "$types" ] || echo "$types" | grep -Ev ": .*($want)"; then
-              echo "FAIL: $t is empty or has a wrong CPU type (want: $want)"
-              exit 1
-            fi
-
-            # Each node tarball must contain the three node binaries.
-            # Each tools tarball must contain the two tools binaries.
-            # This check finds a tarball with a missing binary.
             case "$t" in
-              wakunode2/*) need="wakunode2 logosdeliverynode chat2" ;;
-              wakutools/*) need="wakucanary networkmonitor" ;;
+              wakunode2/*) need="$NODE_BINARIES" ;;
+              wakutools/*) need="$TOOLS_BINARIES" ;;
             esac
+
+            # Each binary from the shared definition must be present,
+            # must be a binary, and must have the correct CPU type. The
+            # file command reads the bytes, thus a zero-size or
+            # truncated file fails here. The pattern examines only the
+            # text after the ":" that the file command writes.
             for b in $need; do
-              [ -f "/tmp/x/build/$b" ] || { echo "FAIL: $t does not contain build/$b"; exit 1; }
+              file "/tmp/x/build/$b" 2>/dev/null \
+                | grep -E "executable|shared object|shared library" \
+                | grep -Eq ": .*($want)" \
+                || { echo "FAIL: $t: build/$b is missing, is not a binary, or has a wrong CPU type (want: $want)"; exit 1; }
             done
             echo
           done
           echo "### tarball count check ###"
-          # The build matrix makes one node tarball and one tools tarball
-          # for each matrix entry. If you change the matrix, change EXPECTED.
-          EXPECTED=2
+          # One node tarball and one tools tarball for each matrix entry.
+          # The count comes from the matrix in this workflow file, thus a
+          # matrix change needs no edit here. This job checks out master,
+          # and the scheduled nightly also runs on master, so the two
+          # trees agree.
+          EXPECTED=$(python3 -c "import yaml; print(len(yaml.safe_load(open('.github/workflows/pre-release.yml'))['jobs']['build-and-publish']['strategy']['matrix']['include']))")
           n=$(ls wakunode2/*.tar.gz | wc -l)
           m=$(ls wakutools/*.tar.gz | wc -l)
           echo "wakunode2 tarballs: $n, wakutools tarballs: $m (expected $EXPECTED each)"
@@ -251,23 +253,27 @@ jobs:
         run: |
           set -x
           TAG="${{ needs.tag-name.outputs.tag }}"
-          # This block deletes the old release and, for the nightly tag,
-          # the remote tag. The create step reuses an existing tag and
-          # ignores --target. Thus the nightly tag must go away here, so
-          # that the create step makes a new tag at master, and the
-          # nightly tag moves with master each night. A release can be
-          # absent while its tag exists, thus the tag deletion is
-          # separate from the release deletion. A version tag keeps its
-          # tag: it already points at the correct commit, and only the
-          # release is made again.
-          if gh release view "$TAG" &>/dev/null; then
-            gh release delete -y "$TAG"
-          fi
+          # The nightly release is a rolling channel: each run replaces
+          # the release and moves the tag. Every other release is
+          # permanent. Automation makes a release; it never remakes one.
           if [[ "$TAG" == "nightly" ]]; then
+            if gh release view "$TAG" &>/dev/null; then
+              gh release delete -y "$TAG"
+            fi
+            # The create step reuses an existing tag and ignores
+            # --target. Thus the nightly tag must go away here, so that
+            # the create step makes a new tag at master. A release can
+            # be absent while its tag exists, thus the tag deletion is
+            # separate from the release deletion.
             if git ls-remote --exit-code origin "refs/tags/$TAG" >/dev/null; then
               git push origin ":refs/tags/$TAG"
             fi
             git tag -d "$TAG" || true
+          else
+            if gh release view "$TAG" &>/dev/null; then
+              echo "FAIL: release $TAG already exists. This workflow never replaces a published release. Delete it by hand, or use a new tag."
+              exit 1
+            fi
           fi
 
           RELEASE_NOTES_TAG=$([[ "${{ needs.tag-name.outputs.tag }}" != "nightly" ]] && echo "-t ${{steps.vars.outputs.ref}}" || echo "")

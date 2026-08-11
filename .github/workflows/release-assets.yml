@@ -8,6 +8,10 @@ on:
   workflow_dispatch:
 
 env:
+  # One definition of the node binary set for this workflow. The verify
+  # gate checks these inside the waku tarball.
+  NODE_BINARIES: "wakunode2 logosdeliverynode chat2"
+
   NPROC: 2
   NIM_PARAMS: "-d:disableMarchNative"
   NIM_VERSION: '2.2.4'
@@ -172,21 +176,27 @@ jobs:
             *) echo "FAIL: unknown arch: ${{ matrix.arch }}"; exit 1 ;;
           esac
 
-          # The waku tarball must contain the three node binaries, and
-          # the file command must show the correct CPU type for each.
-          # The pattern examines only the text after the ":" that the
-          # file command writes.
+          # Each binary from the shared definition must be present, must
+          # be a binary, and must have the correct CPU type. The file
+          # command reads the bytes, thus a zero-size or truncated file
+          # fails here. The pattern examines only the text after the ":"
+          # that the file command writes.
+          binok() {
+            file "$1" 2>/dev/null \
+              | grep -E "executable|shared object|shared library" \
+              | grep -Eq ": .*($want)"
+          }
+
           rm -rf /tmp/x && mkdir -p /tmp/x
           tar -xzf "${{ steps.vars.outputs.waku }}" -C /tmp/x
-          for b in wakunode2 logosdeliverynode chat2; do
-            f="/tmp/x/build/$b"
-            [ -f "$f" ] || { echo "FAIL: waku tarball does not contain build/$b"; exit 1; }
-            file "$f"
-            file "$f" | grep -Eq ": .*($want)" || { echo "FAIL: $b has a wrong CPU type (want: $want)"; exit 1; }
+          find /tmp/x -type f -exec file {} \;
+          for b in $NODE_BINARIES; do
+            binok "/tmp/x/build/$b" \
+              || { echo "FAIL: waku tarball: build/$b is missing, is not a binary, or has a wrong CPU type (want: $want)"; exit 1; }
           done
 
-          # The library package must contain the shared library, and the
-          # library must have the correct CPU type.
+          # The library package must contain its shared library with the
+          # correct CPU type.
           rm -rf /tmp/y && mkdir -p /tmp/y
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             dpkg-deb -x "${{ steps.vars.outputs.liblogosdelivery }}" /tmp/y
@@ -195,9 +205,9 @@ jobs:
             tar -xzf "${{ steps.vars.outputs.liblogosdelivery }}" -C /tmp/y
             lib="/tmp/y/build/liblogosdelivery.dylib"
           fi
-          [ -f "$lib" ] || { echo "FAIL: library package does not contain $(basename $lib)"; exit 1; }
-          file "$lib"
-          file "$lib" | grep -Eq ": .*($want)" || { echo "FAIL: library has a wrong CPU type (want: $want)"; exit 1; }
+          find /tmp/y -type f -exec file {} \;
+          binok "$lib" \
+            || { echo "FAIL: library package: $(basename $lib) is missing, is not a binary, or has a wrong CPU type (want: $want)"; exit 1; }
 
       - name: Upload waku artifact
         uses: actions/upload-artifact@v4.4.0
