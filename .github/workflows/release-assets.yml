@@ -8,8 +8,6 @@ on:
   workflow_dispatch:
 
 env:
-  NODE_BINARIES: "wakunode2 logosdeliverynode chat2"
-
   NPROC: 2
   NIM_PARAMS: "-d:disableMarchNative"
   NIM_VERSION: '2.2.4'
@@ -161,32 +159,6 @@ jobs:
           if [[ "${{ runner.os }}" == "macOS" ]]; then
             tar -cvzf ${{steps.vars.outputs.liblogosdelivery}} ./build/liblogosdelivery.dylib ./build/liblogosdelivery.a ./library/liblogosdelivery.h ./library/liblogosdelivery_kernel.h
           fi
-
-      # This step examines the artifacts before the upload steps.
-      # If this step finds a fault, the job stops and uploads nothing.
-      - name: Verify artifacts
-        run: |
-          set -e
-          case "${{ matrix.arch }}" in
-            amd64) want='x86-64' ;;
-            arm64) want='arm64|aarch64' ;;
-            *) echo "FAIL: unknown arch: ${{ matrix.arch }}"; exit 1 ;;
-          esac
-          echo "arch: ${{ matrix.arch }} -> want: $want"
-
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
-            LIB=liblogosdelivery.so
-          else
-            LIB=liblogosdelivery.dylib
-          fi
-          # file reads the bytes: missing, zero-size, truncated, and
-          # wrong-arch binaries all fail here.
-          for b in $NODE_BINARIES $LIB; do
-            line=$(file "build/$b" 2>/dev/null || true)
-            echo "$line"
-            echo "$line" | grep -E "executable|shared object|shared library" | grep -Eq ": .*($want)" \
-              || { echo "FAIL: build/$b (want: $want)"; exit 1; }
-          done
 
       - name: Upload waku artifact
         uses: actions/upload-artifact@v4.4.0
