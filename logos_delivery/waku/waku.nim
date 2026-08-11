@@ -35,6 +35,7 @@ import
     node/peer_manager,
     node/health_monitor,
     net/net_config,
+    net/nat_config,
     node/waku_metrics,
     node/subscription_manager,
     rest_api/message_cache,
@@ -71,12 +72,17 @@ type Waku* = ref object ## Implements `KernelApi` (ops in `waku/api/*`).
   conf*: WakuConf
   rng*: crypto.Rng
 
-  key: crypto.PrivateKey
-
   wakuDiscv5*: WakuDiscoveryV5
   dynamicBootstrapNodes*: seq[RemotePeerInfo]
   dnsRetryLoopHandle: Future[void]
+
+  discv5NatRenewLoopHandle: Future[void]
   networkConnLoopHandle: Future[void]
+
+  netConfig: Opt[NetConfig]
+    ## The configured NetConfig, captured once by captureNetConf.
+    ## syncEnr overrides its ENR fields with live state.
+  discv5AnnouncedPort: Opt[Port] ## mapped external discv5 udp port; none = bind port
 
   node*: WakuNode
 
@@ -95,38 +101,35 @@ proc setupSwitchServices(
     info "circuit relay handler new reserve event",
       addrs_before = $(waku.node.announcedAddresses), addrs = $addresses
 
-    waku.node.announcedAddresses.setLen(0) ## remove previous addresses
-    waku.node.announcedAddresses.add(addresses)
+    waku.node.addressSources.relayReserved = addresses
+    waku.node.recomputeAnnouncedAddresses()
     info "waku node announced addresses updated",
       announcedAddresses = waku.node.announcedAddresses
 
-    if not isNil(waku.wakuDiscv5):
-      waku.wakuDiscv5.updateAnnouncedMultiAddress(addresses).isOkOr:
-        error "failed to update announced multiaddress", error = $error
-
   let autonatService = getAutonatService(rng)
-  if conf.circuitRelayClient:
-    ## The node is considered to be behind a NAT or firewall and then it
-    ## should struggle to be reachable and establish connections to other nodes
-    const MaxNumRelayServers = 2
-    let autoRelayService = AutoRelayService.new(
-      MaxNumRelayServers, RelayClient(circuitRelay), onReservation, rng
-    )
-    let holePunchService = HPService.new(autonatService, autoRelayService)
-    waku.node.switch.services = @[Service(holePunchService)]
-  else:
-    waku.node.switch.services = @[Service(autonatService)]
+  let newService =
+    if conf.circuitRelayClient:
+      ## The node assumes it is behind NAT and not directly reachable.
+      ## It requests circuit-relay reservations to stay reachable.
+      const MaxNumRelayServers = 2
+      let autoRelayService = AutoRelayService.new(
+        MaxNumRelayServers, RelayClient(circuitRelay), onReservation, rng
+      )
+      Service(HPService.new(autonatService, autoRelayService))
+    else:
+      Service(autonatService)
 
-  # libp2p 2.0.0 split Service.setup out of Service.start: the switch runs setup
-  # only at build time (SwitchBuilder.setupServices), while switch.start calls
-  # just start. These services are created and attached post-build, so setup must
-  # be invoked explicitly here -- otherwise AutonatService.addressMapper stays nil
-  # and the peerInfo.update() inside start dereferences it (SIGSEGV).
-  for service in waku.node.switch.services:
-    try:
-      service.setup(waku.node.switch)
-    except ServiceSetupError as e:
-      error "failed to set up libp2p switch service", error = e.msg
+  # Build-time services: the NATService (port mapping) and the wildcard
+  # address resolver. Only the NATService stays.
+  waku.node.switch.services.keepItIf(it of NATService)
+  waku.node.switch.services.add(newService)
+
+  # libp2p runs Service.setup only at build time (SwitchBuilder). This
+  # service is attached post-build, so run its setup explicitly.
+  try:
+    newService.setup(waku.node.switch)
+  except ServiceSetupError as e:
+    error "failed to set up libp2p switch service", error = e.msg
 
 ## Initialisation
 
@@ -237,7 +240,6 @@ proc new*(
     stateInfo: WakuStateInfo.init(node, wakuConf),
     conf: wakuConf,
     rng: rng,
-    key: wakuConf.nodeKey,
     node: node,
     healthMonitor: healthMonitor,
     appCallbacks: appCallbacks,
@@ -249,13 +251,20 @@ proc new*(
 
   ok(waku)
 
-proc getRunningNetConfig(waku: Waku): Future[Result[NetConfig, string]] {.async.} =
+proc captureNetConf(waku: Waku): Future[Result[void, string]] {.async.} =
+  ## Runs once, at start. Resolves the configured endpoint the ENR is
+  ## built around (operator extip / dns4, the ports actually bound) and
+  ## sets the configured source of the derivation from it. Config
+  ## derivation runs here for the last time. Every later ENR rebuild
+  ## applies live state on top of waku.netConfig.
   let conf = waku.conf
   let (tcpPort, websocketPort, quicPort) = getPorts(
     waku.node.switch.peerInfo.listenAddrs
   ).valueOr:
     return err("Could not retrieve ports: " & error)
 
+  ## The resolved dynamic (port 0) ports are written back once, so the
+  ## conf holds the ports the node actually listens on.
   if tcpPort.isSome():
     conf.endpointConf.p2pTcpPort = tcpPort.get()
 
@@ -265,71 +274,77 @@ proc getRunningNetConfig(waku: Waku): Future[Result[NetConfig, string]] {.async.
   if quicPort.isSome() and conf.quicConf.isSome():
     conf.quicConf.get().port = quicPort.get()
 
-  # Rebuild NetConfig from the bound ports already read back into `conf`.
-  let netConf = (
+  # Rebuild the configured NetConfig from the bound ports already read back
+  # into `conf`.
+  let netConfig = (
     await networkConfiguration(
       conf.clusterId, conf.endpointConf, conf.discv5Conf, conf.webSocketConf,
-      conf.quicConf, conf.wakuFlags, conf.dnsAddrsNameServers, clientId,
+      conf.quicConf, conf.wakuFlags, conf.dnsAddrsNameServers,
     )
   ).valueOr:
-    return err("Could not update NetConfig: " & error)
+    return err("Could not resolve the network configuration: " & error)
 
-  return ok(netConf)
+  waku.netConfig = Opt.some(netConfig)
 
-proc updateEnr(waku: Waku): Future[Result[void, string]] {.async.} =
-  let netConf: NetConfig = (await getRunningNetConfig(waku)).valueOr:
-    return err("error calling updateNetConfig: " & $error)
-  let record = enrConfiguration(waku.conf, netConf).valueOr:
-    return err("ENR setup failed: " & error)
+  waku.node.setConfigAnnouncedAddresses(netConfig.announcedAddresses)
+  waku.node.recomputeAnnouncedAddresses(notify = false)
+
+  return ok()
+
+proc syncEnr(waku: Waku): Result[void, string] =
+  ## Build a fresh ENR from the live state: waku.netConfig, with
+  ## the ENR fields overridden by the NAT mapping in place, the announced
+  ## addresses as the multiaddrs, and a higher sequence number. Discv5
+  ## peers refetch a record only when its sequence number is higher.
+  var netConfig = waku.netConfig.valueOr:
+    ## Before the capture nothing is announced. Start runs its own sync
+    ## after the capture.
+    return ok()
+
+  let mappedPorts = getPorts(waku.node.natMappedExternalAddresses()).valueOr:
+    return err("Could not retrieve NAT-mapped ports: " & error)
+  let natIp = waku.node.natExternalIp()
+
+  ## The external IP is used only while a mapping is in place.
+  if mappedPorts.tcpPort.isSome() and natIp.isSome():
+    netConfig.enrIp = natIp
+    netConfig.enrPort = mappedPorts.tcpPort
+
+  if waku.discv5AnnouncedPort.isSome():
+    netConfig.discv5UdpPort = waku.discv5AnnouncedPort
+
+  netConfig.enrMultiaddrs = waku.node.announcedAddresses
+
+  let record = enrConfiguration(waku.conf, netConfig, waku.node.enr.seqNum + 1).valueOr:
+    return err("ENR rebuild failed: " & error)
 
   if isClusterMismatched(record, waku.conf.clusterId):
     return err("cluster-id mismatch configured shards")
 
   waku.node.enr = record
+  info "Waku node ENR updated successfully", enr = record.toUri(), record = $(record)
 
-  # If TCP/WS was configured with port 0, node.announcedAddresses was built
-  # pre-bind with a port value of 0. In any case, the resync is harmless.
-  waku.node.announcedAddresses = netConf.announcedAddresses
-
-  return ok()
-
-proc updateAddressInENR(waku: Waku): Result[void, string] =
-  let addresses: seq[MultiAddress] = waku.node.announcedAddresses
-  let encodedAddrs = multiaddr.encodeMultiaddrs(addresses)
-
-  ## First update the enr info contained in WakuNode
-  let keyBytes = waku.key.getRawBytes().valueOr:
-    return err("failed to retrieve raw bytes from waku key: " & $error)
-
-  let parsedPk = keys.PrivateKey.fromHex(keyBytes.toHex()).valueOr:
-    return err("failed to parse the private key: " & $error)
-
-  let enrFields = @[toFieldPair(MultiaddrEnrField, encodedAddrs)]
-  waku.node.enr.update(parsedPk, extraFields = enrFields).isOkOr:
-    return err("failed to update multiaddress in ENR updateAddressInENR: " & $error)
-
-  info "Waku node ENR updated successfully with new multiaddress",
-    enr = waku.node.enr.toUri(), record = $(waku.node.enr)
-
-  ## Now update the ENR infor in discv5
   if not waku.wakuDiscv5.isNil():
-    waku.wakuDiscv5.protocol.localNode.record = waku.node.enr
-    let enr = waku.wakuDiscv5.protocol.localNode.record
-
-    info "Waku discv5 ENR updated successfully with new multiaddress",
-      enr = enr.toUri(), record = $(enr)
+    waku.wakuDiscv5.protocol.localNode.record = record
+    info "Waku discv5 ENR updated successfully",
+      enr = record.toUri(), record = $(record)
 
   return ok()
 
 proc updateWaku(waku: Waku): Future[Result[void, string]] {.async.} =
-  (await updateEnr(waku)).isOkOr:
-    return err("error calling updateEnr: " & $error)
+  (await captureNetConf(waku)).isOkOr:
+    return err("captureNetConf failed: " & error)
 
   ?updateAnnouncedAddrWithPrimaryIpAddr(waku.node)
 
-  ?updateAddressInENR(waku)
+  ?syncEnr(waku)
 
   return ok()
+
+proc setDiscv5AnnouncedPort(waku: Waku, port: Opt[Port]) {.gcsafe, raises: [].} =
+  waku.discv5AnnouncedPort = port
+  syncEnr(waku).isOkOr:
+    error "failed to refresh ENR after discv5 NAT port change", error = error
 
 proc startDnsDiscoveryRetryLoop(waku: Waku): Future[void] {.async.} =
   while true:
@@ -425,12 +440,59 @@ proc start*(waku: Waku): Future[Result[void, string]] {.async: (raises: []).} =
     waku.node.ports.discv5Udp = waku.wakuDiscV5.udpPort.uint16
     waku.conf.discv5Conf.get().udpPort = waku.wakuDiscV5.udpPort
 
-  ## Update waku data that is set dynamically on node start
+    ## The discv5 socket is outside the switch, so the NATService does not
+    ## map it. Map it here and keep the lease alive, so the ENR carries the
+    ## granted external port. The keeper owns the mapper and closes it.
+    if conf.endpointConf.natStrategy.kind in {NatAny, NatUpnp, NatPmp}:
+      let mapperOpt = natPortMapper(conf.endpointConf.natStrategy)
+      if mapperOpt.isNone():
+        info "discv5 NAT port mapping not available: no port mapper"
+      else:
+        let mapper = mapperOpt.get()
+        let discoveryTimeout =
+          conf.endpointConf.natDiscoveryTimeoutMs.int64.milliseconds
+        try:
+          let mapped = await mapUdpPort(
+            mapper, waku.wakuDiscV5.udpPort, waku.wakuDiscV5.udpPort, discoveryTimeout
+          )
+          if mapped.isOk():
+            ## The port goes into the ENR only when the switch also has
+            ## an external address. The bind port stays in
+            ## waku.node.ports.discv5Udp and waku.wakuDiscV5.udpPort.
+            let projected = waku.node.natExternalIp().isSome()
+            if projected:
+              waku.discv5AnnouncedPort = Opt.some(mapped.get().externalPort)
+            else:
+              info "discv5 mapped but the switch has no external address; " &
+                "keeping the bind port in the ENR"
+            waku.discv5NatRenewLoopHandle = keepUdpMappingAlive(
+              mapper,
+              waku.wakuDiscV5.udpPort,
+              mapped.get().externalPort,
+              projected,
+              proc(): bool {.gcsafe, raises: [].} =
+                waku.node.natExternalIp().isSome(),
+              proc(port: Opt[Port]) {.gcsafe, raises: [].} =
+                waku.setDiscv5AnnouncedPort(port),
+              discoveryTimeout = discoveryTimeout,
+            )
+          else:
+            info "discv5 NAT port mapping not available", err = mapped.error
+            await mapper.close()
+        except CancelledError:
+          info "discv5 NAT port mapping cancelled"
+          await mapper.close()
+
   try:
     (await updateWaku(waku)).isOkOr:
-      return err("Error in start: " & $error)
+      return err("updateWaku failed: " & $error)
   except CatchableError:
     return err("Caught exception in start: " & getCurrentExceptionMsg())
+
+  ## Keep the ENR matching the announced addresses as mappings change.
+  waku.node.onAnnouncedAddressesChange = proc() {.gcsafe, raises: [].} =
+    syncEnr(waku).isOkOr:
+      error "failed to refresh ENR after announced address change", error = error
 
   waku.node.subscriptionManager.subscribeAllAutoshards().isOkOr:
     return err("failed to auto-subscribe autosharding shards: " & $error)
@@ -534,6 +596,9 @@ proc stop*(waku: Waku): Future[Result[void, string]] {.async: (raises: []).} =
 
     if not waku.dnsRetryLoopHandle.isNil():
       await waku.dnsRetryLoopHandle.cancelAndWait()
+
+    if not waku.discv5NatRenewLoopHandle.isNil():
+      await waku.discv5NatRenewLoopHandle.cancelAndWait()
 
     if not waku.healthMonitor.isNil():
       await waku.healthMonitor.stopHealthMonitor()

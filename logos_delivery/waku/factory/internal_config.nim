@@ -8,14 +8,12 @@ import
   std/[sequtils, net],
   results
 
-import
-  logos_delivery/waku/[common/utils/nat, net/net_config, waku_enr, waku_core],
-  ./waku_conf
+import logos_delivery/waku/[net/net_config, waku_enr, waku_core], ./waku_conf
 
 proc tryBuildEnrRecord(
-    conf: WakuConf, netConfig: NetConfig, multiaddrs: seq[MultiAddress]
+    conf: WakuConf, netConfig: NetConfig, multiaddrs: seq[MultiAddress], seqNum: uint64
 ): Result[enr.Record, string] =
-  var enrBuilder = EnrBuilder.init(conf.nodeKey)
+  var enrBuilder = EnrBuilder.init(conf.nodeKey, seqNum)
 
   enrBuilder.withIpAddressAndPorts(
     netConfig.enrIp, netConfig.enrPort, netConfig.discv5UdpPort
@@ -38,11 +36,16 @@ proc tryBuildEnrRecord(
   return ok(record)
 
 proc enrConfiguration*(
-    conf: WakuConf, netConfig: NetConfig
+    conf: WakuConf, netConfig: NetConfig, seqNum: uint64 = 1
 ): Result[enr.Record, string] =
+  ## Build an ENR from the NetConfig's ENR fields. When the record does
+  ## not fit, multiaddrs are trimmed from the tail until it does. When
+  ## rebuilding on a live node, `seqNum` must exceed the previous
+  ## record's. Discv5 peers refetch a record only when its sequence
+  ## number is higher.
   for retained in countdown(netConfig.enrMultiaddrs.len, 0):
     let multiaddrs = netConfig.enrMultiaddrs[0 ..< retained]
-    let record = tryBuildEnrRecord(conf, netConfig, multiaddrs).valueOr:
+    let record = tryBuildEnrRecord(conf, netConfig, multiaddrs, seqNum).valueOr:
       if retained > 0:
         warn "failed to create enr record, retrying with fewer multiaddrs",
           error = error,
@@ -89,7 +92,6 @@ proc networkConfiguration*(
     quicConf: Opt[QuicConf],
     wakuFlags: CapabilitiesBitfield,
     dnsAddrsNameServers: seq[IpAddress],
-    clientId: string,
 ): Future[NetConfigResult] {.async.} =
   let tcpBindPort = conf.p2pTcpPort
 
@@ -100,11 +102,15 @@ proc networkConfiguration*(
     else:
       (false, Opt.none(Port))
 
-  # NAT-map the QUIC UDP port (placeholder when QUIC off)
-  var (extIp, extTcpPort, extUdpPort) = setupNat(
-    conf.natStrategy.string, clientId, tcpBindPort, quicBindPort.get(tcpBindPort)
-  ).valueOr:
-    return err("failed to setup NAT: " & $error)
+  ## Configuration alone can vouch for two external IPs: the static
+  ## `extip:` strategy, or the dns4 name resolved below. UPnP/NAT-PMP
+  ## mappings are made by the switch's NATService at startup and never
+  ## enter this derivation.
+  var extIp =
+    if conf.natStrategy.kind == NatExtIp:
+      Opt.some(conf.natStrategy.extIp)
+    else:
+      Opt.none(IpAddress)
 
   let
     discv5UdpPort =
@@ -113,21 +119,20 @@ proc networkConfiguration*(
       else:
         Opt.none(Port)
 
-    ## TODO: the NAT setup assumes a manual port mapping configuration if extIp
-    ## config is set. This probably implies adding manual config item for
-    ## extPort as well. The following heuristic assumes that, in absence of
-    ## manual config, the external port is the same as the bind port.
+    ## With `extip:` or a dns4 name the operator vouches for the external
+    ## endpoint, and in absence of a manual port config the external ports
+    ## are assumed to be the bind ports.
     extPort =
-      if (extIp.isSome() or conf.dns4DomainName.isSome()) and extTcpPort.isNone():
+      if extIp.isSome() or conf.dns4DomainName.isSome():
         Opt.some(tcpBindPort)
       else:
-        extTcpPort
+        Opt.none(Port)
 
     extQuicPort =
-      if (extIp.isSome() or conf.dns4DomainName.isSome()) and extUdpPort.isNone():
+      if extIp.isSome() or conf.dns4DomainName.isSome():
         quicBindPort
       else:
-        extUdpPort
+        Opt.none(Port)
 
   # Resolve and use DNS domain IP
   if conf.dns4DomainName.isSome() and extIp.isNone():
