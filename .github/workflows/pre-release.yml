@@ -184,57 +184,58 @@ jobs:
       - name: verify release artifacts
         run: |
           set -e
-          # One node tarball and one tools tarball for each matrix job.
-          # The count comes from the build job's own matrix at run time,
-          # thus a matrix change needs no edit here.
+          # One node tarball and one tools tarball for each matrix job. The count
+          # comes from the build job's own matrix at run time, thus a matrix
+          # change needs no edit here.
           EXPECTED=${{ needs.build-and-publish.outputs.platform-count }}
-          echo "### check inputs ###"
           echo "expected platform count: $EXPECTED"
-          echo "node binaries:  $NODE_BINARIES"
-          echo "tools binaries: $TOOLS_BINARIES"
-          echo
-          echo "### artifacts received ###"
-          ls -lR wakunode2 wakutools
-          echo
-          echo "### tarball contents and binary CPU type ###"
-          for t in wakunode2/*.tar.gz wakutools/*.tar.gz; do
-            echo "== $t =="
-            # A truncated tarball stops the step here.
-            tar -tzf "$t"
-            d=$(mktemp -d)
-            tar -xzf "$t" -C "$d"
 
-            # The tarball name (nwaku-<arch>-<os>-<tag>.tar.gz) shows the
-            # correct arch for the binaries in it.
-            case "$t" in
-              *-amd64-*) want='x86-64' ;;
-              *-arm64-*) want='arm64|aarch64' ;;
-              *) echo "FAIL: unknown arch in name: $t"; exit 1 ;;
-            esac
-            case "$t" in
-              wakunode2/*) need="$NODE_BINARIES" ;;
-              wakutools/*) need="$TOOLS_BINARIES" ;;
-            esac
-            echo "want: $want; need: $need"
-            # file reads the bytes: missing, zero-size, truncated, and
-            # wrong-arch binaries all fail here.
-            for b in $need; do
-              line=$(file "$d/build/$b" 2>/dev/null || true)
-              echo "$line"
-              echo "$line" | grep -E "executable|shared object|shared library" | grep -Eq ": .*($want)" \
-                || { echo "FAIL: $b (want: $want)"; exit 1; }
+          # check_dir <dir> <binaries>
+          # e.g. check_dir wakunode2 "wakunode2 logosdeliverynode chat2"
+          # Every tarball in <dir> must extract and must contain each named
+          # binary with the CPU type that the tarball name shows.
+          check_dir() {
+            local dir="$1"       # artifact directory, e.g. wakunode2
+            local binaries="$2"  # in each tarball, e.g. "wakunode2 logosdeliverynode chat2"
+
+            echo "== $dir (binaries: $binaries) =="
+            ls -l "$dir"
+
+            local count
+            count=$(ls "$dir"/*.tar.gz | wc -l)
+            [ "$count" -eq "$EXPECTED" ] || { echo "FAIL: $dir: expected $EXPECTED tarballs, found $count"; exit 1; }
+
+            for tarball in "$dir"/*.tar.gz; do
+              echo "-- $tarball --"
+
+              # A truncated tarball stops the step here.
+              tar -tzf "$tarball"
+              local unpacked
+              unpacked=$(mktemp -d)
+              tar -xzf "$tarball" -C "$unpacked"
+
+              # The tarball name shows the correct CPU type,
+              # e.g. nwaku-amd64-linux-nightly.tar.gz -> binaries must be x86-64.
+              case "$tarball" in
+                *-amd64-*) want='x86-64' ;;
+                *-arm64-*) want='arm64|aarch64' ;;  # macOS says arm64, Linux says aarch64
+                *) echo "FAIL: unknown arch in name: $tarball"; exit 1 ;;
+              esac
+
+              # file reads the bytes of each binary,
+              # e.g. "build/wakunode2: ELF 64-bit LSB pie executable, x86-64, ...".
+              # A missing, zero-size, truncated, or wrong-arch binary fails here.
+              for binary in $binaries; do
+                line=$(file "$unpacked/build/$binary" 2>/dev/null || true)
+                echo "$line"
+                echo "$line" | grep -E "executable|shared object|shared library" | grep -Eq ": .*($want)" \
+                  || { echo "FAIL: $binary (want: $want)"; exit 1; }
+              done
             done
-            echo
-          done
-          echo "### tarball count check ###"
-          echo "node tarballs counted, $EXPECTED expected:"
-          ls wakunode2/*.tar.gz
-          echo "tools tarballs counted, $EXPECTED expected:"
-          ls wakutools/*.tar.gz
-          n=$(ls wakunode2/*.tar.gz | wc -l)
-          m=$(ls wakutools/*.tar.gz | wc -l)
-          [ "$n" -eq "$EXPECTED" ] || { echo "FAIL: expected $EXPECTED node tarballs, found $n"; exit 1; }
-          [ "$m" -eq "$EXPECTED" ] || { echo "FAIL: expected $EXPECTED tools tarballs, found $m"; exit 1; }
+          }
+
+          check_dir wakunode2 "$NODE_BINARIES"
+          check_dir wakutools "$TOOLS_BINARIES"
 
       - name: generate release notes
         env:
@@ -242,23 +243,15 @@ jobs:
         run: |
           set -x
           TAG="${{ needs.tag-name.outputs.tag }}"
+          # NOTE: gh release create refuses to create over an existing release.
           if [[ "$TAG" == "nightly" ]]; then
-            # The nightly release and its tag are replaced on every run.
-            if gh release view "$TAG" &>/dev/null; then
-              gh release delete -y "$TAG"
-            fi
-            # gh release create reuses an existing tag and ignores --target,
-            # so the old tag must be deleted even when the release is absent.
+            # Each run replaces the nightly release and its tag. gh release
+            # create reuses an existing tag and ignores --target.
+            gh release delete -y "$TAG" || true
             if git ls-remote --exit-code origin "refs/tags/$TAG" >/dev/null; then
               git push origin ":refs/tags/$TAG"
             fi
             git tag -d "$TAG" || true
-          else
-            # Any other release is permanent; a re-run must not replace it.
-            if gh release view "$TAG" &>/dev/null; then
-              echo "FAIL: release $TAG already exists."
-              exit 1
-            fi
           fi
 
           RELEASE_NOTES_TAG=$([[ "${{ needs.tag-name.outputs.tag }}" != "nightly" ]] && echo "-t ${{steps.vars.outputs.ref}}" || echo "")
