@@ -9,7 +9,7 @@ on:
 
 env:
   # One definition of the node binary set for this workflow. The verify
-  # gate checks these inside the waku tarball.
+  # step checks these inside the waku tarball.
   NODE_BINARIES: "wakunode2 logosdeliverynode chat2"
 
   NPROC: 2
@@ -175,6 +175,10 @@ jobs:
             arm64) want='arm64|aarch64' ;;
             *) echo "FAIL: unknown arch: ${{ matrix.arch }}"; exit 1 ;;
           esac
+          echo "### check inputs ###"
+          echo "arch: ${{ matrix.arch }} -> want: $want"
+          echo "node binaries: $NODE_BINARIES"
+          echo
 
           # Each binary from the shared definition must be present, must
           # be a binary, and must have the correct CPU type. The file

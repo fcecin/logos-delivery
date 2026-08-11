@@ -14,7 +14,7 @@ env:
   RELEASE_NAME: nightly
 
   # One definition of the release binary sets. The build step makes and
-  # tars these, and the verify gate checks them.
+  # tars these, and the verify step checks them.
   NODE_BINARIES: "wakunode2 logosdeliverynode chat2"
   TOOLS_BINARIES: "wakucanary networkmonitor"
 
@@ -43,6 +43,12 @@ jobs:
 
   build-and-publish:
     needs: tag-name
+    # The number of matrix jobs, read from the run itself. The verify
+    # step compares the tarball count against this. Each matrix job
+    # writes the same value, thus the last-writer-wins rule for matrix
+    # outputs has no effect.
+    outputs:
+      platform-count: ${{ strategy.job-total }}
     strategy:
       # Without fail-fast: false, one failed job cancels the other jobs and
       # hides their results.
@@ -188,12 +194,32 @@ jobs:
       # If this step finds a fault, this step stops the release.
       # This step makes sure that:
       #   - tar can read each tarball (tar stops on a truncated tarball)
-      #   - each tarball contains one or more regular files
-      #   - the CPU type in each binary agrees with the arch in the tarball name
+      #   - each tarball contains each binary from the shared definition
+      #   - each binary has the CPU type that the tarball name shows
       #   - the node count and the tools count agree with the build matrix.
       - name: verify release artifacts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
+          # One node tarball and one tools tarball for each matrix job.
+          # The count comes from the build job's own matrix at run time,
+          # thus a matrix change needs no edit here.
+          EXPECTED=${{ needs.build-and-publish.outputs.platform-count }}
+          echo "### check inputs ###"
+          echo "expected platform count: $EXPECTED"
+          # Each matrix job writes its os and arch into its artifact
+          # name, thus this list shows the platforms that built and
+          # uploaded in this run.
+          echo "artifacts uploaded by the build jobs:"
+          if names=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[].name' 2>/dev/null); then
+            echo "$names" | sed 's/^/  /'
+          else
+            echo "  WARN: could not list the run artifacts"
+          fi
+          echo "node binaries:  $NODE_BINARIES"
+          echo "tools binaries: $TOOLS_BINARIES"
+          echo
           echo "### artifacts received ###"
           ls -lR wakunode2 wakutools
           echo
@@ -220,6 +246,7 @@ jobs:
               wakunode2/*) need="$NODE_BINARIES" ;;
               wakutools/*) need="$TOOLS_BINARIES" ;;
             esac
+            echo "want: $want; need: $need"
 
             # Each binary from the shared definition must be present,
             # must be a binary, and must have the correct CPU type. The
@@ -235,15 +262,12 @@ jobs:
             echo
           done
           echo "### tarball count check ###"
-          # One node tarball and one tools tarball for each matrix entry.
-          # The count comes from the matrix in this workflow file, thus a
-          # matrix change needs no edit here. This job checks out master,
-          # and the scheduled nightly also runs on master, so the two
-          # trees agree.
-          EXPECTED=$(python3 -c "import yaml; print(len(yaml.safe_load(open('.github/workflows/pre-release.yml'))['jobs']['build-and-publish']['strategy']['matrix']['include']))")
+          echo "node tarballs counted, $EXPECTED expected:"
+          ls wakunode2/*.tar.gz
+          echo "tools tarballs counted, $EXPECTED expected:"
+          ls wakutools/*.tar.gz
           n=$(ls wakunode2/*.tar.gz | wc -l)
           m=$(ls wakutools/*.tar.gz | wc -l)
-          echo "wakunode2 tarballs: $n, wakutools tarballs: $m (expected $EXPECTED each)"
           [ "$n" -eq "$EXPECTED" ] || { echo "FAIL: expected $EXPECTED node tarballs, found $n"; exit 1; }
           [ "$m" -eq "$EXPECTED" ] || { echo "FAIL: expected $EXPECTED tools tarballs, found $m"; exit 1; }
 
@@ -253,18 +277,18 @@ jobs:
         run: |
           set -x
           TAG="${{ needs.tag-name.outputs.tag }}"
-          # The nightly release is a rolling channel: each run replaces
-          # the release and moves the tag. Every other release is
-          # permanent. Automation makes a release; it never remakes one.
+          # Each run replaces the nightly release and moves the nightly
+          # tag. Every other release is permanent: this workflow makes
+          # such a release one time and never replaces it.
           if [[ "$TAG" == "nightly" ]]; then
             if gh release view "$TAG" &>/dev/null; then
               gh release delete -y "$TAG"
             fi
             # The create step reuses an existing tag and ignores
-            # --target. Thus the nightly tag must go away here, so that
-            # the create step makes a new tag at master. A release can
-            # be absent while its tag exists, thus the tag deletion is
-            # separate from the release deletion.
+            # --target. Thus this block must delete the nightly tag, so
+            # that the create step makes a new tag at master. A release
+            # can be absent while its tag exists, thus the tag deletion
+            # is separate from the release deletion.
             if git ls-remote --exit-code origin "refs/tags/$TAG" >/dev/null; then
               git push origin ":refs/tags/$TAG"
             fi
