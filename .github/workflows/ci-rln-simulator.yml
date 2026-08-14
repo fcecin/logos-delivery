@@ -156,7 +156,7 @@ jobs:
 
       - name: Clone logos-delivery-simulator
         run: |
-          git clone --depth 1 https://github.com/logos-messaging/logos-delivery-simulator.git "$RUNNER_TEMP/logos-delivery-simulator"
+          git clone --depth 1 https://github.com/fcecin/logos-delivery-simulator.git "$RUNNER_TEMP/logos-delivery-simulator"
 
       - name: Write simulator .env
         working-directory: ${{ runner.temp }}/logos-delivery-simulator

@@ -202,7 +202,7 @@ jobs:
     needs: build-docker-image
     # The commit is tag SMOKE_TEST_2026.06.25; annotated tag refs break nested
     # workflow resolution on push events, so pin the commit. Re-pin on bumps.
-    uses: logos-messaging/logos-delivery-interop-tests/.github/workflows/nim_waku_PR.yml@6980880dba70aebe443b1ea1864891940980ecea
+    uses: fcecin/logos-delivery-interop-tests/.github/workflows/nim_waku_PR.yml@6980880dba70aebe443b1ea1864891940980ecea
     with:
       node_nwaku: ${{ needs.build-docker-image.outputs.image }}
 
