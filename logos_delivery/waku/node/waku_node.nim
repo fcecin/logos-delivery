@@ -13,7 +13,7 @@ import
   eth/p2p/discoveryv5/enr,
   libp2p/crypto/crypto,
   libp2p/crypto/curve25519,
-  libp2p/[multiaddress, multicodec, wire],
+  libp2p/[multiaddress, multicodec, peerinfo, wire],
   libp2p/protocols/ping,
   libp2p/protocols/pubsub/gossipsub,
   libp2p/protocols/pubsub/rpc/messages,
@@ -124,6 +124,7 @@ type
     wakuRendezvous*: WakuRendezVous
     wakuRendezvousClient*: rendezvous_client.WakuRendezVousClient
     announcedAddresses*: seq[MultiAddress]
+      ## Copy of the committed peerInfo addresses once the base is ready.
     configuredAnnounced: seq[MultiAddress]
       ## Operator-configured addresses, set at construction. The base is
       ## computed from this and never from announcedAddresses.
@@ -131,7 +132,10 @@ type
       ## The resolved addresses the base mapper answers with.
     baseReady: bool
     baseMapperInstalled: bool
-    extMultiAddrsOnly*: bool # When true, skip automatic IP address replacement
+    onCommittedAddresses*: proc() {.gcsafe, raises: [].}
+      ## Runs after every mirror copy; waku.nim uses it to refresh the ENR.
+    extMultiAddrsOnly: bool
+      ## Announce only the configured addresses. Set at construction.
     started*: bool # Indicates that node has started listening
     topicSubscriptionQueue*: AsyncEventQueue[SubscriptionEvent]
     rateLimitSettings*: ProtocolRateLimitSettings
@@ -238,10 +242,16 @@ proc new*(
     enr: enr,
     announcedAddresses: netConfig.announcedAddresses,
     configuredAnnounced: netConfig.announcedAddresses,
+    extMultiAddrsOnly: netConfig.extMultiAddrsOnly,
     topicSubscriptionQueue: queue,
     rateLimitSettings: rateLimitSettings,
     ports: BoundPorts.init(),
   )
+
+  if node.extMultiAddrsOnly:
+    ## Set before start: libp2p skips the mapper chain when this is
+    ## non-empty. NetConfig.init guarantees non-empty, concrete ports.
+    switch.peerInfo.announcedAddrs = netConfig.announcedAddresses
 
   peerManager.setShardGetter(node.getShardsGetter(@[]))
 
@@ -525,6 +535,13 @@ proc substituteBoundPorts(
 proc resolveAnnouncedBase(node: WakuNode) =
   ## Build the base from the configured addresses: substitute bound
   ## ports, rewrite wildcard hosts to the primary IP. Never fails.
+  if node.extMultiAddrsOnly:
+    ## announcedAddrs bypasses the mappers; the configured set is final.
+    node.baseAnnounced = node.configuredAnnounced
+    node.announcedAddresses = node.configuredAnnounced
+    node.baseReady = true
+    return
+
   let substituted =
     substituteBoundPorts(node.configuredAnnounced, node.switch.peerInfo.listenAddrs)
 
@@ -554,6 +571,15 @@ proc resolveAnnouncedBase(node: WakuNode) =
   node.announcedAddresses = node.baseAnnounced
   node.baseReady = true
   info "Announced base resolved", addrs = $node.baseAnnounced
+
+proc mirrorCommittedAddrs*(node: WakuNode) =
+  ## Copy the committed peerInfo addresses into announcedAddresses and
+  ## run the ENR refresh callback. No-op until the base is ready.
+  if not node.baseReady:
+    return
+  node.announcedAddresses = node.switch.peerInfo.addrs
+  if not node.onCommittedAddresses.isNil():
+    node.onCommittedAddresses()
 
 proc startProvidersAndListeners*(node: WakuNode) =
   RequestRelayShard.setProvider(
@@ -655,13 +681,19 @@ proc start*(node: WakuNode) {.async.} =
         return node.baseAnnounced
       return listenAddrs.filterIt(not it.hasZeroPort())
     node.switch.peerInfo.addressMappers.add(baseMapper)
+    node.switch.peerInfo.addObserver(
+      proc(p: PeerInfo) {.gcsafe, raises: [].} =
+        node.mirrorCommittedAddrs()
+    )
 
   ## NOTE: This will dispatch gossipsub start to the WakuRelay.start method override
   await node.switch.start()
 
-  ## Sockets are bound: resolve the base and commit it.
+  ## Sockets are bound: resolve the base, commit, and mirror once
+  ## explicitly. An unchanged update fires no observer event.
   resolveAnnouncedBase(node)
   await node.switch.peerInfo.update()
+  node.mirrorCommittedAddrs()
 
   # Reconnect to known relay peers in the background; it waits a prune backoff
   # and must not block startup.
