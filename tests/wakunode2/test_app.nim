@@ -6,6 +6,7 @@ import
   chronicles,
   chronos,
   libp2p/[crypto/crypto, crypto/secp, multiaddress, switch],
+  libp2p/services/[natservice, identify_pusher],
   tests/testlib/[wakucore, wakunode],
   logos_delivery/waku/factory/conf_builder/conf_builder
 
@@ -75,6 +76,18 @@ suite "Wakunode2 - Waku initialization":
     ## Cleanup
     (waitFor waku.stop()).isOkOr:
       raiseAssert error
+
+  test "production service composition carries NATService and IdentifyPusher":
+    ## Full path from conf to switch services: the NAT config is wired
+    ## through and the builder services survive the append.
+    var conf = defaultTestWakuConf()
+    conf.endpointConf.natStrategy = parseNatStrategy("upnp").expect("upnp")
+    let waku = (waitFor Waku.new(conf)).valueOr:
+      raiseAssert error
+    let services = waku.node.switch.services
+    check:
+      services.filterIt(it of NATService).len == 1
+      services.filterIt(it of IdentifyPusher).len == 1
 
   test "app properly handles dynamic port configuration":
     ## Given
