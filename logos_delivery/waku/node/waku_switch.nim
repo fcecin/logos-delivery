@@ -2,10 +2,8 @@
 {.push raises: [].}
 
 import
-  std/sequtils,
   results,
   chronos,
-  chronos/transports/[osnet, ipnet],
   chronicles,
   eth/keys,
   libp2p/crypto/crypto,
@@ -58,51 +56,6 @@ proc withWssTransport*(
     tlsCertificate = cert,
     {TLSFlags.NoVerifyHost, TLSFlags.NoVerifyServerName}, # THIS IS INSECURE, NO?
   )
-
-func isWildcardIp(ip: IpAddress): bool =
-  case ip.family
-  of IpAddressFamily.IPv4:
-    ip == static(parseIpAddress("0.0.0.0"))
-  of IpAddressFamily.IPv6:
-    ip == static(parseIpAddress("::"))
-
-proc interfaceAddresses(family: AddressFamily): seq[InterfaceAddress] =
-  let interfaces = osnet.getInterfaces().filterIt(
-      it.ifType == IfSoftwareLoopback or it.state == StatusUp
-    )
-  concat(interfaces.mapIt(it.addresses)).filterIt(it.host.family == family)
-
-proc expandWildcardAddresses*(listenAddrs: seq[MultiAddress]): seq[MultiAddress] =
-  ## One address per live interface for each wildcard listen address. The
-  ## port and the transport suffix stay. Other entries pass unchanged.
-  var addresses: seq[MultiAddress]
-  for listenAddr in listenAddrs:
-    let listenIp = listenAddr.getIp().valueOr:
-      addresses.add(listenAddr)
-      continue
-
-    if not isWildcardIp(listenIp):
-      addresses.add(listenAddr)
-      continue
-
-    let families =
-      case listenIp.family
-      of IpAddressFamily.IPv4:
-        @[AddressFamily.IPv4]
-      of IpAddressFamily.IPv6:
-        @[AddressFamily.IPv6, AddressFamily.IPv4]
-
-    for family in families:
-      for ifaddr in interfaceAddresses(family):
-        listenAddr.replaceIp(ifaddr.host.toIpAddress()).withValue(remapped):
-          addresses.add(remapped)
-  addresses
-
-proc wildcardExpansionMapper*(): AddressMapper =
-  proc(
-      listenAddrs: seq[MultiAddress]
-  ): Future[seq[MultiAddress]] {.gcsafe, async: (raises: [CancelledError]).} =
-    return expandWildcardAddresses(listenAddrs)
 
 proc newWakuSwitch*(
     privKey = Opt.none(crypto.PrivateKey),
@@ -189,8 +142,7 @@ proc newWakuSwitch*(
     b = b.withRendezVous()
 
   let switch = b.build()
-  # The wildcard service is off: its start mutates the mapper seq mid-walk.
-  # Appends run at build, after start, or in a start's synchronous prefix.
-  switch.peerInfo.addressMappers.insert(wildcardExpansionMapper(), 0)
+  # The upstream wildcard service stays off: its start mutates the
+  # mapper seq mid-walk. The resolved base supplies concrete addresses.
   DeliveryDialer.install(switch)
   switch

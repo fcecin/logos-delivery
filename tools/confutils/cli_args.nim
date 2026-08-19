@@ -1063,6 +1063,8 @@ proc toWakuConf*(n: WakuNodeConf): ConfResult[WakuConf] =
   b.withP2pListenAddress(n.listenAddress)
   b.withP2pTcpPort(n.tcpPort)
   b.withPortsShift(n.portsShift)
+  ## Library code builds WakuNodeConf directly and zero means unset
+  ## there. An explicit --nat-discovery-timeout-ms=0 selects the default.
   if n.nat != "":
     b.withNatStrategy(n.nat)
   if n.natDiscoveryTimeoutMs != 0:

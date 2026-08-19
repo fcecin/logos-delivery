@@ -13,6 +13,7 @@ import
   libp2p/services/autorelayservice,
   libp2p/services/hpservice,
   libp2p/peerid,
+  libp2p/wire,
   eth/keys,
   eth/p2p/discoveryv5/enr,
   presto,
@@ -90,21 +91,13 @@ type Waku* = ref object ## Implements `KernelApi` (ops in `waku/api/*`).
 
   persistency*: Persistency
 
-proc setupSwitchServices(
-    waku: Waku, conf: WakuConf, circuitRelay: Relay, rng: crypto.Rng
+proc setupSwitchServices*(
+    node: WakuNode, conf: WakuConf, circuitRelay: Relay, rng: crypto.Rng
 ) =
   proc onReservation(addresses: seq[MultiAddress]) {.gcsafe, raises: [].} =
-    info "circuit relay handler new reserve event",
-      addrs_before = $(waku.node.announcedAddresses), addrs = $addresses
-
-    waku.node.announcedAddresses.setLen(0) ## remove previous addresses
-    waku.node.announcedAddresses.add(addresses)
-    info "waku node announced addresses updated",
-      announcedAddresses = waku.node.announcedAddresses
-
-    if not isNil(waku.wakuDiscv5):
-      waku.wakuDiscv5.updateAnnouncedMultiAddress(addresses).isOkOr:
-        error "failed to update announced multiaddress", error = $error
+    ## Log only. libp2p does not refresh peerInfo when a reservation
+    ## drops, so a removed relay address stays until the next update.
+    info "circuit relay reservation change", addrs = $addresses
 
   let autonatService = getAutonatService(rng)
   let newService =
@@ -119,14 +112,14 @@ proc setupSwitchServices(
     else:
       Service(autonatService)
 
-  # The NATService is the only build-time service. Keep it.
-  waku.node.switch.services.keepItIf(it of NATService)
-  waku.node.switch.services.add(newService)
+  ## Keep the builder services (NATService, IdentifyPusher). Removing
+  ## IdentifyPusher leaves its protocol mounted but dead.
+  node.switch.services.add(newService)
 
   # libp2p runs Service.setup only at build time. This service attaches
   # after build, so run its setup here.
   try:
-    newService.setup(waku.node.switch)
+    newService.setup(node.switch)
   except ServiceSetupError as e:
     error "failed to set up libp2p switch service", error = e.msg
 
@@ -228,9 +221,6 @@ proc new*(
     node.ports.rest = boundRestPort.uint16
     wakuConf.restServerConf.get().port = boundRestPort
 
-  # Set the extMultiAddrsOnly flag so the node knows not to replace explicit addresses
-  node.extMultiAddrsOnly = wakuConf.endpointConf.extMultiAddrsOnly
-
   node.setupAppCallbacks(wakuConf, appCallbacks, healthMonitor).isOkOr:
     error "Failed setting up app callbacks", error = error
     return err("Failed setting up app callbacks: " & $error)
@@ -247,7 +237,7 @@ proc new*(
     brokerCtx: brokerCtx,
   )
 
-  waku.setupSwitchServices(wakuConf, relay, rng)
+  waku.node.setupSwitchServices(wakuConf, relay, rng)
 
   ok(waku)
 
@@ -289,47 +279,52 @@ proc updateEnr(waku: Waku): Future[Result[void, string]] {.async.} =
 
   waku.node.enr = record
 
-  # If TCP/WS was configured with port 0, node.announcedAddresses was built
-  # pre-bind with a port value of 0. In any case, the resync is harmless.
-  waku.node.announcedAddresses = netConf.announcedAddresses
-
   return ok()
 
-proc updateAddressInENR(waku: Waku): Result[void, string] =
-  let addresses: seq[MultiAddress] = waku.node.announcedAddresses
-  let encodedAddrs = multiaddr.encodeMultiaddrs(addresses)
+proc refreshEnrAddrs*(
+    node: WakuNode, key: crypto.PrivateKey, wakuDiscv5: WakuDiscoveryV5
+): Result[void, string] =
+  ## Write the announced addresses into the ENR multiaddrs field. With
+  ## discv5, update its live record and copy the result back.
+  var addrs = node.announcedAddresses
+  ## An empty set writes an empty field; keeping old routes lies.
+  addrs =
+    addrs.filterIt(it.isCircuitRelayMA()) & addrs.filterIt(not it.isCircuitRelayMA())
 
-  ## First update the enr info contained in WakuNode
-  let keyBytes = waku.key.getRawBytes().valueOr:
+  ## Dropping tail entries only helps when the record is too large. A
+  ## key or record failure also fails on the empty list and returns err.
+  if not wakuDiscv5.isNil():
+    for retained in countdown(addrs.len, 0):
+      let encoded = multiaddr.encodeMultiaddrs(addrs[0 ..< retained])
+      if wakuDiscv5.protocol.updateRecord([(MultiaddrEnrField, encoded)]).isOk():
+        node.enr = wakuDiscv5.protocol.localNode.record
+        debug "ENR multiaddrs updated", retained = retained, total = addrs.len
+        return ok()
+    return err("failed to update ENR multiaddrs at every prefix")
+
+  let keyBytes = key.getRawBytes().valueOr:
     return err("failed to retrieve raw bytes from waku key: " & $error)
-
   let parsedPk = keys.PrivateKey.fromHex(keyBytes.toHex()).valueOr:
     return err("failed to parse the private key: " & $error)
-
-  let enrFields = @[toFieldPair(MultiaddrEnrField, encodedAddrs)]
-  waku.node.enr.update(parsedPk, extraFields = enrFields).isOkOr:
-    return err("failed to update multiaddress in ENR updateAddressInENR: " & $error)
-
-  info "Waku node ENR updated successfully with new multiaddress",
-    enr = waku.node.enr.toUri(), record = $(waku.node.enr)
-
-  ## Now update the ENR infor in discv5
-  if not waku.wakuDiscv5.isNil():
-    waku.wakuDiscv5.protocol.localNode.record = waku.node.enr
-    let enr = waku.wakuDiscv5.protocol.localNode.record
-
-    info "Waku discv5 ENR updated successfully with new multiaddress",
-      enr = enr.toUri(), record = $(enr)
-
-  return ok()
+  for retained in countdown(addrs.len, 0):
+    let encoded = multiaddr.encodeMultiaddrs(addrs[0 ..< retained])
+    let fields = @[toFieldPair(MultiaddrEnrField, encoded)]
+    if node.enr.update(parsedPk, extraFields = fields).isOk():
+      debug "ENR multiaddrs updated", retained = retained, total = addrs.len
+      return ok()
+  return err("failed to update ENR multiaddrs at every prefix")
 
 proc updateWaku(waku: Waku): Future[Result[void, string]] {.async.} =
   (await updateEnr(waku)).isOkOr:
     return err("error calling updateEnr: " & $error)
 
-  ?updateAnnouncedAddrWithPrimaryIpAddr(waku.node)
+  if not waku.wakuDiscv5.isNil():
+    ## Install the boot record once; later refreshes update this live
+    ## record. subscribeAllAutoshards runs after it, so no shard update
+    ## can precede the install.
+    waku.wakuDiscv5.protocol.localNode.record = waku.node.enr
 
-  ?updateAddressInENR(waku)
+  ?refreshEnrAddrs(waku.node, waku.key, waku.wakuDiscv5)
 
   return ok()
 
@@ -443,6 +438,12 @@ proc start*(waku: Waku): Future[Result[void, string]] {.async: (raises: []).} =
 
     waku.node.ports.discv5Udp = waku.wakuDiscV5.udpPort.uint16
     waku.conf.discv5Conf.get().udpPort = waku.wakuDiscV5.udpPort
+
+  ## Set the callback before the explicit refresh in updateWaku: a
+  ## commit in between would otherwise never reach the ENR.
+  waku.node.onCommittedAddresses = proc() {.gcsafe, raises: [].} =
+    refreshEnrAddrs(waku.node, waku.key, waku.wakuDiscv5).isOkOr:
+      error "failed to refresh ENR multiaddrs", error = $error
 
   ## Update waku data that is set dynamically on node start
   try:

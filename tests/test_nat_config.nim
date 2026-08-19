@@ -194,19 +194,22 @@ suite "NAT config - NATService pipeline":
   asyncTest "a wildcard bind maps and announces through the real NATService":
     ## The tripwire for the default deployment: a 0.0.0.0 bind, waku's
     ## switch composition, the real setupMappings, a scripted gateway.
-    let privateIfaces = expandWildcardAddresses(
-        @[MultiAddress.init("/ip4/0.0.0.0/tcp/0").get()]
-      )
-      .filterIt(it.isPrivateMA())
-    if privateIfaces.len == 0:
-      skip()
-    else:
+    let privateBase = @[MultiAddress.init("/ip4/192.168.9.9/tcp/60117").get()]
+    block:
       let inner = stub("203.0.113.9")
       inner.grantedPort = Opt.some(Port(61000))
       let switch =
         newTestSwitch(address = Opt.some(MultiAddress.init("/ip4/0.0.0.0/tcp/0").get()))
       switch.services.keepItIf(it of NATService)
-      switch.peerInfo.addressMappers.insert(wildcardExpansionMapper(), 0)
+      ## Same shape as the production base mapper: answer with the
+      ## resolved private addresses.
+      switch.peerInfo.addressMappers.insert(
+        proc(
+            addrs: seq[MultiAddress]
+        ): Future[seq[MultiAddress]] {.gcsafe, async: (raises: [CancelledError]).} =
+          return privateBase,
+        0,
+      )
       let svc = NATService.new(
         natConfig(parseNatStrategy("pmp").get()).get(),
         rng(),
@@ -227,26 +230,9 @@ suite "NAT config - NATService pipeline":
 
       await switch.stop()
 
-suite "NAT config - wildcard expansion":
-  test "non-wildcard addresses pass unchanged":
-    let a = MultiAddress.init("/ip4/127.0.0.1/tcp/1234").get()
-    check expandWildcardAddresses(@[a]) == @[a]
-
-  test "a wildcard expands per interface, keeping port and suffix":
-    let expanded =
-      expandWildcardAddresses(@[MultiAddress.init("/ip4/0.0.0.0/tcp/1234/ws").get()])
-    check:
-      expanded.len >= 1
-      expanded.allIt(($it).endsWith("/tcp/1234/ws"))
-      not expanded.anyIt("0.0.0.0" in $it)
-
-  test "a v6 wildcard also expands to v4 interfaces":
-    let expanded = expandWildcardAddresses(@[MultiAddress.init("/ip6/::/tcp/9").get()])
-    check expanded.anyIt("/ip4/" in $it)
-
 suite "NAT config - switch composition":
-  test "the switch has no wildcard service and one build-time mapper":
+  test "the switch has no wildcard service and no build-time mappers":
     let switch = newWakuSwitch(rng = rng(), circuitRelay = Relay.new())
     check:
       not switch.services.anyIt(it of WildcardAddressResolverService)
-      switch.peerInfo.addressMappers.len == 1
+      switch.peerInfo.addressMappers.len == 0

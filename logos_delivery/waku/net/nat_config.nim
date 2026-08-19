@@ -1,7 +1,8 @@
 {.push raises: [].}
 
-## Maps a NAT strategy onto libp2p's NATService, and provides the port
-## mapper and the leased udp mapping for sockets outside the switch.
+## Maps a NAT strategy onto libp2p's NATService and provides its port
+## mapper. The discv5 udp socket is not mapped: a NATed node consumes
+## discovery outbound; inbound reachability is not guaranteed.
 
 import std/net
 import chronos, chronicles, results
@@ -16,9 +17,6 @@ logScope:
   topics = "nat"
 
 const NatDiscoveryTimeout = DefaultNatDiscoveryTimeoutMs.int64.milliseconds
-
-  ## Lease for udp mappings outside the NATService (discv5). RFC 6886 uses
-  ## lease 0 to delete a mapping, so the lease is finite and renewed.
 
 proc natPortMapper*(strategy: NatStrategy): Opt[PortMapper] =
   ## The libp2p port mapper for a resolved strategy. Only NatUpnp and

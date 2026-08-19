@@ -17,6 +17,7 @@ type NetConfig* = object
   dns4DomainName*: Opt[string]
   dnsNameServers*: seq[IpAddress]
   announcedAddresses*: seq[MultiAddress]
+  extMultiAddrsOnly*: bool
   extMultiAddrs*: seq[MultiAddress]
   enrMultiAddrs*: seq[MultiAddress]
   enrIp*: Opt[IpAddress]
@@ -57,6 +58,18 @@ template ipQuicEndPoint(address: IpAddress, port: Port): MultiAddress =
 
 template dns4QuicEndPoint(dns4DomainName: string, port: Port): MultiAddress =
   dns4Ma(dns4DomainName) & udpPortMa(port) & quicFlag()
+
+func hasZeroPort*(ma: MultiAddress): bool =
+  ## Port 0 means "the kernel picks a port at bind time". The tcp or udp
+  ## component is read directly, so dns-hosted entries are covered too.
+  for code in [multiCodec("tcp"), multiCodec("udp")]:
+    let part = ma[code].valueOr:
+      continue
+    let argument = part.protoArgument().valueOr:
+      continue
+    if argument.len == 2 and argument[0] == 0 and argument[1] == 0:
+      return true
+  false
 
 proc isWsAddress*(ma: MultiAddress): bool =
   let
@@ -123,6 +136,15 @@ proc init*(
     dnsNameServers = @[parseIpAddress("1.1.1.1"), parseIpAddress("1.0.0.1")],
 ): NetConfigResult =
   ## Initialize and validate waku node network configuration
+
+  if extMultiAddrsOnly:
+    ## libp2p applies `announcedAddrs` only when non-empty, and the
+    ## override skips port resolution: require concrete addresses here.
+    if extMultiAddrs.len == 0:
+      return err("extMultiAddrsOnly requires at least one ext multiaddr")
+    for ma in extMultiAddrs:
+      if ma.hasZeroPort():
+        return err("extMultiAddrsOnly requires concrete ports, got: " & $ma)
 
   # Bind addresses
   let hostAddress = ip4TcpEndPoint(bindIp, bindPort)
@@ -255,6 +277,7 @@ proc init*(
       dns4DomainName: dns4DomainName,
       dnsNameServers: dnsNameServers,
       announcedAddresses: announcedAddresses,
+      extMultiAddrsOnly: extMultiAddrsOnly,
       extMultiAddrs: extMultiAddrs,
       enrMultiaddrs: enrMultiaddrs,
       enrIp: enrIp,

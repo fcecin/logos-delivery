@@ -466,8 +466,8 @@ proc startNode*(
 proc setupNode*(
     wakuConf: WakuConf, rng: crypto.Rng = crypto.newRng(), relay: Relay
 ): Future[Result[WakuNode, string]] {.async.} =
-  ## Resolve an any strategy once and write the winner back. The switch
-  ## and the discv5 mapping read the same resolved strategy.
+  ## Resolve an any strategy once and write the winner back for the
+  ## switch's NATService. The discv5 socket is not mapped.
   wakuConf.endpointConf.natStrategy = await resolveNatStrategy(
     wakuConf.endpointConf.natStrategy,
     wakuConf.endpointConf.natDiscoveryTimeoutMs.int64.milliseconds,
