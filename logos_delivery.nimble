@@ -8,7 +8,10 @@ version = "0.38.1"
 author = "Status Research & Development GmbH"
 description = "Logos-delivery, Private P2P Messaging for Resource-Restricted Devices"
 license = "MIT or Apache License 2.0"
-skipDirs = @["tests", "examples", "tools", "apps", "simulations", "metrics"]
+skipDirs = @["tests", "examples", "apps", "simulations", "metrics"]
+
+# Nimble installs only the namesake directory; dependents need these too.
+installDirs = @["library", "migrations", "tools"]
 
 const RequiredNimVersion = "2.2.4"
   ## This is the nim compiler version that we are working on. Other versions may behave differently.
@@ -508,6 +511,14 @@ let chroniclesParams =
   "--warning:UnusedImport:on " & "-d:chronicles_log_level=TRACE"
 
 ## Liblogosdelivery build tasks
+
+task liblogosdelivery, "Build liblogosdelivery for the host platform":
+  when defined(windows):
+    buildLibDynamicWindows("liblogosdelivery", "library")
+  elif defined(macosx):
+    buildLibDynamicMac("liblogosdelivery", "library")
+  else:
+    buildLibDynamicLinux("liblogosdelivery", "library")
 
 task liblogosdeliveryDynamicWindows, "Generate bindings":
   buildLibDynamicWindows("liblogosdelivery", "library")
