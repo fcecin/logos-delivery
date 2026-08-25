@@ -19,11 +19,16 @@ const RequiredNimbleVersion = "0.22.3"
   ## Enforced nimble version to ensure a reproducible flow
 
 ### Dependencies
+# The "< X" caps on chronicles, eth, websock and web3 keep Nimble 0.22.3's
+# solver away from the 2026-08-24/25 status-im releases (websock 0.4.2 and
+# web3 0.8.1 need chronos >= 4.4.0, eth 0.9.1 needs nimcrypto >= 0.7.0),
+# which make it declare the whole graph unsatisfiable even though the capped
+# selection exists. Remove once CI's Nimble solves without them (0.24.1 does).
 requires "nim >= 2.2.4",
   "chronos >= 4.2.0 & < 4.4.0",
   "taskpools",
   # Logging & Configuration
-  "chronicles",
+  "chronicles < 0.12.4",
   "confutils",
   # Serialization
   "serialization",
@@ -32,12 +37,12 @@ requires "nim >= 2.2.4",
   "faststreams",
   # Networking & P2P
   "https://github.com/vacp2p/nim-libp2p.git#v2.0.0",
-  "eth",
+  "eth < 0.9.1",
   "nat_traversal",
   "dnsdisc",
   "dnsclient",
   "httputils >= 0.4.1",
-  "websock >= 0.3.0",
+  "websock >= 0.3.0 & < 0.4.2",
   # Cryptography
   "nimcrypto == 0.6.4", # 0.6.4 used in libp2p. Version 0.7.3 makes test to crash on Ubuntu.
   "secp256k1",
@@ -45,7 +50,7 @@ requires "nim >= 2.2.4",
   # RPC & APIs
   "https://github.com/status-im/nim-json-rpc.git#v0.6.1",
   "presto",
-  "web3",
+  "web3 < 0.8.1",
   # Database
   "db_connector",
   "sqlite3_abi",
