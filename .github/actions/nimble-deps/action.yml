@@ -38,7 +38,11 @@ runs:
 
     - name: Generate requires string
       shell: bash
-      run: python3 scripts/gen_requires.py > requires.generated
+      run: |
+        if [ -n "${{ inputs.extra-path }}" ]; then
+          export PATH="${{ inputs.extra-path }}:$PATH"
+        fi
+        nim e --hints:off scripts/gen_requires.nims
 
     - name: Cache nimble deps
       id: cache
@@ -70,8 +74,8 @@ runs:
         # Nimble 0.24.x can install a revision that differs from the
         # requirement and exit with code 0. The audit fails this step when
         # the result differs from nimble.lock. See the header of
-        # scripts/audit_deps.py for the procedure and references.
-        python3 scripts/audit_deps.py
+        # scripts/audit_deps.nims for the procedure and references.
+        nim e --hints:off scripts/audit_deps.nims
 
         make rebuild-nat-libs-nimbledeps ${{ inputs.make-args }}
         make rebuild-bearssl-nimbledeps ${{ inputs.make-args }}

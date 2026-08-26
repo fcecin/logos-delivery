@@ -25,10 +25,11 @@ const RequiredNimbleVersion = "0.24.1"
 #
 # 1. Registry packages (bare names): the ranges are the public promise, kept
 #    as wide as we support so dependents' resolvers stay free. The exact
-#    versions our own builds use are pinned separately in deps.pins (injected
-#    at `nimble setup` by the Makefile and CI) and never enter dependent
-#    solves. A `== version` in this block is deliberate: a constraint
-#    dependents should inherit, with its reason beside it.
+#    versions our own builds use are pinned separately in nimble.lock (its
+#    requires string is generated and injected at `nimble setup` by the
+#    Makefile and CI) and never enter dependent solves. A `== version` in
+#    this block is deliberate: a constraint dependents should inherit, with
+#    its reason beside it.
 #
 # 2. URL packages (not in the Nimble registry), in their own block below:
 #    the URL line is both the declaration and the pin, since it is the only
@@ -91,6 +92,7 @@ requires "https://github.com/status-im/nim-json-rpc.git#6f1fff8ba685c9192fab153a
 # v0.3.1-rc.0: https://github.com/logos-messaging/nim-ffi/releases/tag/v0.3.1-rc.0
 requires "https://github.com/logos-messaging/nim-ffi#07ee8e1d6500762bab290465457a8d23559de546"
 
+# Untagged commit: 19 commits after v0.3.1-rc.0.
 requires "https://github.com/logos-messaging/nim-sds.git#b12f5ee07c5b764303b51fb948b32a4ade1de3b5"
 
 # v3.3.0: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.3.0
@@ -110,7 +112,10 @@ requires "https://github.com/vacp2p/nim-lsquic.git == 0.5.1"
 # reintroduce the interposition bug.
 requires "https://github.com/vacp2p/nim-boringssl == 0.0.11"
 
+# Untagged commit: one commit after v0.2.0.
 requires "https://github.com/vacp2p/nim-jwt.git#057ec95eb5af0eea9c49bfe9025b3312c95dc5f2"
+
+# Untagged commit.
 requires "https://github.com/logos-co/nim-libp2p-mix#380513117d556bf8f70066f5e72a7fd74fe36ba6"
 
 proc getMyCPU(): string =

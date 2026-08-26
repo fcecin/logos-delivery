@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Installs a specific nimble version without using `nimble install nimble`.
+#
 # This script installs one Nimble version into its own directory:
 # ~/.local/nimble-<version>/bin. The Makefile puts that directory first
 # on PATH.

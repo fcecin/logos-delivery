@@ -89,18 +89,21 @@ endif
 logos_delivery.nims:
 	ln -s logos_delivery.nimble $@
 
-# The requires string for `nimble setup`: a projection of three
-# committed truths.
+# The requires string for `nimble setup`: a projection of two
+# committed truths and one live observation.
 # - nimble.lock gives the revision of each package.
 # - logos_delivery.nimble gives the packages that are pinned there
 #   already (not emitted).
-# - The observed lines in nix/deps.nix give the facts that select the
-#   requirement form for each remaining package (see the header of
-#   scripts/gen_requires.py).
+# - The upstream world, observed when the generator runs: does the tag
+#   that names the locked version point at the locked revision, and is
+#   the name in the Nimble registry with this URL. Both true: emitted
+#   as "name == version" (chronos == 4.2.4). Either false: emitted as
+#   "url#revision" (nim-secp256k1: no tags, so a version cannot select
+#   content there). Details: the header of scripts/gen_requires.nims.
 # A gitignored build artifact: written only when an input changes, and
 # read by every consumer (the setup rule here, and CI).
-requires.generated: nimble.lock logos_delivery.nimble nix/deps.nix scripts/gen_requires.py
-	python3 scripts/gen_requires.py > $@
+requires.generated: nimble.lock logos_delivery.nimble nix/deps.nix scripts/gen_requires.nims
+	nim e --hints:off scripts/gen_requires.nims
 
 $(NIMBLEDEPS_STAMP): requires.generated logos_delivery.nimble | install-nimble build-nph logos_delivery.nims
 	# Flags after the command (Nimble reinterprets pre-command flags on custom
@@ -113,8 +116,8 @@ $(NIMBLEDEPS_STAMP): requires.generated logos_delivery.nimble | install-nimble b
 	# requirement names and exit with code 0 (a commit pin can lose
 	# against a competing requirement for the same package). The audit
 	# compares every installed revision with nimble.lock and fails the
-	# build on any difference. References: header of scripts/audit_deps.py.
-	python3 scripts/audit_deps.py
+	# build on any difference. References: header of scripts/audit_deps.nims.
+	nim e --hints:off scripts/audit_deps.nims
 
 	touch $@
 
