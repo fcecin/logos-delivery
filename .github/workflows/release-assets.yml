@@ -11,7 +11,7 @@ env:
   NPROC: 2
   NIM_PARAMS: "-d:disableMarchNative"
   NIM_VERSION: '2.2.4'
-  NIMBLE_VERSION: '0.22.3'
+  NIMBLE_VERSION: '0.24.1'
 
 jobs:
   # Release gate: the pushed tag MUST exactly match logos_delivery.nimble's version,
@@ -69,8 +69,9 @@ jobs:
 
       - name: Install Nimble ${{ env.NIMBLE_VERSION }}
         run: |
-          cd /tmp && nimble install "nimble@${{ env.NIMBLE_VERSION }}" -y
+          scripts/install_nimble.sh "${{ env.NIMBLE_VERSION }}"
           echo "$HOME/.nimble/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/nimble-${{ env.NIMBLE_VERSION }}/bin" >> $GITHUB_PATH
 
       - name: Get submodules hash
         id: submodules
@@ -132,6 +133,9 @@ jobs:
 
           make -j${NPROC} POSTGRES=1 CI=false liblogosdelivery
           make -j${NPROC} POSTGRES=1 CI=false STATIC=1 liblogosdelivery
+
+      - name: Audit installed deps
+        run: make audit-deps
 
       - name: Create distributable liblogosdelivery package
         run: |

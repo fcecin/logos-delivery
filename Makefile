@@ -18,19 +18,33 @@ ifneq (,$(findstring MINGW,$(detected_OS)))
   detected_OS := Windows
 endif
 
-# Ensure the nim/nimble installed by install-nim/install-nimble are found first
-export PATH := $(HOME)/.nimble/bin:$(PATH)
+REQUIRED_NIMBLE_VERSION := $(shell grep -E '^const RequiredNimbleVersion\s*=' logos_delivery.nimble | grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"')
+
+# Put the version-specific Nimble directory before ~/.nimble/bin.
+# `nimble setup` may update package links under ~/.nimble/bin, including
+# the `nimble` link. The version-specific directory is outside that update
+# path. Keep ~/.nimble/bin later on PATH for tools such as nph.
+NIMBLE_TOOLDIR := $(HOME)/.local/nimble-$(REQUIRED_NIMBLE_VERSION)/bin
+export PATH := $(NIMBLE_TOOLDIR):$(HOME)/.nimble/bin:$(PATH)
 
 # NIM binary location
 NIM_BINARY := $(shell which nim 2>/dev/null)
 NPH := $(HOME)/.nimble/bin/nph
 
 NIMBLE := nimble
-ifeq ($(detected_OS),Windows)
-# Resolve nimble via PATH (Windows has no $(HOME)/.nimble/bin); --useSystemNim
-# reuses the nim on PATH so nimble never re-clones the locked nim.
-	NIMBLE := nimble --useSystemNim
-endif
+
+# Nimble 0.24.1 custom tasks perform dependency solving. Global options
+# placed after the task name are parsed by Nimble (parseFlag/actionCustom,
+# src/nimblepkg/options.nim:895). Because nimble.lock has no `nim` entry,
+# --useSystemNim tells those solves to use the compiler on PATH instead of
+# installing another compatible Nim package into nimbledeps/. Task
+# solves receive the same --requires string as setup; the post-task
+# audit verifies the installed revisions. The variable is recursively
+# expanded: the file is read when a task runs, after the setup rule
+# wrote it.
+# Every target that runs a task depends on build-deps, so make wrote
+# requires.generated before any task reads it.
+NIMBLE_TASK_FLAGS = --useSystemNim --requires "$$(cat requires.generated)"
 
 NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
 
@@ -78,9 +92,45 @@ endif
 logos_delivery.nims:
 	ln -s logos_delivery.nimble $@
 
-$(NIMBLEDEPS_STAMP): nimble.lock | install-nimble build-nph logos_delivery.nims
-	$(NIMBLE) setup --localdeps
+# Generate supplemental requirements for `nimble setup` from:
+# - package versions and revisions recorded in nimble.lock;
+# - URLs already declared in logos_delivery.nimble, which are omitted from
+#   the generated string to avoid adding a second constraint; and
+# - registry URL and version-tag refs observed by the generator.
+#
+# When the registry URL and version tag both match the lock entry, the
+# generator emits "name == version" (e.g. chronos == 4.2.4). Otherwise it
+# emits "url#revision" (e.g. nim-secp256k1: no usable version tag).
+# Nimble 0.24.1 can still discard a URL revision when it merges competing
+# requirements for the same package. The audit after setup detects that
+# case.
+#
+# This ignored file is regenerated when absent or older than a listed
+# prerequisite. `make clean` removes it. CI invokes the generator directly
+# on every dependency-setup run.
+requires.generated: nimble.lock logos_delivery.nimble nix/deps.nix scripts/gen_requires.nims | install-nimble
+	nim e --hints:off scripts/gen_requires.nims
+
+$(NIMBLEDEPS_STAMP): requires.generated logos_delivery.nimble | install-nimble build-nph logos_delivery.nims
+	# Options come after the command: Nimble reads pre-command options on
+	# custom tasks as compilation options. --useSystemNim uses the Nim
+	# compiler on PATH and omits Nim from the local dependency installation.
+	# Custom task invocations use the same option through NIMBLE_TASK_FLAGS.
+	$(NIMBLE) setup --localdeps -y --useSystemNim --requires "$$(cat requires.generated)"
+
+	$(MAKE) audit-deps
+
 	touch $@
+
+# Compare the installed package set and vcsRevision metadata with
+# nimble.lock. This detects the observed Nimble 0.24.1 case where a
+# solve exits successfully after selecting a different special revision.
+# The setup rule runs it after `nimble setup`, and CI runs it again after
+# the build and test steps, because custom tasks also solve and can
+# install. See scripts/audit_deps.nims for the matching rules.
+.PHONY: audit-deps
+audit-deps:
+	nim e --hints:off scripts/audit_deps.nims
 
 # Must be phony so the recipe always runs and the sub-make re-evaluates
 # BEARSSL_NIMBLEDEPS_DIR / NAT_TRAVERSAL_NIMBLEDEPS_DIR (parse-time variables)
@@ -90,6 +140,7 @@ build-deps: | $(NIMBLEDEPS_STAMP)
 	$(MAKE) rebuild-bearssl-nimbledeps rebuild-nat-libs-nimbledeps
 
 clean:
+	rm -f requires.generated observed.generated 2> /dev/null || true
 	rm -rf build 2> /dev/null || true
 	rm -rf nimbledeps 2> /dev/null || true
 	rm -fr nimcache 2> /dev/null || true
@@ -97,7 +148,6 @@ clean:
 	nimble clean
 
 REQUIRED_NIM_VERSION    := $(shell grep -E '^const RequiredNimVersion\s*=' logos_delivery.nimble | grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"')
-REQUIRED_NIMBLE_VERSION := $(shell grep -E '^const RequiredNimbleVersion\s*=' logos_delivery.nimble | grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"')
 
 install-nim:
 ifneq ($(detected_OS),Windows)
@@ -214,7 +264,7 @@ clean: | clean-librln
 
 testcommon: | build-deps build
 	echo -e $(BUILD_MSG) "build/$@" && \
-		$(NIMBLE) testcommon
+		$(NIMBLE) testcommon $(NIMBLE_TASK_FLAGS)
 
 ##########
 ## Waku ##
@@ -223,7 +273,7 @@ testcommon: | build-deps build
 
 testwaku: | build-deps build rln-deps librln
 	echo -e $(BUILD_MSG) "build/$@" && \
-		$(NIMBLE) test
+		$(NIMBLE) test $(NIMBLE_TASK_FLAGS)
 
 # Windows: build with nim directly — `nimble <task>` re-clones git deps every
 # build and they intermittently hang on the MSYS2 runner. Flags mirror logos_delivery.nimble.
@@ -233,7 +283,7 @@ ifeq ($(detected_OS),Windows)
 		nim c --out:build/wakunode2 --mm:refc --cpu:amd64 $(NIM_PARAMS) -d:chronicles_log_level=TRACE apps/wakunode2/wakunode2.nim
 else
 	echo -e $(BUILD_MSG) "build/$@" && \
-		$(NIMBLE) wakunode2
+		$(NIMBLE) wakunode2 $(NIMBLE_TASK_FLAGS)
 endif
 
 # Windows: build with nim directly — `nimble <task>` re-clones git deps every
@@ -244,44 +294,44 @@ ifeq ($(detected_OS),Windows)
 		nim c --out:build/logosdeliverynode --mm:refc --cpu:amd64 $(NIM_PARAMS) -d:chronicles_log_level=TRACE apps/logos_delivery_node/logosdeliverynode.nim
 else
 	echo -e $(BUILD_MSG) "build/$@" && \
-		$(NIMBLE) logosdeliverynode
+		$(NIMBLE) logosdeliverynode $(NIMBLE_TASK_FLAGS)
 endif
 
 benchmarks: | build-deps build deps librln
 	echo -e $(BUILD_MSG) "build/$@" && \
-		$(NIMBLE) benchmarks
+		$(NIMBLE) benchmarks $(NIMBLE_TASK_FLAGS)
 
 testwakunode2: | build-deps build deps librln
 	echo -e $(BUILD_MSG) "build/$@" && \
-		$(NIMBLE) testwakunode2
+		$(NIMBLE) testwakunode2 $(NIMBLE_TASK_FLAGS)
 
 example2: | build-deps build deps librln
 	echo -e $(BUILD_MSG) "build/$@" && \
-		$(NIMBLE) example2
+		$(NIMBLE) example2 $(NIMBLE_TASK_FLAGS)
 
 chat2: | build-deps build deps librln
 	echo -e $(BUILD_MSG) "build/$@" && \
-		$(NIMBLE) chat2
+		$(NIMBLE) chat2 $(NIMBLE_TASK_FLAGS)
 
 chat2mix: | build-deps build deps librln
 	echo -e $(BUILD_MSG) "build/$@" && \
-		$(NIMBLE) chat2mix
+		$(NIMBLE) chat2mix $(NIMBLE_TASK_FLAGS)
 
 rln-db-inspector: | build-deps build deps librln
 	echo -e $(BUILD_MSG) "build/$@" && \
-		$(NIMBLE) rln_db_inspector
+		$(NIMBLE) rln_db_inspector $(NIMBLE_TASK_FLAGS)
 
 chat2bridge: | build-deps build deps librln
 	echo -e $(BUILD_MSG) "build/$@" && \
-		$(NIMBLE) chat2bridge
+		$(NIMBLE) chat2bridge $(NIMBLE_TASK_FLAGS)
 
 liteprotocoltester: | build-deps build deps librln
 	echo -e $(BUILD_MSG) "build/$@" && \
-		$(NIMBLE) liteprotocoltester
+		$(NIMBLE) liteprotocoltester $(NIMBLE_TASK_FLAGS)
 
 lightpushwithmix: | build-deps build deps librln
 	echo -e $(BUILD_MSG) "build/$@" && \
-		$(NIMBLE) lightpushwithmix
+		$(NIMBLE) lightpushwithmix $(NIMBLE_TASK_FLAGS)
 
 api_example: | build-deps build deps librln
 	echo -e $(BUILD_MSG) "build/$@" && \
@@ -289,12 +339,12 @@ api_example: | build-deps build deps librln
 
 build/%: | build-deps build deps librln
 	echo -e $(BUILD_MSG) "build/$*" && \
-		$(NIMBLE) buildone $*
+		$(NIMBLE) buildone $* $(NIMBLE_TASK_FLAGS)
 
 compile-test: | build-deps build deps librln
 	echo -e $(BUILD_MSG) "$(TEST_FILE)" "\"$(TEST_NAME)\"" && \
-		$(NIMBLE) buildTest $(TEST_FILE) && \
-		$(NIMBLE) execTest $(TEST_FILE) "\"$(TEST_NAME)\""
+		$(NIMBLE) buildTest $(TEST_FILE) $(NIMBLE_TASK_FLAGS) && \
+		$(NIMBLE) execTest $(TEST_FILE) "\"$(TEST_NAME)\"" $(NIMBLE_TASK_FLAGS)
 
 ################
 ## Waku tools ##
@@ -305,11 +355,11 @@ tools: networkmonitor wakucanary
 
 wakucanary: | build-deps build deps librln
 	echo -e $(BUILD_MSG) "build/$@" && \
-		$(NIMBLE) wakucanary
+		$(NIMBLE) wakucanary $(NIMBLE_TASK_FLAGS)
 
 networkmonitor: | build-deps build deps librln
 	echo -e $(BUILD_MSG) "build/$@" && \
-		$(NIMBLE) networkmonitor
+		$(NIMBLE) networkmonitor $(NIMBLE_TASK_FLAGS)
 
 ############
 ## Format ##
@@ -353,9 +403,9 @@ clean:
 ###################
 .PHONY: docs coverage
 
-docs: | build deps
+docs: | build-deps build deps
 	echo -e $(BUILD_MSG) "build/$@" && \
-		$(NIMBLE) doc --run --index:on --project --out:.gh-pages logos-delivery/logos-delivery.nim logos_delivery.nims
+		$(NIMBLE) doc --run --index:on --project --out:.gh-pages logos-delivery/logos-delivery.nim logos_delivery.nims $(NIMBLE_TASK_FLAGS)
 
 coverage:
 	echo -e $(BUILD_MSG) "build/$@" && \
@@ -470,7 +520,7 @@ liblogosdelivery: | build-deps $(LIBLOGOSDELIVERY_RLN_DEP)
 ifeq ($(detected_OS),Windows)
 	nim c --out:build/liblogosdelivery.dll --threads:on --app:lib --opt:speed --noMain --mm:refc --header -d:metrics --nimMainPrefix:liblogosdelivery --skipParentCfg:off -d:discv5_protocol_id=d5waku --cpu:amd64 $(NIM_PARAMS) library/liblogosdelivery.nim
 else
-	$(NIMBLE) --verbose liblogosdelivery$(BUILD_COMMAND) logos_delivery.nimble
+	$(NIMBLE) --verbose liblogosdelivery$(BUILD_COMMAND) logos_delivery.nimble $(NIMBLE_TASK_FLAGS)
 endif
 
 logosdelivery_example: | build liblogosdelivery
@@ -546,7 +596,7 @@ endif
 build-liblogosdelivery-for-android-arch:
 ifneq ($(findstring /nix/store,$(LIBRLN_FILE)),)
 	mkdir -p $(CURDIR)/build/android/$(ABIDIR)/
-	CPU=$(CPU) ABIDIR=$(ABIDIR) ANDROID_ARCH=$(ANDROID_ARCH) ANDROID_COMPILER=$(ANDROID_COMPILER) ANDROID_TOOLCHAIN_DIR=$(ANDROID_TOOLCHAIN_DIR) $(NIMBLE) libLogosDeliveryAndroid
+	CPU=$(CPU) ABIDIR=$(ABIDIR) ANDROID_ARCH=$(ANDROID_ARCH) ANDROID_COMPILER=$(ANDROID_COMPILER) ANDROID_TOOLCHAIN_DIR=$(ANDROID_TOOLCHAIN_DIR) $(NIMBLE) libLogosDeliveryAndroid $(NIMBLE_TASK_FLAGS)
 else
 	./scripts/build_rln_android.sh $(CURDIR)/build $(LIBRLN_BUILDDIR) $(LIBRLN_VERSION) $(CROSS_TARGET) $(ABIDIR)
 endif
@@ -555,25 +605,25 @@ endif
 liblogosdelivery-android-arm64: ANDROID_ARCH=aarch64-linux-android
 liblogosdelivery-android-arm64: CPU=arm64
 liblogosdelivery-android-arm64: ABIDIR=arm64-v8a
-liblogosdelivery-android-arm64: | liblogosdelivery-android-precheck build deps
+liblogosdelivery-android-arm64: | liblogosdelivery-android-precheck build-deps build deps
 	$(MAKE) build-liblogosdelivery-for-android-arch ANDROID_ARCH=$(ANDROID_ARCH) CROSS_TARGET=$(ANDROID_ARCH) CPU=$(CPU) ABIDIR=$(ABIDIR) ANDROID_COMPILER=$(ANDROID_ARCH)$(ANDROID_TARGET)-clang
 
 liblogosdelivery-android-amd64: ANDROID_ARCH=x86_64-linux-android
 liblogosdelivery-android-amd64: CPU=amd64
 liblogosdelivery-android-amd64: ABIDIR=x86_64
-liblogosdelivery-android-amd64: | liblogosdelivery-android-precheck build deps
+liblogosdelivery-android-amd64: | liblogosdelivery-android-precheck build-deps build deps
 	$(MAKE) build-liblogosdelivery-for-android-arch ANDROID_ARCH=$(ANDROID_ARCH) CROSS_TARGET=$(ANDROID_ARCH) CPU=$(CPU) ABIDIR=$(ABIDIR) ANDROID_COMPILER=$(ANDROID_ARCH)$(ANDROID_TARGET)-clang
 
 liblogosdelivery-android-x86: ANDROID_ARCH=i686-linux-android
 liblogosdelivery-android-x86: CPU=i386
 liblogosdelivery-android-x86: ABIDIR=x86
-liblogosdelivery-android-x86: | liblogosdelivery-android-precheck build deps
+liblogosdelivery-android-x86: | liblogosdelivery-android-precheck build-deps build deps
 	$(MAKE) build-liblogosdelivery-for-android-arch ANDROID_ARCH=$(ANDROID_ARCH) CROSS_TARGET=$(ANDROID_ARCH) CPU=$(CPU) ABIDIR=$(ABIDIR) ANDROID_COMPILER=$(ANDROID_ARCH)$(ANDROID_TARGET)-clang
 
 liblogosdelivery-android-arm: ANDROID_ARCH=armv7a-linux-androideabi
 liblogosdelivery-android-arm: CPU=arm
 liblogosdelivery-android-arm: ABIDIR=armeabi-v7a
-liblogosdelivery-android-arm: | liblogosdelivery-android-precheck build deps
+liblogosdelivery-android-arm: | liblogosdelivery-android-precheck build-deps build deps
 	$(MAKE) build-liblogosdelivery-for-android-arch ANDROID_ARCH=$(ANDROID_ARCH) CROSS_TARGET=armv7-linux-androideabi CPU=$(CPU) ABIDIR=$(ABIDIR) ANDROID_COMPILER=$(ANDROID_ARCH)$(ANDROID_TARGET)-clang
 
 liblogosdelivery-android:
@@ -603,18 +653,18 @@ else
 endif
 
 build-liblogosdelivery-for-ios-arch:
-	IOS_SDK=$(IOS_SDK) IOS_ARCH=$(IOS_ARCH) IOS_SDK_PATH=$(IOS_SDK_PATH) $(NIMBLE) libLogosDeliveryIOS
+	IOS_SDK=$(IOS_SDK) IOS_ARCH=$(IOS_ARCH) IOS_SDK_PATH=$(IOS_SDK_PATH) $(NIMBLE) libLogosDeliveryIOS $(NIMBLE_TASK_FLAGS)
 
 liblogosdelivery-ios-device: IOS_ARCH=arm64
 liblogosdelivery-ios-device: IOS_SDK=iphoneos
 liblogosdelivery-ios-device: IOS_SDK_PATH=$(call get_ios_sdk_path,iphoneos)
-liblogosdelivery-ios-device: | liblogosdelivery-ios-precheck build deps
+liblogosdelivery-ios-device: | liblogosdelivery-ios-precheck build-deps build deps
 	$(MAKE) build-liblogosdelivery-for-ios-arch IOS_ARCH=$(IOS_ARCH) IOS_SDK=$(IOS_SDK) IOS_SDK_PATH=$(IOS_SDK_PATH)
 
 liblogosdelivery-ios-simulator: IOS_ARCH=arm64
 liblogosdelivery-ios-simulator: IOS_SDK=iphonesimulator
 liblogosdelivery-ios-simulator: IOS_SDK_PATH=$(call get_ios_sdk_path,iphonesimulator)
-liblogosdelivery-ios-simulator: | liblogosdelivery-ios-precheck build deps
+liblogosdelivery-ios-simulator: | liblogosdelivery-ios-precheck build-deps build deps
 	$(MAKE) build-liblogosdelivery-for-ios-arch IOS_ARCH=$(IOS_ARCH) IOS_SDK=$(IOS_SDK) IOS_SDK_PATH=$(IOS_SDK_PATH)
 
 liblogosdelivery-ios:
