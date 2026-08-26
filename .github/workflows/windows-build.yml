@@ -108,7 +108,7 @@ jobs:
         # matches on Windows — even with autocrlf disabled. --useSystemNim
         # uses the CI-installed nim and skips that check, while still
         # verifying every other locked dependency.
-        nimble setup --localdeps -y --useSystemNim --requires "$(cat nimble.pins)"
+        nimble setup --localdeps -y --useSystemNim --requires "$(awk 'NF && !/^#/' deps.pins | paste -sd ';' -)"
         make rebuild-nat-libs-nimbledeps CC=gcc
         make rebuild-bearssl-nimbledeps CC=gcc
         touch nimbledeps/.nimble-setup

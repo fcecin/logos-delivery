@@ -79,13 +79,13 @@ endif
 logos_delivery.nims:
 	ln -s logos_delivery.nimble $@
 
-$(NIMBLEDEPS_STAMP): nimble.lock | install-nimble build-nph logos_delivery.nims
+$(NIMBLEDEPS_STAMP): nimble.lock deps.pins | install-nimble build-nph logos_delivery.nims
 	# Flags after the command (Nimble reinterprets pre-command flags on custom
 	# tasks as compilation flags). --useSystemNim: reuse the PATH nim, skip its
 	# unreliable locked checksum, and avoid Nimble >= 0.24 nim selection, which
 	# nim-ffi's "nim >= 2.2.6" floor makes unsatisfiable on nim 2.2.4. Task
 	# invocations need no flags: they re-solve against the installed pinned set.
-	$(NIMBLE) setup --localdeps -y --useSystemNim --requires "$$(cat nimble.pins)"
+	$(NIMBLE) setup --localdeps -y --useSystemNim --requires "$$(awk 'NF && !/^#/' deps.pins | paste -sd ';' -)"
 	touch $@
 
 # Must be phony so the recipe always runs and the sub-make re-evaluates
