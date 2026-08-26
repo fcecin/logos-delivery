@@ -15,15 +15,15 @@ installDirs = @["library", "migrations", "tools"]
 
 const RequiredNimVersion = "2.2.4"
   ## This is the nim compiler version that we are working on. Other versions may behave differently.
-const RequiredNimbleVersion = "0.22.3"
+const RequiredNimbleVersion = "0.24.1"
   ## Enforced nimble version to ensure a reproducible flow
 
 ### Dependencies
-# The "< X" caps on chronicles, eth, websock and web3 keep Nimble 0.22.3's
-# solver away from the 2026-08-24/25 status-im releases (websock 0.4.2 and
-# web3 0.8.1 need chronos >= 4.4.0, eth 0.9.1 needs nimcrypto >= 0.7.0),
-# which make it declare the whole graph unsatisfiable even though the capped
-# selection exists. Remove once CI's Nimble solves without them (0.24.1 does).
+# The "< X" caps on chronicles, eth, websock and web3 keep the Nimble
+# maximizer on lock-validated versions despite the 2026-08-24/25 status-im
+# releases (websock 0.4.2 and web3 0.8.1 need chronos >= 4.4.0, eth 0.9.1
+# needs nimcrypto >= 0.7.0). Nimble does not enforce nimble.lock here (URL
+# requires defeat its lock matching), so requires bounds are the version control.
 requires "nim >= 2.2.4",
   "chronos >= 4.2.0 & < 4.4.0",
   "taskpools",
