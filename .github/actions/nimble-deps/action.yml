@@ -58,11 +58,14 @@ runs:
           export PATH="${{ inputs.extra-path }}:$PATH"
         fi
 
+        # The pinned Nimble by absolute path: inputs.extra-path can name a
+        # directory that bundles another nimble (setup-nim-action ships
+        # 0.18.2 next to nim.exe), and a PATH prefix would select it.
         # nim's source tree checksums differently across platforms (its own
         # .gitattributes forces line endings on Windows), so its locked
         # checksum is unreliable. --useSystemNim uses the CI nim and skips
         # that check, while still verifying every other locked dep.
-        nimble setup --verbose --debug --localdeps -y --useSystemNim --requires "$(cat requires.generated)"
+        "$HOME/.local/nimble-${{ inputs.nimble-version }}/bin/nimble" setup --localdeps -y --useSystemNim --requires "$(cat requires.generated)"
 
         # Nimble 0.24.x can install a revision that differs from the
         # requirement and exit with code 0. The audit fails this step when
