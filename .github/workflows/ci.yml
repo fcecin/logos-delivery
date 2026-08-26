@@ -84,42 +84,11 @@ jobs:
           nim-version: ${{ env.NIM_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Nimble ${{ env.NIMBLE_VERSION }}
-        # Versioned directory first on PATH; see scripts/install_nimble.sh for
-        # why nimble must not be resolved through ~/.nimble/bin.
-        run: |
-          scripts/install_nimble.sh "${{ env.NIMBLE_VERSION }}"
-          echo "$HOME/.nimble/bin" >> $GITHUB_PATH
-          echo "$HOME/.local/nimble-${{ env.NIMBLE_VERSION }}/bin" >> $GITHUB_PATH
-
-      - name: Cache nimble deps
-        id: cache-nimbledeps
-        uses: actions/cache@v3
-        with:
-          path: |
-            nimbledeps/
-            nimble.paths
-          key: ${{ runner.os }}-nimbledeps-v4-nimble${{ env.NIMBLE_VERSION }}-${{ needs.changes.outputs.deps_hash }}
-
       - name: Install nimble deps
-        if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
-        run: |
-          python3 scripts/gen_requires.py > requires.generated
-
-          # nim's source tree checksums differently across platforms, so its
-          # locked checksum is unreliable. --useSystemNim uses the CI nim and
-          # skips that check, while still verifying every other locked dep.
-          nimble setup --localdeps -y --useSystemNim --requires "$(cat requires.generated)"
-
-          # Nimble 0.24.x can install a revision that differs from the
-          # requirement and exit with code 0. The audit fails this step when
-          # the result differs from nimble.lock. See the header of
-          # scripts/audit_deps.py for the procedure and references.
-          python3 scripts/audit_deps.py
-
-          make rebuild-nat-libs-nimbledeps
-          make rebuild-bearssl-nimbledeps
-          touch nimbledeps/.nimble-setup
+        uses: ./.github/actions/nimble-deps
+        with:
+          nimble-version: ${{ env.NIMBLE_VERSION }}
+          cache-key: ${{ runner.os }}-nimbledeps-v4-nimble${{ env.NIMBLE_VERSION }}-${{ needs.changes.outputs.deps_hash }}
 
       - name: Build binaries
         # -j1: `all` builds wakunode2 and liblogosdelivery, each via `nimble
@@ -170,42 +139,11 @@ jobs:
           nim-version: ${{ env.NIM_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Nimble ${{ env.NIMBLE_VERSION }}
-        # Versioned directory first on PATH; see scripts/install_nimble.sh for
-        # why nimble must not be resolved through ~/.nimble/bin.
-        run: |
-          scripts/install_nimble.sh "${{ env.NIMBLE_VERSION }}"
-          echo "$HOME/.nimble/bin" >> $GITHUB_PATH
-          echo "$HOME/.local/nimble-${{ env.NIMBLE_VERSION }}/bin" >> $GITHUB_PATH
-
-      - name: Cache nimble deps
-        id: cache-nimbledeps
-        uses: actions/cache@v3
-        with:
-          path: |
-            nimbledeps/
-            nimble.paths
-          key: ${{ runner.os }}-nimbledeps-v4-nimble${{ env.NIMBLE_VERSION }}-${{ needs.changes.outputs.deps_hash }}
-
       - name: Install nimble deps
-        if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
-        run: |
-          python3 scripts/gen_requires.py > requires.generated
-
-          # nim's source tree checksums differently across platforms, so its
-          # locked checksum is unreliable. --useSystemNim uses the CI nim and
-          # skips that check, while still verifying every other locked dep.
-          nimble setup --localdeps -y --useSystemNim --requires "$(cat requires.generated)"
-
-          # Nimble 0.24.x can install a revision that differs from the
-          # requirement and exit with code 0. The audit fails this step when
-          # the result differs from nimble.lock. See the header of
-          # scripts/audit_deps.py for the procedure and references.
-          python3 scripts/audit_deps.py
-
-          make rebuild-nat-libs-nimbledeps
-          make rebuild-bearssl-nimbledeps
-          touch nimbledeps/.nimble-setup
+        uses: ./.github/actions/nimble-deps
+        with:
+          nimble-version: ${{ env.NIMBLE_VERSION }}
+          cache-key: ${{ runner.os }}-nimbledeps-v4-nimble${{ env.NIMBLE_VERSION }}-${{ needs.changes.outputs.deps_hash }}
 
       - name: Run tests
         run: |
@@ -263,7 +201,7 @@ jobs:
   lint:
     name: "Lint"
     runs-on: ubuntu-22.04
-    needs: build
+    needs: [build, changes]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -274,42 +212,11 @@ jobs:
           nim-version: ${{ env.NIM_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Nimble ${{ env.NIMBLE_VERSION }}
-        # Versioned directory first on PATH; see scripts/install_nimble.sh for
-        # why nimble must not be resolved through ~/.nimble/bin.
-        run: |
-          scripts/install_nimble.sh "${{ env.NIMBLE_VERSION }}"
-          echo "$HOME/.nimble/bin" >> $GITHUB_PATH
-          echo "$HOME/.local/nimble-${{ env.NIMBLE_VERSION }}/bin" >> $GITHUB_PATH
-
-      - name: Cache nimble deps
-        id: cache-nimbledeps
-        uses: actions/cache@v3
-        with:
-          path: |
-            nimbledeps/
-            nimble.paths
-          key: ${{ runner.os }}-nimbledeps-v4-nimble${{ env.NIMBLE_VERSION }}-${{ needs.changes.outputs.deps_hash }}
-
       - name: Install nimble deps
-        if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
-        run: |
-          python3 scripts/gen_requires.py > requires.generated
-
-          # nim's source tree checksums differently across platforms, so its
-          # locked checksum is unreliable. --useSystemNim uses the CI nim and
-          # skips that check, while still verifying every other locked dep.
-          nimble setup --localdeps -y --useSystemNim --requires "$(cat requires.generated)"
-
-          # Nimble 0.24.x can install a revision that differs from the
-          # requirement and exit with code 0. The audit fails this step when
-          # the result differs from nimble.lock. See the header of
-          # scripts/audit_deps.py for the procedure and references.
-          python3 scripts/audit_deps.py
-
-          make rebuild-nat-libs-nimbledeps
-          make rebuild-bearssl-nimbledeps
-          touch nimbledeps/.nimble-setup
+        uses: ./.github/actions/nimble-deps
+        with:
+          nimble-version: ${{ env.NIMBLE_VERSION }}
+          cache-key: ${{ runner.os }}-nimbledeps-v4-nimble${{ env.NIMBLE_VERSION }}-${{ needs.changes.outputs.deps_hash }}
 
       - name: Build nph
         run: |

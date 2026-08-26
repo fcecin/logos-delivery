@@ -92,35 +92,12 @@ jobs:
         nim-version: ${{ env.NIM_VERSION }}
         repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Install Nimble ${{ env.NIMBLE_VERSION }}
-      run: |
-        export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$PATH"
-        scripts/install_nimble.sh "${{ env.NIMBLE_VERSION }}"
-        echo "$HOME/.nimble/bin" >> $GITHUB_PATH
-        echo "$HOME/.local/nimble-${{ env.NIMBLE_VERSION }}/bin" >> $GITHUB_PATH
-
     - name: Install nimble deps
-      run: |
-        export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.local/nimble-${{ env.NIMBLE_VERSION }}/bin:$HOME/.nimble/bin:$PATH"
-
-        python3 scripts/gen_requires.py > requires.generated
-
-        # nim's source tree checks out differently per platform (its own
-        # .gitattributes forces line endings), so its locked checksum never
-        # matches on Windows — even with autocrlf disabled. --useSystemNim
-        # uses the CI-installed nim and skips that check, while still
-        # verifying every other locked dependency.
-        nimble setup --localdeps -y --useSystemNim --requires "$(cat requires.generated)"
-
-        # Nimble 0.24.x can install a revision that differs from the
-        # requirement and exit with code 0. The audit fails this step when
-        # the result differs from nimble.lock. See the header of
-        # scripts/audit_deps.py for the procedure and references.
-        python3 scripts/audit_deps.py
-
-        make rebuild-nat-libs-nimbledeps CC=gcc
-        make rebuild-bearssl-nimbledeps CC=gcc
-        touch nimbledeps/.nimble-setup
+      uses: ./.github/actions/nimble-deps
+      with:
+        nimble-version: ${{ env.NIMBLE_VERSION }}
+        extra-path: ${{ github.workspace }}/.nim_runtime/bin
+        make-args: CC=gcc
 
     - name: Creating tmp directory
       run: mkdir -p tmp

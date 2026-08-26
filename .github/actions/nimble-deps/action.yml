@@ -1,0 +1,73 @@
+name: 'Install nimble deps'
+description: >
+  Installs the pinned Nimble, restores the nimbledeps cache when a key is
+  given, and materializes the dependencies from nimble.lock: generate the
+  requires string, run setup, audit the result, rebuild the C libraries.
+
+inputs:
+  nimble-version:
+    description: 'The Nimble version to install (RequiredNimbleVersion).'
+    required: true
+  cache-key:
+    description: 'The cache key for nimbledeps. An empty value disables the cache.'
+    default: ''
+  make-args:
+    description: 'Extra arguments for the C library rebuild make calls.'
+    default: ''
+  extra-path:
+    description: 'A PATH prefix for the steps of this action.'
+    default: ''
+
+outputs:
+  cache-hit:
+    description: 'True when the nimbledeps cache was restored.'
+    value: ${{ steps.cache.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Nimble ${{ inputs.nimble-version }}
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.extra-path }}" ]; then
+          export PATH="${{ inputs.extra-path }}:$PATH"
+        fi
+        scripts/install_nimble.sh "${{ inputs.nimble-version }}"
+        echo "$HOME/.nimble/bin" >> $GITHUB_PATH
+        echo "$HOME/.local/nimble-${{ inputs.nimble-version }}/bin" >> $GITHUB_PATH
+
+    - name: Cache nimble deps
+      id: cache
+      if: ${{ inputs.cache-key != '' }}
+      uses: actions/cache@v3
+      with:
+        path: |
+          nimbledeps/
+          nimble.paths
+        key: ${{ inputs.cache-key }}
+
+    - name: Install nimble deps
+      if: ${{ inputs.cache-key == '' || steps.cache.outputs.cache-hit != 'true' }}
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.extra-path }}" ]; then
+          export PATH="${{ inputs.extra-path }}:$PATH"
+        fi
+
+        python3 scripts/gen_requires.py > requires.generated
+
+        # nim's source tree checksums differently across platforms (its own
+        # .gitattributes forces line endings on Windows), so its locked
+        # checksum is unreliable. --useSystemNim uses the CI nim and skips
+        # that check, while still verifying every other locked dep.
+        nimble setup --localdeps -y --useSystemNim --requires "$(cat requires.generated)"
+
+        # Nimble 0.24.x can install a revision that differs from the
+        # requirement and exit with code 0. The audit fails this step when
+        # the result differs from nimble.lock. See the header of
+        # scripts/audit_deps.py for the procedure and references.
+        python3 scripts/audit_deps.py
+
+        make rebuild-nat-libs-nimbledeps ${{ inputs.make-args }}
+        make rebuild-bearssl-nimbledeps ${{ inputs.make-args }}
+        touch nimbledeps/.nimble-setup
