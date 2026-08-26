@@ -99,7 +99,7 @@ jobs:
           # nim's source tree checksums differently across platforms, so its
           # locked checksum is unreliable. --useSystemNim uses the CI nim and
           # skips that check, while still verifying every other locked dep.
-          nimble -y --useSystemNim setup --localdeps --requires "$(cat nimble.pins)"
+          nimble setup --localdeps -y --useSystemNim --requires "$(cat nimble.pins)"
           make rebuild-nat-libs-nimbledeps
           make rebuild-bearssl-nimbledeps
           touch nimbledeps/.nimble-setup
@@ -176,7 +176,7 @@ jobs:
           # nim's source tree checksums differently across platforms, so its
           # locked checksum is unreliable. --useSystemNim uses the CI nim and
           # skips that check, while still verifying every other locked dep.
-          nimble -y --useSystemNim setup --localdeps --requires "$(cat nimble.pins)"
+          nimble setup --localdeps -y --useSystemNim --requires "$(cat nimble.pins)"
           make rebuild-nat-libs-nimbledeps
           make rebuild-bearssl-nimbledeps
           touch nimbledeps/.nimble-setup
@@ -271,7 +271,7 @@ jobs:
           # nim's source tree checksums differently across platforms, so its
           # locked checksum is unreliable. --useSystemNim uses the CI nim and
           # skips that check, while still verifying every other locked dep.
-          nimble -y --useSystemNim setup --localdeps --requires "$(cat nimble.pins)"
+          nimble setup --localdeps -y --useSystemNim --requires "$(cat nimble.pins)"
           make rebuild-nat-libs-nimbledeps
           make rebuild-bearssl-nimbledeps
           touch nimbledeps/.nimble-setup
