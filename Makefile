@@ -42,7 +42,9 @@ NIMBLE := nimble
 # so a task cannot install content that setup did not. The variable is
 # recursively expanded: the file is read when a task runs, after the
 # setup rule wrote it.
-NIMBLE_TASK_FLAGS = --useSystemNim --requires "$$(cat requires.generated 2>/dev/null)"
+# A missing requires.generated must fail the task, not degrade it: the
+# sentinel is not a valid requirement, so Nimble rejects it loudly.
+NIMBLE_TASK_FLAGS = --useSystemNim --requires "$$(cat requires.generated || echo missing_requires_generated)"
 
 NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
 

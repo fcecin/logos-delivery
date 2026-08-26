@@ -96,12 +96,12 @@ jobs:
         # job, which already forces -j1.
         run: make V=1 -j1 all
 
-      # Publish the freshly built shared library so the interop-tests workflow
-      # can run the wrapper suite against it without rebuilding. Only the Linux
-      # build is uploaded since the interop runners are ubuntu-latest.
       - name: Audit installed deps
         run: make audit-deps
 
+      # Publish the freshly built shared library so the interop-tests workflow
+      # can run the wrapper suite against it without rebuilding. Only the Linux
+      # build is uploaded since the interop runners are ubuntu-latest.
       - name: Upload liblogosdelivery.so
         if: matrix.os == 'ubuntu-22.04'
         uses: actions/upload-artifact@v4
@@ -202,9 +202,6 @@ jobs:
     runs-on: ubuntu-22.04
     needs: build
     steps:
-      - name: Audit installed deps
-        run: make audit-deps
-
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -231,3 +228,6 @@ jobs:
           echo "using nph at ${NPH}"
           "${NPH}" examples logos_delivery tests tools apps *.@(nim|nims|nimble)
           git diff --exit-code
+
+      - name: Audit installed deps
+        run: make audit-deps
