@@ -1,6 +1,6 @@
 #!fmt: off
 
-import os
+import os, strutils
 mode = ScriptMode.Verbose
 
 ### Package
@@ -19,16 +19,11 @@ const RequiredNimbleVersion = "0.24.1"
   ## Enforced nimble version to ensure a reproducible flow
 
 ### Dependencies
-# The "< X" caps on chronicles, eth, websock and web3 keep the Nimble
-# maximizer on lock-validated versions despite the 2026-08-24/25 status-im
-# releases (websock 0.4.2 and web3 0.8.1 need chronos >= 4.4.0, eth 0.9.1
-# needs nimcrypto >= 0.7.0). Nimble does not enforce nimble.lock here (URL
-# requires defeat its lock matching), so requires bounds are the version control.
 requires "nim >= 2.2.4",
   "chronos >= 4.2.0 & < 4.4.0",
   "taskpools",
   # Logging & Configuration
-  "chronicles < 0.12.4",
+  "chronicles",
   "confutils",
   # Serialization
   "serialization",
@@ -36,21 +31,21 @@ requires "nim >= 2.2.4",
   "toml_serialization",
   "faststreams",
   # Networking & P2P
-  "https://github.com/vacp2p/nim-libp2p.git#v2.0.0",
-  "eth < 0.9.1",
+  "https://github.com/vacp2p/nim-libp2p.git#c43199378f46d0aaf61be1cad1ee1d63e8f665d6", # v2.0.0
+  "eth",
   "nat_traversal",
   "dnsdisc",
   "dnsclient",
   "httputils >= 0.4.1",
-  "websock >= 0.3.0 & < 0.4.2",
+  "websock >= 0.3.0",
   # Cryptography
   "nimcrypto == 0.6.4", # 0.6.4 used in libp2p. Version 0.7.3 makes test to crash on Ubuntu.
   "secp256k1",
   "bearssl",
   # RPC & APIs
-  "https://github.com/status-im/nim-json-rpc.git#v0.6.1",
+  "https://github.com/status-im/nim-json-rpc.git#6f1fff8ba685c9192fab153a9d66484ad9066e78", # v0.6.1
   "presto",
-  "web3 < 0.8.1",
+  "web3",
   # Database
   "db_connector",
   "sqlite3_abi",
@@ -74,13 +69,16 @@ requires "https://github.com/logos-messaging/nim-ffi#07ee8e1d6500762bab290465457
 
 requires "https://github.com/logos-messaging/nim-sds.git#b12f5ee07c5b764303b51fb948b32a4ade1de3b5"
 
-requires "https://github.com/NagyZoltanPeter/nim-brokers.git#v3.3.0"
+requires "https://github.com/NagyZoltanPeter/nim-brokers.git#19565dd80621e33f6da396ef3fb07c379d55c324" # v3.3.0
 
-requires "https://github.com/vacp2p/nim-lsquic.git#v0.5.1"
-# v0.0.11: pins nim-lsquic's floating "nim-boringssl >= 0.0.4" range. Earlier
+requires "https://github.com/vacp2p/nim-lsquic.git == 0.5.1" # tag v0.5.1 = 2f01046b; numeric, not #hash: libp2p requires "lsquic >= 0.4.1" by name and Nimble drops special pins when merging with ranges
+# == 0.0.11 pins nim-lsquic's floating "nim-boringssl >= 0.0.4" range. Earlier
 # releases export the bundled BoringSSL symbols from shared libraries, letting
-# a host-process OpenSSL interpose them (issue #4085).
-requires "https://github.com/vacp2p/nim-boringssl#346429e4cda48e775f2d1eb3ccb8757edf4f3648"
+# a host-process OpenSSL interpose them (issue #4085). Pinned by version, not
+# by #commit: Nimble resolves same-package special-version pins against
+# lsquic's range by silently picking the lowest tag (v0.0.4), which would
+# reintroduce the interposition bug.
+requires "https://github.com/vacp2p/nim-boringssl == 0.0.11"
 requires "https://github.com/vacp2p/nim-jwt.git#057ec95eb5af0eea9c49bfe9025b3312c95dc5f2"
 requires "https://github.com/logos-co/nim-libp2p-mix#380513117d556bf8f70066f5e72a7fd74fe36ba6"
 

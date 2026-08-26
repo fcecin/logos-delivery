@@ -25,12 +25,13 @@ export PATH := $(HOME)/.nimble/bin:$(PATH)
 NIM_BINARY := $(shell which nim 2>/dev/null)
 NPH := $(HOME)/.nimble/bin/nph
 
-NIMBLE := nimble
-ifeq ($(detected_OS),Windows)
-# Resolve nimble via PATH (Windows has no $(HOME)/.nimble/bin); --useSystemNim
-# reuses the nim on PATH so nimble never re-clones the locked nim.
-	NIMBLE := nimble --useSystemNim
-endif
+# --useSystemNim reuses the nim on PATH so nimble never re-clones the locked
+# nim. Required on every invocation: task runs re-solve the dependency graph,
+# and without it Nimble >= 0.24 runs nim selection, which nim-ffi's
+# "nim >= 2.2.6" floor makes unsatisfiable on the stack's nim 2.2.4.
+# Absolute path: `nimble setup` (0.24.x) replaces ~/.nimble/bin/nimble with a
+# symlink to the system nimble mid-run, silently downgrading later invocations.
+NIMBLE := $(HOME)/.local/bin/nimble-0241 -y --useSystemNim
 
 NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
 
@@ -79,7 +80,7 @@ logos_delivery.nims:
 	ln -s logos_delivery.nimble $@
 
 $(NIMBLEDEPS_STAMP): nimble.lock | install-nimble build-nph logos_delivery.nims
-	$(NIMBLE) setup --localdeps
+	$(NIMBLE) setup --localdeps --requires "$$(cat nimble.pins)"
 	touch $@
 
 # Must be phony so the recipe always runs and the sub-make re-evaluates
