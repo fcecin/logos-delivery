@@ -102,7 +102,7 @@ logos_delivery.nims:
 #   content there). Details: the header of scripts/gen_requires.nims.
 # A gitignored build artifact: written only when an input changes, and
 # read by every consumer (the setup rule here, and CI).
-requires.generated: nimble.lock logos_delivery.nimble nix/deps.nix scripts/gen_requires.nims
+requires.generated: nimble.lock logos_delivery.nimble nix/deps.nix scripts/gen_requires.nims | install-nimble
 	nim e --hints:off scripts/gen_requires.nims
 
 $(NIMBLEDEPS_STAMP): requires.generated logos_delivery.nimble | install-nimble build-nph logos_delivery.nims
@@ -129,6 +129,7 @@ build-deps: | $(NIMBLEDEPS_STAMP)
 	$(MAKE) rebuild-bearssl-nimbledeps rebuild-nat-libs-nimbledeps
 
 clean:
+	rm -f requires.generated observed.generated 2> /dev/null || true
 	rm -rf build 2> /dev/null || true
 	rm -rf nimbledeps 2> /dev/null || true
 	rm -fr nimcache 2> /dev/null || true

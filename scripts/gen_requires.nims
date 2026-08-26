@@ -37,10 +37,14 @@
 # - otherwise                               -> "name == version"
 #   (The name form merges correctly with range requirements from other
 #   packages. Nimble can drop a commit pin in that merge instead:
-#   normalizeSpecialVersions, src/nimblepkg/nimblesat.nim:663.)
+#   normalizeSpecialVersions, src/nimblepkg/nimblesat.nim:663. For a
+#   package that another package requires by name, the url#revision
+#   form is therefore not always binding; the audit is the guarantee
+#   that the build received the locked content.)
 #
-# The script also compares each lock revision with nix/deps.nix. A
-# difference stops the build: the two files must agree. A failed
+# The script also compares nimble.lock with nix/deps.nix in both
+# directions: same entries, same revisions. A difference stops the
+# build: the two files must agree. A failed
 # observation (network, registry unreachable) stops the build: the
 # script never guesses.
 #
@@ -72,8 +76,8 @@ proc normUrl(url: string): string =
 # The URLs that logos_delivery.nimble requires in URL form. A quoted
 # string that starts with http, on a line that is not a comment, is a
 # URL requirement; the base URL ends at '#' or at a space.
-proc nimbleUrlPins(path: string): HashSet[string] =
-  for line in readFile(path).splitLines():
+proc urlPinsFrom(content: string): HashSet[string] =
+  for line in content.splitLines():
     if line.strip(trailing = false).startsWith("#"):
       continue
     let parts = line.split('"')
@@ -89,10 +93,13 @@ proc nimbleUrlPins(path: string): HashSet[string] =
         result.incl(normUrl(base))
       i += 2
 
+proc nimbleUrlPins(path: string): HashSet[string] =
+  urlPinsFrom(readFile(path))
+
 # {normalized url: rev} from the fetchgit blocks of nix/deps.nix.
-proc nixEntries(path: string): Table[string, string] =
+proc nixEntriesFrom(content: string): Table[string, string] =
   var url = ""
-  for line in readFile(path).splitLines():
+  for line in content.splitLines():
     let l = line.strip()
     if l.startsWith("url = \""):
       url = l.split('"')[1]
@@ -100,8 +107,23 @@ proc nixEntries(path: string): Table[string, string] =
       result[normUrl(url)] = l.split('"')[1]
       url = ""
 
+proc nixEntries(path: string): Table[string, string] =
+  nixEntriesFrom(readFile(path))
+
 # {lowercased name: normalized url} from Nimble's registry, with alias
 # entries followed one level, as Nimble does.
+proc registryFrom(jsonContent: string): Table[string, string] =
+  var byName = initTable[string, JsonNode]()
+  for p in parseJson(jsonContent):
+    if p.hasKey("name"):
+      byName[p["name"].getStr().toLowerAscii()] = p
+  for lname, p in byName:
+    var entry = p
+    if entry.hasKey("alias"):
+      entry = byName.getOrDefault(entry["alias"].getStr().toLowerAscii(), newJObject())
+    if entry.hasKey("url"):
+      result[lname] = normUrl(entry["url"].getStr())
+
 proc registryUrls(): Table[string, string] =
   var lastErr = ""
   for mirror in registryMirrors:
@@ -109,17 +131,7 @@ proc registryUrls(): Table[string, string] =
     if code != 0:
       lastErr = "curl exit " & $code & " for " & mirror
       continue
-    var byName = initTable[string, JsonNode]()
-    for p in parseJson(output):
-      if p.hasKey("name"):
-        byName[p["name"].getStr().toLowerAscii()] = p
-    for lname, p in byName:
-      var entry = p
-      if entry.hasKey("alias"):
-        entry = byName.getOrDefault(entry["alias"].getStr().toLowerAscii(), newJObject())
-      if entry.hasKey("url"):
-        result[lname] = normUrl(entry["url"].getStr())
-    return
+    return registryFrom(output)
   echo "gen_requires: cannot fetch the Nimble registry: " & lastErr
   quit(1)
 
@@ -128,19 +140,22 @@ proc registryUrls(): Table[string, string] =
 # variant is the target of an annotated tag). The comparison is against
 # exact expected lines, so no pattern language is involved. git's own
 # low-speed limits bound a stalled connection.
+proc tagLineMatches(lsRemoteOutput, version, rev: string): bool =
+  var expected: HashSet[string]
+  for prefix in ["refs/tags/", "refs/tags/v"]:
+    for suffix in ["", "^{}"]:
+      expected.incl(rev & "\t" & prefix & version & suffix)
+  for line in lsRemoteOutput.splitLines():
+    if line in expected:
+      return true
+  return false
+
 proc versionTagPointsAtRev(url, version, rev: string): bool =
   let (output, code) = gorgeEx(
     "git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=60 ls-remote --tags " & url)
   if code != 0:
     raise newException(CatchableError, "git ls-remote --tags failed for " & url)
-  var expected: HashSet[string]
-  for prefix in ["refs/tags/", "refs/tags/v"]:
-    for suffix in ["", "^{}"]:
-      expected.incl(rev & "\t" & prefix & version & suffix)
-  for line in output.splitLines():
-    if line in expected:
-      return true
-  return false
+  tagLineMatches(output, version, rev)
 
 proc writeAtomic(path, content: string) =
   writeFile(path & ".tmp", content)
@@ -172,6 +187,11 @@ proc main() =
   for u in missing:
     errors.add("logos_delivery.nimble pins " & u &
                ", but nimble.lock has no entry for it")
+
+  for url, _ in nix:
+    if url notin lockUrls:
+      errors.add("nix/deps.nix has " & url &
+                 ", but nimble.lock has no entry for it (" & nixHint & ")")
 
   var candidates: seq[LockEntry]
   for e in entries:
@@ -223,4 +243,55 @@ proc main() =
   writeAtomic(root & "/requires.generated", requires & "\n")
   echo requires
 
+#---------------------------------------------------------------------
+# Self-test: checks the parsing procs above on each invocation.
+#---------------------------------------------------------------------
+proc selfTest() =
+  # Mixed case and ".git" as this repository really uses them.
+  doAssert normUrl("https://github.com/NagyZoltanPeter/nim-brokers.git") ==
+    "https://github.com/nagyzoltanpeter/nim-brokers"
+  doAssert normUrl("https://github.com/vacp2p/nim-boringssl") ==
+    "https://github.com/vacp2p/nim-boringssl"
+  # A package name that starts with "http" is not a URL requirement.
+  doAssert urlPinsFrom("""  "httputils >= 0.4.1",""").len == 0
+  # A comment line is not a requirement, also when it quotes a URL.
+  doAssert urlPinsFrom("""# v2.0.0: "https://github.com/vacp2p/nim-libp2p"""").len == 0
+  doAssert "https://github.com/vacp2p/nim-libp2p" in urlPinsFrom(
+    """requires "https://github.com/vacp2p/nim-libp2p.git#c43199378f46d0aaf61be1cad1ee1d63e8f665d6"""")
+  doAssert "https://github.com/vacp2p/nim-lsquic" in urlPinsFrom(
+    """requires "https://github.com/vacp2p/nim-lsquic.git == 0.5.1"""")
+  let nix = nixEntriesFrom("""
+  chronos = pkgs.fetchgit {
+    url = "https://github.com/status-im/nim-chronos";
+    rev = "45f43a9ad8bd8bcf5903b42f365c1c879bd54240";
+    sha256 = "sha256-000";
+    fetchSubmodules = true;
+  };
+""")
+  doAssert nix["https://github.com/status-im/nim-chronos"] ==
+    "45f43a9ad8bd8bcf5903b42f365c1c879bd54240"
+  # A plain tag (libp2p v2.0.0) and an annotated tag's "^{}" target
+  # (brokers v3.3.0) both match; both lines are real ls-remote output.
+  doAssert tagLineMatches(
+    "c43199378f46d0aaf61be1cad1ee1d63e8f665d6\trefs/tags/v2.0.0",
+    "2.0.0", "c43199378f46d0aaf61be1cad1ee1d63e8f665d6")
+  doAssert tagLineMatches(
+    "19565dd80621e33f6da396ef3fb07c379d55c324\trefs/tags/v3.3.0^{}",
+    "3.3.0", "19565dd80621e33f6da396ef3fb07c379d55c324")
+  # A tag that points at a different revision does not match.
+  doAssert not tagLineMatches(
+    "f44cff901dff2a24fedcf4ef9e12a6f72355d58f\trefs/tags/v0.6.0",
+    "0.6.0", "d8f1288b7c72f00be5fc2c5ea72bf5cae1eafb15")
+  # Registry parsing: names compare case-insensitively, an alias is
+  # followed one level, and an alias to a missing entry yields nothing.
+  let reg = registryFrom("""[
+    {"name": "Chronos", "url": "https://github.com/status-im/nim-chronos"},
+    {"name": "old", "alias": "chronos"},
+    {"name": "dead", "alias": "gone"}
+  ]""")
+  doAssert reg["chronos"] == "https://github.com/status-im/nim-chronos"
+  doAssert reg["old"] == "https://github.com/status-im/nim-chronos"
+  doAssert "dead" notin reg
+
+selfTest()
 main()

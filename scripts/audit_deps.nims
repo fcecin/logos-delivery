@@ -155,4 +155,26 @@ proc main() =
   if bad.len > 0:
     quit(1)
 
+#---------------------------------------------------------------------
+# Self-test: checks the parsing procs above on each invocation.
+#---------------------------------------------------------------------
+proc selfTest() =
+  doAssert normUrl("https://github.com/NagyZoltanPeter/nim-brokers.git") ==
+    "https://github.com/nagyzoltanpeter/nim-brokers"
+  # A version contains no dash, so two rsplits recover the name, also
+  # when the name itself contains dashes or digits.
+  doAssert nameFromDir("nim-2.2.10-17ec440fdb89") == "nim"
+  doAssert nameFromDir("secp256k1-0.6.0.3.2-abfc2c1a") == "secp256k1"
+  doAssert nameFromDir("bearssl_pkey_decoder-0.1.0-8666edbc") == "bearssl_pkey_decoder"
+  doAssert nameFromDir("nodash") == "nodash"
+  # Both nimblemeta.json shapes: top-level and nested under metaData.
+  doAssert metaField(parseJson(
+    """{"vcsRevision": "d34aa46bf9d0a3ffff810fbd3c4d2fa024eb9368"}"""),
+    "vcsRevision") == "d34aa46bf9d0a3ffff810fbd3c4d2fa024eb9368"
+  doAssert metaField(parseJson(
+    """{"metaData": {"vcsRevision": "d34aa46bf9d0a3ffff810fbd3c4d2fa024eb9368"}}"""),
+    "vcsRevision") == "d34aa46bf9d0a3ffff810fbd3c4d2fa024eb9368"
+  doAssert metaField(parseJson("""{}"""), "vcsRevision") == ""
+
+selfTest()
 main()

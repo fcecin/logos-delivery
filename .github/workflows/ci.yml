@@ -33,6 +33,10 @@ jobs:
         filters: |
           common:
           - '.github/workflows/**'
+          - '.github/actions/**'
+          - 'BearSSL.mk'
+          - 'Nat.mk'
+          - 'nix/**'
           - 'nimble.lock'
           - 'logos_delivery.nimble'
           - 'Makefile'

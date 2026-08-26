@@ -71,12 +71,20 @@ runs:
         # that check, while still verifying every other locked dep.
         "$HOME/.local/nimble-${{ inputs.nimble-version }}/bin/nimble" setup --localdeps -y --useSystemNim --requires "$(cat requires.generated)"
 
-        # Nimble 0.24.x can install a revision that differs from the
-        # requirement and exit with code 0. The audit fails this step when
-        # the result differs from nimble.lock. See the header of
-        # scripts/audit_deps.nims for the procedure and references.
-        nim e --hints:off scripts/audit_deps.nims
-
         make rebuild-nat-libs-nimbledeps ${{ inputs.make-args }}
         make rebuild-bearssl-nimbledeps ${{ inputs.make-args }}
         touch nimbledeps/.nimble-setup
+
+    - name: Audit installed deps
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.extra-path }}" ]; then
+          export PATH="${{ inputs.extra-path }}:$PATH"
+        fi
+
+        # Nimble 0.24.x can install a revision that differs from the
+        # requirement and exit with code 0. The audit compares every
+        # installed revision with nimble.lock and fails on a difference.
+        # This step is not behind the cache condition: a restored cache
+        # must match the lock too. See scripts/audit_deps.nims.
+        nim e --hints:off scripts/audit_deps.nims
