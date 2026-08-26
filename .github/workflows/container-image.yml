@@ -103,6 +103,7 @@ jobs:
           PR_NUMBER: ${{ inputs.image_tag}}
 
       - name: Audit installed deps
+        if: ${{ steps.secrets.outcome == 'success' }}
         run: make audit-deps
 
       - name: Comment PR
