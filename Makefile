@@ -85,7 +85,7 @@ $(NIMBLEDEPS_STAMP): nimble.lock deps.pins | install-nimble build-nph logos_deli
 	# unreliable locked checksum, and avoid Nimble >= 0.24 nim selection, which
 	# nim-ffi's "nim >= 2.2.6" floor makes unsatisfiable on nim 2.2.4. Task
 	# invocations need no flags: they re-solve against the installed pinned set.
-	$(NIMBLE) setup --localdeps -y --useSystemNim --requires "$$(awk 'NF && !/^#/' deps.pins | paste -sd ';' -)"
+	$(NIMBLE) setup --localdeps -y --useSystemNim --requires "$$(paste -sd ';' - < deps.pins)"
 	touch $@
 
 # Must be phony so the recipe always runs and the sub-make re-evaluates
