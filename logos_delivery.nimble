@@ -1,6 +1,6 @@
 #!fmt: off
 
-import os, strutils
+import os
 mode = ScriptMode.Verbose
 
 ### Package

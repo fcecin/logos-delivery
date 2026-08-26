@@ -19,7 +19,13 @@ ifneq (,$(findstring MINGW,$(detected_OS)))
 endif
 
 # Ensure the nim/nimble installed by install-nim/install-nimble are found first
-export PATH := $(HOME)/.nimble/bin:$(PATH)
+REQUIRED_NIMBLE_VERSION := $(shell grep -E '^const RequiredNimbleVersion\s*=' logos_delivery.nimble | grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"')
+# Version-pinned Nimble in its own directory, first on PATH. `nimble setup`
+# unlinks ~/.nimble/bin/nimble while re-linking the self-installed nimble
+# package's shim (nimble ships itself as a package), so nothing may resolve
+# nimble through ~/.nimble/bin. That path stays later on PATH for nph.
+NIMBLE_TOOLDIR := $(HOME)/.local/nimble-$(REQUIRED_NIMBLE_VERSION)/bin
+export PATH := $(NIMBLE_TOOLDIR):$(HOME)/.nimble/bin:$(PATH)
 
 # NIM binary location
 NIM_BINARY := $(shell which nim 2>/dev/null)
@@ -29,9 +35,7 @@ NPH := $(HOME)/.nimble/bin/nph
 # nim. Required on every invocation: task runs re-solve the dependency graph,
 # and without it Nimble >= 0.24 runs nim selection, which nim-ffi's
 # "nim >= 2.2.6" floor makes unsatisfiable on the stack's nim 2.2.4.
-# Absolute path: `nimble setup` (0.24.x) replaces ~/.nimble/bin/nimble with a
-# symlink to the system nimble mid-run, silently downgrading later invocations.
-NIMBLE := $(HOME)/.local/bin/nimble-0241 -y --useSystemNim
+NIMBLE := nimble -y --useSystemNim
 
 NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
 
@@ -98,7 +102,6 @@ clean:
 	nimble clean
 
 REQUIRED_NIM_VERSION    := $(shell grep -E '^const RequiredNimVersion\s*=' logos_delivery.nimble | grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"')
-REQUIRED_NIMBLE_VERSION := $(shell grep -E '^const RequiredNimbleVersion\s*=' logos_delivery.nimble | grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"')
 
 install-nim:
 ifneq ($(detected_OS),Windows)

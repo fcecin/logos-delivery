@@ -62,8 +62,9 @@ jobs:
       - name: Install Nimble ${{ env.NIMBLE_VERSION }}
         if: ${{ steps.secrets.outcome == 'success' }}
         run: |
-          cd /tmp && nimble install "nimble@${{ env.NIMBLE_VERSION }}" -y
+          scripts/install_nimble.sh "${{ env.NIMBLE_VERSION }}"
           echo "$HOME/.nimble/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/nimble-${{ env.NIMBLE_VERSION }}/bin" >> $GITHUB_PATH
 
       - name: Cache nimble deps
         if: ${{ steps.secrets.outcome == 'success' }}

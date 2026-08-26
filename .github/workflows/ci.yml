@@ -77,20 +77,12 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Nimble ${{ env.NIMBLE_VERSION }}
-        # Prebuilt binary at a fixed absolute path: `nimble setup` (0.24.x)
-        # replaces ~/.nimble/bin/nimble with a symlink mid-run, so the Makefile
-        # invokes $(HOME)/.local/bin/nimble-0241 directly.
+        # Versioned directory first on PATH; see scripts/install_nimble.sh for
+        # why nimble must not be resolved through ~/.nimble/bin.
         run: |
-          mkdir -p "$HOME/.local/bin" "$HOME/.nimble/bin"
-          case "$(uname -s)-$(uname -m)" in
-            Linux-x86_64) A=linux_x64 ;;
-            Darwin-arm64) A=macosx_aarch64 ;;
-            Darwin-x86_64) A=macosx_x64 ;;
-          esac
-          curl -sL "https://github.com/nim-lang/nimble/releases/download/v${{ env.NIMBLE_VERSION }}/nimble-${A}.tar.gz" | tar -xz -C "$HOME/.local/bin"
-          mv "$HOME/.local/bin/nimble" "$HOME/.local/bin/nimble-0241"
-          cp "$HOME/.local/bin/nimble-0241" "$HOME/.nimble/bin/nimble"
+          scripts/install_nimble.sh "${{ env.NIMBLE_VERSION }}"
           echo "$HOME/.nimble/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/nimble-${{ env.NIMBLE_VERSION }}/bin" >> $GITHUB_PATH
 
       - name: Cache nimble deps
         id: cache-nimbledeps
@@ -107,7 +99,7 @@ jobs:
           # nim's source tree checksums differently across platforms, so its
           # locked checksum is unreliable. --useSystemNim uses the CI nim and
           # skips that check, while still verifying every other locked dep.
-          "$HOME/.local/bin/nimble-0241" -y --useSystemNim setup --localdeps --requires "$(cat nimble.pins)"
+          nimble -y --useSystemNim setup --localdeps --requires "$(cat nimble.pins)"
           make rebuild-nat-libs-nimbledeps
           make rebuild-bearssl-nimbledeps
           touch nimbledeps/.nimble-setup
@@ -162,20 +154,12 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Nimble ${{ env.NIMBLE_VERSION }}
-        # Prebuilt binary at a fixed absolute path: `nimble setup` (0.24.x)
-        # replaces ~/.nimble/bin/nimble with a symlink mid-run, so the Makefile
-        # invokes $(HOME)/.local/bin/nimble-0241 directly.
+        # Versioned directory first on PATH; see scripts/install_nimble.sh for
+        # why nimble must not be resolved through ~/.nimble/bin.
         run: |
-          mkdir -p "$HOME/.local/bin" "$HOME/.nimble/bin"
-          case "$(uname -s)-$(uname -m)" in
-            Linux-x86_64) A=linux_x64 ;;
-            Darwin-arm64) A=macosx_aarch64 ;;
-            Darwin-x86_64) A=macosx_x64 ;;
-          esac
-          curl -sL "https://github.com/nim-lang/nimble/releases/download/v${{ env.NIMBLE_VERSION }}/nimble-${A}.tar.gz" | tar -xz -C "$HOME/.local/bin"
-          mv "$HOME/.local/bin/nimble" "$HOME/.local/bin/nimble-0241"
-          cp "$HOME/.local/bin/nimble-0241" "$HOME/.nimble/bin/nimble"
+          scripts/install_nimble.sh "${{ env.NIMBLE_VERSION }}"
           echo "$HOME/.nimble/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/nimble-${{ env.NIMBLE_VERSION }}/bin" >> $GITHUB_PATH
 
       - name: Cache nimble deps
         id: cache-nimbledeps
@@ -192,7 +176,7 @@ jobs:
           # nim's source tree checksums differently across platforms, so its
           # locked checksum is unreliable. --useSystemNim uses the CI nim and
           # skips that check, while still verifying every other locked dep.
-          "$HOME/.local/bin/nimble-0241" -y --useSystemNim setup --localdeps --requires "$(cat nimble.pins)"
+          nimble -y --useSystemNim setup --localdeps --requires "$(cat nimble.pins)"
           make rebuild-nat-libs-nimbledeps
           make rebuild-bearssl-nimbledeps
           touch nimbledeps/.nimble-setup
@@ -265,20 +249,12 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Nimble ${{ env.NIMBLE_VERSION }}
-        # Prebuilt binary at a fixed absolute path: `nimble setup` (0.24.x)
-        # replaces ~/.nimble/bin/nimble with a symlink mid-run, so the Makefile
-        # invokes $(HOME)/.local/bin/nimble-0241 directly.
+        # Versioned directory first on PATH; see scripts/install_nimble.sh for
+        # why nimble must not be resolved through ~/.nimble/bin.
         run: |
-          mkdir -p "$HOME/.local/bin" "$HOME/.nimble/bin"
-          case "$(uname -s)-$(uname -m)" in
-            Linux-x86_64) A=linux_x64 ;;
-            Darwin-arm64) A=macosx_aarch64 ;;
-            Darwin-x86_64) A=macosx_x64 ;;
-          esac
-          curl -sL "https://github.com/nim-lang/nimble/releases/download/v${{ env.NIMBLE_VERSION }}/nimble-${A}.tar.gz" | tar -xz -C "$HOME/.local/bin"
-          mv "$HOME/.local/bin/nimble" "$HOME/.local/bin/nimble-0241"
-          cp "$HOME/.local/bin/nimble-0241" "$HOME/.nimble/bin/nimble"
+          scripts/install_nimble.sh "${{ env.NIMBLE_VERSION }}"
           echo "$HOME/.nimble/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/nimble-${{ env.NIMBLE_VERSION }}/bin" >> $GITHUB_PATH
 
       - name: Cache nimble deps
         id: cache-nimbledeps
@@ -295,7 +271,7 @@ jobs:
           # nim's source tree checksums differently across platforms, so its
           # locked checksum is unreliable. --useSystemNim uses the CI nim and
           # skips that check, while still verifying every other locked dep.
-          "$HOME/.local/bin/nimble-0241" -y --useSystemNim setup --localdeps --requires "$(cat nimble.pins)"
+          nimble -y --useSystemNim setup --localdeps --requires "$(cat nimble.pins)"
           make rebuild-nat-libs-nimbledeps
           make rebuild-bearssl-nimbledeps
           touch nimbledeps/.nimble-setup

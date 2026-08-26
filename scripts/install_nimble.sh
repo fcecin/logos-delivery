@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# Installs a specific nimble version without using `nimble install nimble`.
+# Installs a specific nimble version into its own versioned directory,
+# ~/.local/nimble-<version>/bin, which the Makefile puts first on PATH.
 #
-# `nimble install nimble` is inherently fragile:
-#   - ETXTBSY: overwriting the running nimble binary in pkgs2/
-#   - JSON parse failures with older nimble versions reading packages_official.json
+# Why not ~/.nimble/bin: `nimble install nimble` is inherently fragile
+# (ETXTBSY overwriting the running binary, JSON parse failures across
+# versions), and worse, `nimble setup` re-links installed packages' binary
+# shims — nimble ships itself as a package, so setup deletes
+# ~/.nimble/bin/nimble (even while it is the running executable) and points
+# it back at whatever nimble version sits in pkgs2. A versioned directory
+# that nimble never manages is immune to all of that.
 #
 # Strategy:
-#   1. If the right version is already at ~/.nimble/bin/nimble → done.
-#   2. If a previously-compiled binary exists in pkgs2/ → re-link it.
-#   3. Otherwise: clone the nimble git repo, init submodules, build with nim,
-#      and atomically replace the target (mv avoids ETXTBSY on the old binary).
+#   1. If the right version is already in the versioned dir → done.
+#   2. Download the official prebuilt release binary for this platform.
+#   3. Fallback: clone the nimble git repo and build from source with nim.
 
 set -e
 
@@ -19,7 +23,8 @@ if [ -z "${NIMBLE_VERSION}" ]; then
   exit 1
 fi
 
-NIMBLE_BIN="${HOME}/.nimble/bin/nimble"
+NIMBLE_DIR="${HOME}/.local/nimble-${NIMBLE_VERSION}/bin"
+NIMBLE_BIN="${NIMBLE_DIR}/nimble"
 
 # 1. Already installed at the right version?
 if [ -x "${NIMBLE_BIN}" ]; then
@@ -31,21 +36,30 @@ if [ -x "${NIMBLE_BIN}" ]; then
   fi
 fi
 
-# 2. Already compiled into pkgs2/ from a previous (possibly partial) run?
-PKGS2_NIMBLE=$(ls -dt "${HOME}/.nimble/pkgs2/nimble-${NIMBLE_VERSION}-"*/nimble \
-  2>/dev/null | head -1 || true)
-if [ -n "${PKGS2_NIMBLE}" ] && [ -x "${PKGS2_NIMBLE}" ]; then
-  echo "Nimble ${NIMBLE_VERSION} found in pkgs2, re-linking to ${NIMBLE_BIN}."
-  mkdir -p "${HOME}/.nimble/bin"
-  ln -sf "${PKGS2_NIMBLE}" "${NIMBLE_BIN}"
-  exit 0
+mkdir -p "${NIMBLE_DIR}"
+
+# 2. Prebuilt release binary.
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64)  ASSET="linux_x64" ;;
+  Linux-aarch64) ASSET="linux_aarch64" ;;
+  Darwin-arm64)  ASSET="macosx_aarch64" ;;
+  Darwin-x86_64) ASSET="macosx_x64" ;;
+  MINGW*-x86_64|MSYS*-x86_64) ASSET="windows_x64" ;;
+  *)             ASSET="" ;;
+esac
+if [ -n "${ASSET}" ]; then
+  URL="https://github.com/nim-lang/nimble/releases/download/v${NIMBLE_VERSION}/nimble-${ASSET}.tar.gz"
+  echo "Downloading prebuilt nimble ${NIMBLE_VERSION} (${ASSET})..."
+  if curl -fsSL "${URL}" | tar -xz -C "${NIMBLE_DIR}"; then
+    "${NIMBLE_BIN}" --version | head -1
+    echo "Nimble ${NIMBLE_VERSION} installed to ${NIMBLE_BIN}"
+    exit 0
+  fi
+  echo "Prebuilt download failed, falling back to source build." >&2
 fi
 
 # 3. Build from source.
-NIM_BIN="${HOME}/.nimble/bin/nim"
-if [ ! -x "${NIM_BIN}" ]; then
-  NIM_BIN="$(command -v nim)"
-fi
+NIM_BIN="$(command -v nim)"
 
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
@@ -62,8 +76,7 @@ cd "${WORK_DIR}/nimble"
 "${NIM_BIN}" c -d:release --path:src \
   -o:"${WORK_DIR}/nimble_new" src/nimble.nim
 
-mkdir -p "${HOME}/.nimble/bin"
-# Atomic rename: avoids ETXTBSY when the old binary at NIMBLE_BIN is still running.
+# Atomic rename: avoids ETXTBSY if the old binary at NIMBLE_BIN is running.
 cp "${WORK_DIR}/nimble_new" "${NIMBLE_BIN}.new.$$"
 mv -f "${NIMBLE_BIN}.new.$$" "${NIMBLE_BIN}"
 
