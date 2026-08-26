@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Installs a specific nimble version into its own versioned directory,
-# ~/.local/nimble-<version>/bin, which the Makefile puts first on PATH.
+# This script installs one Nimble version into its own directory:
+# ~/.local/nimble-<version>/bin. The Makefile puts that directory first
+# on PATH.
 #
-# Why not ~/.nimble/bin: `nimble install nimble` is inherently fragile
-# (ETXTBSY overwriting the running binary, JSON parse failures across
-# versions), and worse, `nimble setup` re-links installed packages' binary
-# shims — nimble ships itself as a package, so setup deletes
-# ~/.nimble/bin/nimble (even while it is the running executable) and points
-# it back at whatever nimble version sits in pkgs2. A versioned directory
-# that nimble never manages is immune to all of that.
+# The script does not install into ~/.nimble/bin. Nimble manages that
+# directory. During setup, Nimble refreshes the links for installed
+# packages. Nimble can be installed as a package itself. In that case,
+# the refresh can replace ~/.nimble/bin/nimble with a link to the
+# packaged copy, also when that file is the binary that runs. A
+# directory that Nimble does not manage does not have this risk.
 #
-# Strategy:
-#   1. If the right version is already in the versioned dir → done.
-#   2. Download the official prebuilt release binary for this platform.
-#   3. Fallback: clone the nimble git repo and build from source with nim.
+# Steps:
+#   1. If the requested version is already installed, stop.
+#   2. Download the official prebuilt release binary (best effort).
+#   3. If the download does not succeed, build Nimble from source.
 
 set -e
 
@@ -26,7 +26,7 @@ fi
 NIMBLE_DIR="${HOME}/.local/nimble-${NIMBLE_VERSION}/bin"
 NIMBLE_BIN="${NIMBLE_DIR}/nimble"
 
-# 1. Already installed at the right version?
+# Step 1: stop if the requested version is already installed.
 if [ -x "${NIMBLE_BIN}" ]; then
   nimble_ver=$("${NIMBLE_BIN}" --version 2>/dev/null \
     | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
@@ -38,7 +38,13 @@ fi
 
 mkdir -p "${NIMBLE_DIR}"
 
-# 2. Prebuilt release binary.
+# Step 2: download the official prebuilt release binary.
+# This step is a best-effort optimization. It saves the time of a source
+# build, which is some minutes for each CI job. The step is safe if it
+# decays: if the asset name changes, if the platform is not in the table,
+# or if the download does not succeed, the script continues to the source
+# build in step 3. This step cannot make the result incorrect. It can
+# only lose its speed advantage.
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64)  ASSET="linux_x64" ;;
   Linux-aarch64) ASSET="linux_aarch64" ;;
@@ -58,7 +64,7 @@ if [ -n "${ASSET}" ]; then
   echo "Prebuilt download failed, falling back to source build." >&2
 fi
 
-# 3. Build from source.
+# Step 3: build Nimble from source with the Nim compiler on PATH.
 NIM_BIN="$(command -v nim)"
 
 WORK_DIR="$(mktemp -d)"
@@ -72,11 +78,13 @@ git clone --depth=1 --branch "v${NIMBLE_VERSION}" \
 
 echo "Building nimble ${NIMBLE_VERSION} with $("${NIM_BIN}" --version | head -1)..."
 cd "${WORK_DIR}/nimble"
-# nim reads nim.cfg / config.nims in the current dir, which sets vendor paths.
+# Nim reads nim.cfg and config.nims from the current directory. These
+# files set the vendor paths for the build.
 "${NIM_BIN}" c -d:release --path:src \
   -o:"${WORK_DIR}/nimble_new" src/nimble.nim
 
-# Atomic rename: avoids ETXTBSY if the old binary at NIMBLE_BIN is running.
+# Copy first, then rename in one operation. This prevents an ETXTBSY
+# error if the old binary runs at this time.
 cp "${WORK_DIR}/nimble_new" "${NIMBLE_BIN}.new.$$"
 mv -f "${NIMBLE_BIN}.new.$$" "${NIMBLE_BIN}"
 

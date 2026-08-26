@@ -50,9 +50,12 @@ jobs:
           docker:
           - 'docker/**'
 
+    - name: Generate requires string
+      run: python3 scripts/gen_requires.py > requires.generated
+
     - name: Compute dependency cache hash
       id: deps-hash
-      run: echo "hash=${{ hashFiles('nimble.lock', 'deps.pins', 'logos_delivery.nimble', 'BearSSL.mk', 'Nat.mk') }}" >> $GITHUB_OUTPUT
+      run: echo "hash=${{ hashFiles('requires.generated', 'logos_delivery.nimble', 'BearSSL.mk', 'Nat.mk') }}" >> $GITHUB_OUTPUT
 
     outputs:
       deps_hash: ${{ steps.deps-hash.outputs.hash }}
@@ -96,15 +99,24 @@ jobs:
           path: |
             nimbledeps/
             nimble.paths
-          key: ${{ runner.os }}-nimbledeps-v3-nimble${{ env.NIMBLE_VERSION }}-${{ needs.changes.outputs.deps_hash }}
+          key: ${{ runner.os }}-nimbledeps-v4-nimble${{ env.NIMBLE_VERSION }}-${{ needs.changes.outputs.deps_hash }}
 
       - name: Install nimble deps
         if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
         run: |
+          python3 scripts/gen_requires.py > requires.generated
+
           # nim's source tree checksums differently across platforms, so its
           # locked checksum is unreliable. --useSystemNim uses the CI nim and
           # skips that check, while still verifying every other locked dep.
-          nimble setup --localdeps -y --useSystemNim --requires "$(paste -sd ';' - < deps.pins)"
+          nimble setup --localdeps -y --useSystemNim --requires "$(cat requires.generated)"
+
+          # Nimble 0.24.x can install a revision that differs from the
+          # requirement and exit with code 0. The audit fails this step when
+          # the result differs from nimble.lock. See the header of
+          # scripts/audit_deps.py for the procedure and references.
+          python3 scripts/audit_deps.py
+
           make rebuild-nat-libs-nimbledeps
           make rebuild-bearssl-nimbledeps
           touch nimbledeps/.nimble-setup
@@ -173,15 +185,24 @@ jobs:
           path: |
             nimbledeps/
             nimble.paths
-          key: ${{ runner.os }}-nimbledeps-v3-nimble${{ env.NIMBLE_VERSION }}-${{ needs.changes.outputs.deps_hash }}
+          key: ${{ runner.os }}-nimbledeps-v4-nimble${{ env.NIMBLE_VERSION }}-${{ needs.changes.outputs.deps_hash }}
 
       - name: Install nimble deps
         if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
         run: |
+          python3 scripts/gen_requires.py > requires.generated
+
           # nim's source tree checksums differently across platforms, so its
           # locked checksum is unreliable. --useSystemNim uses the CI nim and
           # skips that check, while still verifying every other locked dep.
-          nimble setup --localdeps -y --useSystemNim --requires "$(paste -sd ';' - < deps.pins)"
+          nimble setup --localdeps -y --useSystemNim --requires "$(cat requires.generated)"
+
+          # Nimble 0.24.x can install a revision that differs from the
+          # requirement and exit with code 0. The audit fails this step when
+          # the result differs from nimble.lock. See the header of
+          # scripts/audit_deps.py for the procedure and references.
+          python3 scripts/audit_deps.py
+
           make rebuild-nat-libs-nimbledeps
           make rebuild-bearssl-nimbledeps
           touch nimbledeps/.nimble-setup
@@ -268,15 +289,24 @@ jobs:
           path: |
             nimbledeps/
             nimble.paths
-          key: ${{ runner.os }}-nimbledeps-v3-nimble${{ env.NIMBLE_VERSION }}-${{ needs.changes.outputs.deps_hash }}
+          key: ${{ runner.os }}-nimbledeps-v4-nimble${{ env.NIMBLE_VERSION }}-${{ needs.changes.outputs.deps_hash }}
 
       - name: Install nimble deps
         if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
         run: |
+          python3 scripts/gen_requires.py > requires.generated
+
           # nim's source tree checksums differently across platforms, so its
           # locked checksum is unreliable. --useSystemNim uses the CI nim and
           # skips that check, while still verifying every other locked dep.
-          nimble setup --localdeps -y --useSystemNim --requires "$(paste -sd ';' - < deps.pins)"
+          nimble setup --localdeps -y --useSystemNim --requires "$(cat requires.generated)"
+
+          # Nimble 0.24.x can install a revision that differs from the
+          # requirement and exit with code 0. The audit fails this step when
+          # the result differs from nimble.lock. See the header of
+          # scripts/audit_deps.py for the procedure and references.
+          python3 scripts/audit_deps.py
+
           make rebuild-nat-libs-nimbledeps
           make rebuild-bearssl-nimbledeps
           touch nimbledeps/.nimble-setup
