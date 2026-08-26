@@ -19,6 +19,25 @@ const RequiredNimbleVersion = "0.24.1"
   ## Enforced nimble version to ensure a reproducible flow
 
 ### Dependencies
+#
+# Two kinds of entries, distinguished by what downstream consumers of this
+# package inherit:
+#
+# 1. Registry packages (bare names): the ranges are the public promise, kept
+#    as wide as we support so dependents' resolvers stay free. The exact
+#    versions our own builds use are pinned separately in deps.pins (injected
+#    at `nimble setup` by the Makefile and CI) and never enter dependent
+#    solves. A `== version` in this block is deliberate: a constraint
+#    dependents should inherit, with its reason beside it.
+#
+# 2. URL packages (not in the Nimble registry), in their own block below:
+#    the URL line is both the declaration and the pin, since it is the only
+#    address dependents have. Pinned by commit hash, not by tag: tags can be
+#    moved or deleted upstream, commits cannot, and Nimble resolves hashes
+#    unambiguously. Where another package requires one of these by
+#    name-range (lsquic, boringssl), the pin is spelled `== version`
+#    instead: Nimble merges numeric constraints with ranges reliably, but
+#    can drop commit pins in that merge.
 requires "nim >= 2.2.4",
   "chronos >= 4.2.0 & < 4.4.0",
   "taskpools",
@@ -31,7 +50,6 @@ requires "nim >= 2.2.4",
   "toml_serialization",
   "faststreams",
   # Networking & P2P
-  "https://github.com/vacp2p/nim-libp2p.git#c43199378f46d0aaf61be1cad1ee1d63e8f665d6", # v2.0.0
   "eth",
   "nat_traversal",
   "dnsdisc",
@@ -43,7 +61,6 @@ requires "nim >= 2.2.4",
   "secp256k1",
   "bearssl",
   # RPC & APIs
-  "https://github.com/status-im/nim-json-rpc.git#6f1fff8ba685c9192fab153a9d66484ad9066e78", # v0.6.1
   "presto",
   "web3",
   # Database
@@ -62,7 +79,11 @@ requires "nim >= 2.2.4",
   "testutils",
   "unittest2"
 
-# Packages not on nimble (use git URLs)
+# URL-pinned packages (kind 2 above).
+
+requires "https://github.com/vacp2p/nim-libp2p.git#c43199378f46d0aaf61be1cad1ee1d63e8f665d6" # v2.0.0
+
+requires "https://github.com/status-im/nim-json-rpc.git#6f1fff8ba685c9192fab153a9d66484ad9066e78" # v0.6.1
 
 # v0.3.1-rc.0
 requires "https://github.com/logos-messaging/nim-ffi#07ee8e1d6500762bab290465457a8d23559de546"
@@ -71,7 +92,9 @@ requires "https://github.com/logos-messaging/nim-sds.git#b12f5ee07c5b764303b51fb
 
 requires "https://github.com/NagyZoltanPeter/nim-brokers.git#19565dd80621e33f6da396ef3fb07c379d55c324" # v3.3.0
 
-requires "https://github.com/vacp2p/nim-lsquic.git == 0.5.1" # tag v0.5.1 = 2f01046b; numeric, not #hash: libp2p requires "lsquic >= 0.4.1" by name and Nimble drops special pins when merging with ranges
+# Numeric: tag v0.5.1 = commit 2f01046b. libp2p requires "lsquic >= 0.4.1" by
+# name, and a commit pin can be dropped when Nimble merges it with that range.
+requires "https://github.com/vacp2p/nim-lsquic.git == 0.5.1"
 # == 0.0.11 pins nim-lsquic's floating "nim-boringssl >= 0.0.4" range. Earlier
 # releases export the bundled BoringSSL symbols from shared libraries, letting
 # a host-process OpenSSL interpose them (issue #4085). Pinned by version, not
