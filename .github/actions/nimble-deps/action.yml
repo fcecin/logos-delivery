@@ -1,8 +1,8 @@
 name: 'Install nimble deps'
 description: >
-  Installs the pinned Nimble, restores the nimbledeps cache when a key is
-  given, and materializes the dependencies from nimble.lock: generate the
-  requires string, run setup, audit the result, rebuild the C libraries.
+  Installs the pinned Nimble, generates the requires string, restores the
+  nimbledeps cache unless disabled, and runs the Makefile rules that
+  materialize and audit the dependencies from nimble.lock.
 
 inputs:
   nimble-version:
