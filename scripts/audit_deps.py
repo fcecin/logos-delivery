@@ -27,6 +27,10 @@
 #    nix/deps.nix with tools/gen-nix-deps.sh, and commit both files.
 # 2. To refuse the new resolution: add a "url#commit" pin for the
 #    package in logos_delivery.nimble, then do step 1.
+# 3. After a change that removes a package: delete nimbledeps/ and
+#    run setup again. `nimble setup` does not remove installed
+#    packages, and a package that the lock does not list fails this
+#    audit.
 #
 # The "nim" lock entry is not checked: builds use the system Nim
 # (--useSystemNim), so Nimble does not install it as a package.

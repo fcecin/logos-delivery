@@ -80,21 +80,28 @@ requires "nim >= 2.2.4",
   "unittest2"
 
 # URL-pinned packages (kind 2 above).
+# The link above a pin shows the tag and the commit that the tag points to.
 
-requires "https://github.com/vacp2p/nim-libp2p.git#c43199378f46d0aaf61be1cad1ee1d63e8f665d6" # v2.0.0
+# v2.0.0: https://github.com/vacp2p/nim-libp2p/releases/tag/v2.0.0
+requires "https://github.com/vacp2p/nim-libp2p.git#c43199378f46d0aaf61be1cad1ee1d63e8f665d6"
 
-requires "https://github.com/status-im/nim-json-rpc.git#6f1fff8ba685c9192fab153a9d66484ad9066e78" # v0.6.1
+# v0.6.1: https://github.com/status-im/nim-json-rpc/releases/tag/v0.6.1
+requires "https://github.com/status-im/nim-json-rpc.git#6f1fff8ba685c9192fab153a9d66484ad9066e78"
 
-# v0.3.1-rc.0
+# v0.3.1-rc.0: https://github.com/logos-messaging/nim-ffi/releases/tag/v0.3.1-rc.0
 requires "https://github.com/logos-messaging/nim-ffi#07ee8e1d6500762bab290465457a8d23559de546"
 
 requires "https://github.com/logos-messaging/nim-sds.git#b12f5ee07c5b764303b51fb948b32a4ade1de3b5"
 
-requires "https://github.com/NagyZoltanPeter/nim-brokers.git#19565dd80621e33f6da396ef3fb07c379d55c324" # v3.3.0
+# v3.3.0: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.3.0
+requires "https://github.com/NagyZoltanPeter/nim-brokers.git#19565dd80621e33f6da396ef3fb07c379d55c324"
 
-# Numeric: tag v0.5.1 = commit 2f01046b. libp2p requires "lsquic >= 0.4.1" by
-# name, and a commit pin can be dropped when Nimble merges it with that range.
+# v0.5.1: https://github.com/vacp2p/nim-lsquic/releases/tag/v0.5.1
+# Numeric: libp2p requires "lsquic >= 0.4.1" by name, and a commit pin can be
+# dropped when Nimble merges it with that range.
 requires "https://github.com/vacp2p/nim-lsquic.git == 0.5.1"
+
+# v0.0.11: https://github.com/vacp2p/nim-boringssl/releases/tag/v0.0.11
 # == 0.0.11 pins nim-lsquic's floating "nim-boringssl >= 0.0.4" range. Earlier
 # releases export the bundled BoringSSL symbols from shared libraries, letting
 # a host-process OpenSSL interpose them (issue #4085). Pinned by version, not
@@ -102,6 +109,7 @@ requires "https://github.com/vacp2p/nim-lsquic.git == 0.5.1"
 # lsquic's range by silently picking the lowest tag (v0.0.4), which would
 # reintroduce the interposition bug.
 requires "https://github.com/vacp2p/nim-boringssl == 0.0.11"
+
 requires "https://github.com/vacp2p/nim-jwt.git#057ec95eb5af0eea9c49bfe9025b3312c95dc5f2"
 requires "https://github.com/logos-co/nim-libp2p-mix#380513117d556bf8f70066f5e72a7fd74fe36ba6"
 

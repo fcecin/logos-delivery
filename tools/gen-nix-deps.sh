@@ -118,14 +118,15 @@ jq -c '
     --fetch-submodules \
     | jq -r '.sha256')
 
-  # Observe: does the repository have git tags? An empty result with
-  # exit code 0 is a repository without tags. A failed command is a
+  # Observe: does the repository have git tags? Only lines that name
+  # refs/tags/ count: stderr is discarded, so a redirect warning from
+  # a renamed repository cannot count as a tag. A failed command is a
   # network or access problem and stops the generation.
-  if ! tag_list=$(git ls-remote --tags "$url" 2>&1); then
-    echo "error: git ls-remote --tags failed for $url: $tag_list"
+  if ! tag_list=$(git ls-remote --tags "$url" 2>/dev/null); then
+    echo "error: git ls-remote --tags failed for $url"
     exit 1
   fi
-  if [[ -n "$tag_list" ]]; then tags=1; else tags=0; fi
+  if grep -q "refs/tags/" <<<"$tag_list"; then tags=1; else tags=0; fi
 
   # Observe: is the lock name in the registry, with the lock URL?
   # Alias entries are followed one level, as Nimble does.
