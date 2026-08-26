@@ -20,25 +20,22 @@ const RequiredNimbleVersion = "0.24.1"
 
 ### Dependencies
 #
-# Two kinds of entries, distinguished by what downstream consumers of this
-# package inherit:
+# Dependency declarations use two forms:
 #
-# 1. Registry packages (bare names): the ranges are the public promise, kept
-#    as wide as we support so dependents' resolvers stay free. The exact
-#    versions our own builds use are pinned separately in nimble.lock (its
-#    requires string is generated and injected at `nimble setup` by the
-#    Makefile and CI) and never enter dependent solves. A `== version` in
-#    this block is deliberate: a constraint dependents should inherit, with
-#    its reason beside it.
+# 1. Name requirements are exported to consumers of this package. Their
+#    ranges describe the versions those consumers may select. nimble.lock
+#    records the exact revisions used by this repository's builds.
+#    scripts/gen_requires.nims derives additional setup constraints from the
+#    lock; those generated constraints are not part of this package metadata.
+#    Exact `== version` requirements in this block are also exported to
+#    consumers, and their reasons are documented inline.
 #
-# 2. URL packages (not in the Nimble registry), in their own block below:
-#    the URL line is both the declaration and the pin, since it is the only
-#    address dependents have. Pinned by commit hash, not by tag: tags can be
-#    moved or deleted upstream, commits cannot, and Nimble resolves hashes
-#    unambiguously. Where another package requires one of these by
-#    name-range (lsquic, boringssl), the pin is spelled `== version`
-#    instead: Nimble merges numeric constraints with ranges reliably, but
-#    can drop commit pins in that merge.
+# 2. URL requirements identify dependencies by repository URL. A commit hash
+#    identifies a revision independently of tag movement, but availability
+#    still depends on the upstream repository retaining that object and
+#    history. For lsquic and boringssl, exact numeric versions are used
+#    because Nimble 0.24.1 has been observed to discard a special `#commit`
+#    constraint when merging it with another package's name-based range.
 requires "nim >= 2.2.4",
   "chronos >= 4.2.0 & < 4.4.0",
   "taskpools",
@@ -80,8 +77,9 @@ requires "nim >= 2.2.4",
   "testutils",
   "unittest2"
 
-# URL-pinned packages (kind 2 above).
-# The link above a pin shows the tag and the commit that the tag points to.
+# URL requirements described above.
+# For commit-pinned releases, the preceding link records the associated
+# upstream release tag at the time the revision was selected.
 
 # v2.0.0: https://github.com/vacp2p/nim-libp2p/releases/tag/v2.0.0
 requires "https://github.com/vacp2p/nim-libp2p.git#c43199378f46d0aaf61be1cad1ee1d63e8f665d6"
@@ -92,30 +90,30 @@ requires "https://github.com/status-im/nim-json-rpc.git#6f1fff8ba685c9192fab153a
 # v0.3.1-rc.0: https://github.com/logos-messaging/nim-ffi/releases/tag/v0.3.1-rc.0
 requires "https://github.com/logos-messaging/nim-ffi#07ee8e1d6500762bab290465457a8d23559de546"
 
-# Untagged commit: 19 commits after v0.3.1-rc.0.
+# No tag at pinning time; revision was 19 commits after v0.3.1-rc.0.
 requires "https://github.com/logos-messaging/nim-sds.git#b12f5ee07c5b764303b51fb948b32a4ade1de3b5"
 
 # v3.3.0: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.3.0
 requires "https://github.com/NagyZoltanPeter/nim-brokers.git#19565dd80621e33f6da396ef3fb07c379d55c324"
 
 # v0.5.1: https://github.com/vacp2p/nim-lsquic/releases/tag/v0.5.1
-# Numeric: libp2p requires "lsquic >= 0.4.1" by name, and a commit pin can be
-# dropped when Nimble merges it with that range.
+# libp2p requires "lsquic >= 0.4.1" by name. With Nimble 0.24.1, a
+# `#commit` constraint can be discarded while merging these requirements;
+# the exact numeric constraint was observed to select 0.5.1.
 requires "https://github.com/vacp2p/nim-lsquic.git == 0.5.1"
 
 # v0.0.11: https://github.com/vacp2p/nim-boringssl/releases/tag/v0.0.11
-# == 0.0.11 pins nim-lsquic's floating "nim-boringssl >= 0.0.4" range. Earlier
-# releases export the bundled BoringSSL symbols from shared libraries, letting
-# a host-process OpenSSL interpose them (issue #4085). Pinned by version, not
-# by #commit: Nimble resolves same-package special-version pins against
-# lsquic's range by silently picking the lowest tag (v0.0.4), which would
-# reintroduce the interposition bug.
+# nim-lsquic requires "nim-boringssl >= 0.0.4". Releases before 0.0.11
+# export bundled BoringSSL symbols from shared libraries, permitting symbol
+# interposition by a host-process OpenSSL (issue #4085). In the tested
+# Nimble 0.24.1 resolution, combining a special `#commit` constraint with
+# lsquic's range selected v0.0.4; the numeric constraint selects 0.0.11.
 requires "https://github.com/vacp2p/nim-boringssl == 0.0.11"
 
-# Untagged commit: one commit after v0.2.0.
+# No tag at pinning time; revision was one commit after v0.2.0.
 requires "https://github.com/vacp2p/nim-jwt.git#057ec95eb5af0eea9c49bfe9025b3312c95dc5f2"
 
-# Untagged commit.
+# No tag was recorded for this revision at pinning time.
 requires "https://github.com/logos-co/nim-libp2p-mix#380513117d556bf8f70066f5e72a7fd74fe36ba6"
 
 proc getMyCPU(): string =

@@ -84,6 +84,7 @@ jobs:
         uses: ./.github/actions/nimble-deps
         with:
           nimble-version: ${{ env.NIMBLE_VERSION }}
+          nim-version: ${{ env.NIM_VERSION }}
 
       - name: Build binaries
         # -j1: `all` builds wakunode2 and liblogosdelivery, each via `nimble
@@ -98,6 +99,9 @@ jobs:
       # Publish the freshly built shared library so the interop-tests workflow
       # can run the wrapper suite against it without rebuilding. Only the Linux
       # build is uploaded since the interop runners are ubuntu-latest.
+      - name: Audit installed deps
+        run: make audit-deps
+
       - name: Upload liblogosdelivery.so
         if: matrix.os == 'ubuntu-22.04'
         uses: actions/upload-artifact@v4
@@ -138,6 +142,7 @@ jobs:
         uses: ./.github/actions/nimble-deps
         with:
           nimble-version: ${{ env.NIMBLE_VERSION }}
+          nim-version: ${{ env.NIM_VERSION }}
 
       - name: Run tests
         run: |
@@ -197,6 +202,9 @@ jobs:
     runs-on: ubuntu-22.04
     needs: build
     steps:
+      - name: Audit installed deps
+        run: make audit-deps
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -210,6 +218,7 @@ jobs:
         uses: ./.github/actions/nimble-deps
         with:
           nimble-version: ${{ env.NIMBLE_VERSION }}
+          nim-version: ${{ env.NIM_VERSION }}
 
       - name: Build nph
         run: |

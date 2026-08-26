@@ -1,66 +1,70 @@
-# NOTE: this script exists because Nimble 0.24.1 can install content
-# that differs from what the requirements name. The file:line
-# references in the comments below point into that Nimble version's
-# source (https://github.com/nim-lang/nimble).
+# Verify installed Nimble dependency metadata against nimble.lock.
+# File-and-line references below refer to Nimble 0.24.1:
+# https://github.com/nim-lang/nimble
 #
-# Compares the installed dependencies with nimble.lock, in both
-# directions. Run it after `nimble setup`:
+# Run after setup or cache restoration:
 #
 #   nim e scripts/audit_deps.nims
 #
-# It reads the metadata file of each package in nimbledeps/pkgs2 and
-# compares the git revision with the revision in nimble.lock.
+# For each non-Nim lock entry, the audit locates an installed package by
+# normalized repository URL, falling back to the package name parsed from
+# its pkgs2 directory. Its nimblemeta.json vcsRevision must equal the
+# revision in nimble.lock. The reverse check rejects installed directories
+# that match no lock entry, and directories without nimblemeta.json are
+# also rejected.
 #
-# Exit code 0: every installed package matches the lock.
-# Exit code 1: at least one package differs, a lock entry is not
-# installed, or a package is installed that the lock does not list.
-# The script prints each difference.
+# This validates Nimble's installed metadata. It does not hash or
+# otherwise compare every file in an installed package working tree.
 #
-# The audit does not help the build succeed: it can only fail it.
-# It reads files and writes nothing. A build that passes the audit is
-# the same build without it.
+# The audit does not help the build succeed: it can only fail it. It
+# reads files and writes nothing. A build that passes the audit is the
+# same build without it.
 #
-# Why this script exists: Nimble 0.24.1 can install a revision that
-# differs from the revision a requirement names, and exit with code 0.
-# The requires string from gen_requires.nims asks for the lock
-# revisions; only this audit confirms that the build received them.
-# References with a reproduction are at the end of this header.
+# Successful completion prints the matched count and exits with status 0.
+# Missing packages, extra packages, missing metadata, or revision
+# differences produce diagnostics and a nonzero exit. File and JSON
+# errors also propagate as failures.
 #
-# What a failure means: an upstream repository changed a tag, moved a
-# version, or released a version that changes how Nimble resolves.
+# Rationale: Nimble 0.24.1 has been observed to exit with status 0 after
+# installing a revision different from a requested special revision. The
+# reproduction is recorded below.
 #
-# What to do on a failure:
-# 1. To accept the new resolution: run `nimble lock`, then regenerate
-#    nix/deps.nix with tools/gen-nix-deps.sh, and commit both files.
-# 2. To refuse the new resolution: add a "url#commit" pin for the
-#    package in logos_delivery.nimble, then do step 1.
-# 3. After a change that removes a package: delete nimbledeps/ and
-#    run setup again. `nimble setup` does not remove installed
-#    packages, and a package that the lock does not list fails this
-#    audit.
+# A failure can result from dependency resolution, an outdated or
+# incomplete cache, missing metadata, an upstream tag change, or a
+# repository or lock edit. Inspect the reported package and installed
+# metadata before updating the lock.
 #
-# The "nim" lock entry is not checked: builds use the system Nim
-# (--useSystemNim), so Nimble does not install it as a package.
+# Update procedure:
+# 1. To accept a newly reviewed resolution, update logos_delivery.nimble
+#    as needed, run `nimble lock`, regenerate nix/deps.nix, perform a
+#    clean setup, and require this audit to pass.
+# 2. To retain the existing revision, add or adjust a constraint
+#    compatible with the other requirements for that package, then perform
+#    a clean setup and require this audit to pass. A `url#commit`
+#    constraint is not assumed to win when a competing name requirement
+#    exists.
+# 3. After removing a package, delete nimbledeps/ before setup because
+#    `nimble setup` does not remove directories for packages no longer
+#    selected.
 #
-# References:
-# - Lock matching is by package name: solveLockFileDeps,
-#   src/nimblepkg/nimblesat.nim:1226. A requirement that uses a URL
-#   does not match its lock entry, so the lock alone does not
-#   constrain resolution in this repository.
-# - A commit pin can lose against a competing requirement for the
-#   same package: normalizeSpecialVersions,
-#   src/nimblepkg/nimblesat.nim:663 keeps one special version and
-#   drops the others with a warning.
-# - The same defect class in nimble 0.22.3, corrected in 0.24.0:
-#   https://github.com/nim-lang/nimble/issues/1691 (resolution fails
-#   although a correct selection exists) and
-#   https://github.com/nim-lang/nimble/issues/1692 (installed content
-#   differs from the selected version).
-# - Reproduction (upstream state of 2026-08): the requirement
+# The `nim` lock entry is skipped because these builds pass --useSystemNim
+# and do not install Nim under nimbledeps/.
+#
+# Relevant Nimble behavior:
+# - solveLockFileDeps, src/nimblepkg/nimblesat.nim:1226, matches lock
+#   entries by package name. URL requirements do not match those entries
+#   directly.
+# - normalizeSpecialVersions, src/nimblepkg/nimblesat.nim:663, retains one
+#   special version for a package and rewrites or removes competing
+#   special requirements, with a warning.
+# - Related historical resolution defects are documented in issues #1691
+#   and #1692; their fixes shipped in Nimble 0.24.0.
+# - Reproduction from the upstream state observed in 2026-08: the
+#   requirement
 #   "https://github.com/status-im/nim-secp256k1#d8f1288b7c72f00be5fc2c5ea72bf5cae1eafb15"
-#   plus nim-eth's name requirement for secp256k1; nimble 0.24.1
-#   setup installs f44cff901dff2a24fedcf4ef9e12a6f72355d58f and exits
-#   with code 0.
+#   plus nim-eth's name requirement for secp256k1 caused Nimble 0.24.1 to
+#   record f44cff901dff2a24fedcf4ef9e12a6f72355d58f and exit with
+#   status 0.
 
 import std/[json, strutils, algorithm, sets, tables]
 
@@ -71,16 +75,17 @@ proc normUrl(url: string): string =
   result.removeSuffix("/")
   result.removeSuffix(".git")
 
-# The vcsRevision and url from a nimblemeta.json structure. Both the
-# top-level form and the nested metaData form occur.
+# Read a metadata field from either nimblemeta.json layout observed in
+# this dependency set: top-level or nested under `metaData`.
 proc metaField(meta: JsonNode, field: string): string =
   if meta.hasKey(field):
     return meta[field].getStr()
   return meta{"metaData", field}.getStr()
 
-# The package name from a pkgs2 directory name, which has the form
-# name-version-checksum. The version starts with a digit and contains
-# no dash, so two rsplits recover the name.
+# Fallback parser for a pkgs2 directory name. Remove the final checksum
+# and version fields from `name-version-checksum`. This assumes the
+# encoded version field contains no hyphen; URL matching is preferred
+# when metadata provides it.
 proc nameFromDir(dir: string): string =
   result = dir
   for _ in 1 .. 2:
@@ -144,8 +149,9 @@ proc main() =
     else:
       ok += 1
 
-  # The reverse direction: a task or a solver step can install a
-  # package that no lock entry names (for example a nim toolchain).
+  # Reject installed package directories not matched to a lock entry.
+  # This also detects packages added by a later task solve, such as a
+  # Nim toolchain.
   dirs.sort()
   for d in dirs:
     if d notin matchedDirs:
@@ -161,7 +167,7 @@ proc main() =
     quit(1)
 
 #---------------------------------------------------------------------
-# Self-test: checks the parsing procs above on each invocation.
+# Self-tests for the metadata and directory-name parsers. Executed before main().
 #---------------------------------------------------------------------
 proc selfTest() =
   doAssert normUrl("https://github.com/NagyZoltanPeter/nim-brokers.git") ==

@@ -25,13 +25,12 @@ jobs:
 
       - name: Regenerate nix/deps.nix and compare
         run: |
-          # Regeneration is world-independent: every input is a pinned,
-          # immutable revision, so upstream releases and tag changes
-          # cannot change the output. This check never fails because
-          # upstream moved forward. It fails when reproduction itself
-          # breaks: a pinned revision that can no longer be fetched, a
-          # decayed tool or environment, or a manual edit of the
-          # committed file.
+          # The generator reads repository revisions from nimble.lock; it
+          # does not select newer package versions or follow current release
+          # tags. The diff detects differences between the generated Nix
+          # expressions and the committed file. Unfetchable revisions,
+          # generator failures, and tool or environment incompatibilities
+          # also fail this step.
           nix-shell -p nix-prefetch-git --run './tools/gen-nix-deps.sh nimble.lock /tmp/deps.nix.fresh'
           diff /tmp/deps.nix.fresh nix/deps.nix
 
@@ -72,9 +71,13 @@ jobs:
         uses: ./.github/actions/nimble-deps
         with:
           nimble-version: ${{ env.NIMBLE_VERSION }}
+          nim-version: ${{ env.NIM_VERSION }}
 
       - name: Build binaries
         run: make V=1 examples tools
+
+      - name: Audit installed deps
+        run: make audit-deps
 
       - name: Notify Discord
         if: always()

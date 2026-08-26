@@ -20,12 +20,10 @@ endif
 
 REQUIRED_NIMBLE_VERSION := $(shell grep -E '^const RequiredNimbleVersion\s*=' logos_delivery.nimble | grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"')
 
-# The pinned Nimble is in its own directory, first on PATH. Reason:
-# `nimble setup` re-links the shims of installed packages, and Nimble
-# ships itself as a package, so setup can replace ~/.nimble/bin/nimble
-# while that same binary runs. Nimble must not resolve through
-# ~/.nimble/bin. That directory stays on PATH, after the pinned
-# directory, for nph.
+# Put the version-specific Nimble directory before ~/.nimble/bin.
+# `nimble setup` may update package links under ~/.nimble/bin, including
+# the `nimble` link. The version-specific directory is outside that update
+# path. Keep ~/.nimble/bin later on PATH for tools such as nph.
 NIMBLE_TOOLDIR := $(HOME)/.local/nimble-$(REQUIRED_NIMBLE_VERSION)/bin
 export PATH := $(NIMBLE_TOOLDIR):$(HOME)/.nimble/bin:$(PATH)
 
@@ -35,13 +33,16 @@ NPH := $(HOME)/.nimble/bin/nph
 
 NIMBLE := nimble
 
-# Custom tasks re-solve dependencies. Nimble parses global flags placed
-# after the task name (parseFlag, actionCustom branch,
-# src/nimblepkg/options.nim:895, nimble v0.24.1). --useSystemNim stops
-# the task solve from selecting a nim and installing it into
-# nimbledeps: nimble.lock has no nim entry, so without this flag the
-# solve is free to pick any nim that satisfies "nim >= 2.2.4".
-NIMBLE_TASK_FLAGS := --useSystemNim
+# Nimble 0.24.1 custom tasks perform dependency solving. Global options
+# placed after the task name are parsed by Nimble (parseFlag/actionCustom,
+# src/nimblepkg/options.nim:895). Because nimble.lock has no `nim` entry,
+# --useSystemNim tells those solves to use the compiler on PATH instead of
+# installing another compatible Nim package into nimbledeps/. The same
+# --requires string that constrained setup constrains the task solves,
+# so a task cannot install content that setup did not. The variable is
+# recursively expanded: the file is read when a task runs, after the
+# setup rule wrote it.
+NIMBLE_TASK_FLAGS = --useSystemNim --requires "$$(cat requires.generated 2>/dev/null)"
 
 NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
 
@@ -89,37 +90,45 @@ endif
 logos_delivery.nims:
 	ln -s logos_delivery.nimble $@
 
-# The requires string for `nimble setup`: a projection of two
-# committed truths and one live observation.
-# - nimble.lock gives the revision of each package.
-# - logos_delivery.nimble gives the packages that are pinned there
-#   already (not emitted).
-# - The upstream world, observed when the generator runs: does the tag
-#   that names the locked version point at the locked revision, and is
-#   the name in the Nimble registry with this URL. Both true: emitted
-#   as "name == version" (chronos == 4.2.4). Either false: emitted as
-#   "url#revision" (nim-secp256k1: no tags, so a version cannot select
-#   content there). Details: the header of scripts/gen_requires.nims.
-# A gitignored build artifact: written only when an input changes, and
-# read by every consumer (the setup rule here, and CI).
+# Generate supplemental requirements for `nimble setup` from:
+# - package versions and revisions recorded in nimble.lock;
+# - URLs already declared in logos_delivery.nimble, which are omitted from
+#   the generated string to avoid adding a second constraint; and
+# - registry URL and version-tag refs observed by the generator.
+#
+# When the registry URL and version tag both match the lock entry, the
+# generator emits "name == version" (e.g. chronos == 4.2.4). Otherwise it
+# emits "url#revision" (e.g. nim-secp256k1: no usable version tag). Nimble
+# 0.24.1 can
+# still discard a URL revision when it merges competing requirements for
+# the same package. The audit after setup detects that case.
+#
+# This ignored file is regenerated when absent or older than a listed
+# prerequisite. `make clean` removes it. CI invokes the generator directly
+# on every dependency-setup run.
 requires.generated: nimble.lock logos_delivery.nimble nix/deps.nix scripts/gen_requires.nims | install-nimble
 	nim e --hints:off scripts/gen_requires.nims
 
 $(NIMBLEDEPS_STAMP): requires.generated logos_delivery.nimble | install-nimble build-nph logos_delivery.nims
-	# Flags after the command (Nimble reinterprets pre-command flags on custom
-	# tasks as compilation flags). --useSystemNim: reuse the PATH nim, skip its
-	# unreliable locked checksum, and avoid Nimble >= 0.24 nim selection. Task
-	# invocations need the same flag: see NIMBLE_TASK_FLAGS.
+	# Options come after the command: Nimble reads pre-command options on
+	# custom tasks as compilation options. --useSystemNim uses the Nim
+	# compiler on PATH and omits Nim from the local dependency installation.
+	# Custom task invocations use the same option through NIMBLE_TASK_FLAGS.
 	$(NIMBLE) setup --localdeps -y --useSystemNim --requires "$$(cat requires.generated)"
 
-	# Verify: Nimble 0.24.x can install a different revision than a
-	# requirement names and exit with code 0 (a commit pin can lose
-	# against a competing requirement for the same package). The audit
-	# compares every installed revision with nimble.lock and fails the
-	# build on any difference. References: header of scripts/audit_deps.nims.
-	nim e --hints:off scripts/audit_deps.nims
+	$(MAKE) audit-deps
 
 	touch $@
+
+# Compare the installed package set and vcsRevision metadata with
+# nimble.lock. This detects the observed Nimble 0.24.1 case where a
+# solve exits successfully after selecting a different special revision.
+# The setup rule runs it after `nimble setup`, and CI runs it again after
+# the build and test steps, because custom tasks also solve and can
+# install. See scripts/audit_deps.nims for the matching rules.
+.PHONY: audit-deps
+audit-deps:
+	nim e --hints:off scripts/audit_deps.nims
 
 # Must be phony so the recipe always runs and the sub-make re-evaluates
 # BEARSSL_NIMBLEDEPS_DIR / NAT_TRAVERSAL_NIMBLEDEPS_DIR (parse-time variables)

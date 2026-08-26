@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
 # Installs a specific nimble version without using `nimble install nimble`.
 #
-# This script installs one Nimble version into its own directory:
-# ~/.local/nimble-<version>/bin. The Makefile puts that directory first
-# on PATH.
+# Install the selected executable under:
 #
-# The script does not install into ~/.nimble/bin. Nimble manages that
-# directory. During setup, Nimble refreshes the links for installed
-# packages. Nimble can be installed as a package itself. In that case,
-# the refresh can replace ~/.nimble/bin/nimble with a link to the
-# packaged copy, also when that file is the binary that runs. A
-# directory that Nimble does not manage does not have this risk.
+#   ~/.local/nimble-<version>/bin
 #
-# Steps:
-#   1. If the requested version is already installed, stop.
-#   2. Download the official prebuilt release binary (best effort).
-#   3. If the download does not succeed, build Nimble from source.
+# The Makefile places this directory before ~/.nimble/bin on PATH. Nimble
+# may update package links under ~/.nimble/bin during setup, including the
+# `nimble` link when Nimble is installed as a package. Installing the
+# selected executable outside that directory avoids writing through that
+# link.
+#
+# Procedure:
+#   1. Reuse an executable already reporting the requested version.
+#   2. On a recognized platform, try the version-specific GitHub release
+#      asset.
+#   3. If download, extraction, or execution fails, build the requested
+#      tag from source with the Nim compiler on PATH.
 
 set -e
 
@@ -28,7 +29,7 @@ fi
 NIMBLE_DIR="${HOME}/.local/nimble-${NIMBLE_VERSION}/bin"
 NIMBLE_BIN="${NIMBLE_DIR}/nimble"
 
-# Step 1: stop if the requested version is already installed.
+# Step 1: reuse the executable if it reports the requested version.
 if [ -x "${NIMBLE_BIN}" ]; then
   nimble_ver=$("${NIMBLE_BIN}" --version 2>/dev/null \
     | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
@@ -40,13 +41,12 @@ fi
 
 mkdir -p "${NIMBLE_DIR}"
 
-# Step 2: download the official prebuilt release binary.
-# This step is a best-effort optimization. It saves the time of a source
-# build, which is some minutes for each CI job. The step is safe if it
-# decays: if the asset name changes, if the platform is not in the table,
-# or if the download does not succeed, the script continues to the source
-# build in step 3. This step cannot make the result incorrect. It can
-# only lose its speed advantage.
+# Step 2: try the version-specific prebuilt release asset.
+#
+# The URL identifies a release under github.com/nim-lang/nimble. After
+# extraction, the script checks that the binary can execute --version.
+# It does not independently verify an archive checksum. A failed
+# download, extraction, or execution falls through to the source build.
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64)  ASSET="linux_x64" ;;
   Linux-aarch64) ASSET="linux_aarch64" ;;
@@ -70,7 +70,8 @@ if [ -n "${ASSET}" ]; then
   fi
 fi
 
-# Step 3: build Nimble from source with the Nim compiler on PATH.
+# Step 3: clone the requested version tag and build it with the Nim
+# compiler resolved from PATH.
 NIM_BIN="$(command -v nim)"
 
 WORK_DIR="$(mktemp -d)"
@@ -84,13 +85,13 @@ git clone --depth=1 --branch "v${NIMBLE_VERSION}" \
 
 echo "Building nimble ${NIMBLE_VERSION} with $("${NIM_BIN}" --version | head -1)..."
 cd "${WORK_DIR}/nimble"
-# Nim reads nim.cfg and config.nims from the current directory. These
-# files set the vendor paths for the build.
+# Nim reads nim.cfg and config.nims from the current directory; these
+# files add the vendored module paths used by the build.
 "${NIM_BIN}" c -d:release --path:src \
   -o:"${WORK_DIR}/nimble_new" src/nimble.nim
 
-# Copy first, then rename in one operation. This prevents an ETXTBSY
-# error if the old binary runs at this time.
+# Stage the executable under a separate pathname, then rename it over
+# the target. This avoids writing the target executable in place.
 cp "${WORK_DIR}/nimble_new" "${NIMBLE_BIN}.new.$$"
 mv -f "${NIMBLE_BIN}.new.$$" "${NIMBLE_BIN}"
 

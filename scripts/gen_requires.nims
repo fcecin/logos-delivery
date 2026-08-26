@@ -1,61 +1,51 @@
-# NOTE: this script exists to satisfy Nimble 0.24.1. The file:line
-# references in the comments below point into that Nimble version's
-# source (https://github.com/nim-lang/nimble).
+# Workaround for Nimble 0.24.1 lock handling when requirements use URLs.
+# File-and-line references below refer to that Nimble version:
+# https://github.com/nim-lang/nimble
 #
-# Writes requires.generated: one Nimble requires string, built from
-# nimble.lock. The Makefile and CI pass the file's content to
-# `nimble setup --requires`. This makes the lock binding: Nimble itself
-# does not apply the lock when a requirement uses a URL. Its lock
-# matching compares package names only (solveLockFileDeps,
-# src/nimblepkg/nimblesat.nim:1226).
+# This script writes requires.generated, a supplemental requirements string
+# passed to:
 #
-# Run with:
+#   nimble setup --requires "$(cat requires.generated)"
 #
-#   nim e scripts/gen_requires.nims
+# Nimble matches lock entries by package name in solveLockFileDeps
+# (src/nimblepkg/nimblesat.nim:1226). A URL requirement therefore may not
+# receive the revision recorded under the package name in nimble.lock.
+# This script derives additional constraints from the lock. It does not
+# guarantee which revision Nimble selects; scripts/audit_deps.nims checks
+# the installed metadata after setup.
 #
-# The script carries no package knowledge of its own. Its inputs:
-# - nimble.lock: the revision and version of each package.
-# - logos_delivery.nimble: the packages that are already pinned by URL
-#   there. Those packages are not emitted: a second constraint for the
-#   same package can change how Nimble merges.
-# - The upstream world, observed when the script runs. The lock fixes
-#   which content must arrive; the observation selects the requirement
-#   form that can deliver that content in the world that `nimble setup`
-#   is about to resolve against. Two facts per package:
-#     tagged:   the tag that names the locked version points at the
-#               locked revision (`git ls-remote --tags` — the command
-#               Nimble uses to enumerate versions: getTagsListRemote,
-#               src/nimblepkg/download.nim:208).
-#     registry: the name is in Nimble's packages.json with the lock's
-#               URL (src/nimblepkg/config.nim:25). A name that is
-#               absent, or resolves to a different repository, cannot
-#               be used as a name.
+# Inputs:
+# - nimble.lock supplies the expected package name, version, repository
+#   URL, and VCS revision.
+# - logos_delivery.nimble supplies explicit URL requirements. The generator
+#   omits matching URLs rather than adding a second root constraint.
+# - The configured registry mirrors supply the current name-to-URL mapping.
+# - `git ls-remote --tags` supplies the current tag refs for each
+#   repository.
 #
-# Emission rule, per lock entry:
-# - pinned by URL in logos_delivery.nimble  -> not emitted
-# - not tagged, or not in the registry      -> "url#revision"
-# - otherwise                               -> "name == version"
-#   (The name form merges correctly with range requirements from other
-#   packages. Nimble can drop a commit pin in that merge instead:
-#   normalizeSpecialVersions, src/nimblepkg/nimblesat.nim:663. For a
-#   package that another package requires by name, the url#revision
-#   form is therefore not always binding; the audit is the guarantee
-#   that the build received the locked content.)
+# Emission rule for each git lock entry not already required by URL:
+# - registry URL matches and the version tag points to the locked revision:
+#     "name == version"
+# - either condition does not match:
+#     "url#revision"
 #
-# The script also compares nimble.lock with nix/deps.nix in both
-# directions: same entries, same revisions. A difference stops the
-# build: the two files must agree. A failed
-# observation (network, registry unreachable) stops the build: the
-# script never guesses.
+# Known limitation: Nimble 0.24.1 can normalize a `url#revision`
+# requirement together with a competing name requirement and retain the
+# other special version. The post-setup audit rejects the result when its
+# recorded vcsRevision differs from nimble.lock.
 #
-# Outputs, written only by this script:
-# - requires.generated (gitignored): the requires string. Written with
-#   a rename, and only when every check passes, so a failed run cannot
-#   leave a fresh-looking artifact behind.
-# - observed.generated (gitignored): the facts observed for each
-#   package at the moment of decision. A diagnostic record. Nothing
-#   reads it, and it must stay that way: consuming a recorded
-#   observation instead of observing is how staleness starts.
+# The script also compares the normalized repository URL and revision
+# mappings in nimble.lock and nix/deps.nix in both directions for the git
+# dependencies it processes. A missing URL or differing revision causes a
+# nonzero exit. Registry-fetch and tag-query failures also cause a nonzero
+# exit.
+#
+# Outputs:
+# - requires.generated: written through a temporary path and rename only
+#   after validation succeeds.
+# - observed.generated: diagnostic output from the current invocation.
+#   Build and setup rules do not consume this file. It may be written even
+#   when a later validation error causes the invocation to fail.
 
 import std/[json, strutils, algorithm, sets, tables]
 
@@ -73,9 +63,8 @@ proc normUrl(url: string): string =
   result.removeSuffix("/")
   result.removeSuffix(".git")
 
-# The URLs that logos_delivery.nimble requires in URL form. A quoted
-# string that starts with http, on a line that is not a comment, is a
-# URL requirement; the base URL ends at '#' or at a space.
+# Return normalized base URLs from quoted URL requirements on non-comment
+# lines. A fragment or version constraint terminates the base URL.
 proc urlPinsFrom(content: string): HashSet[string] =
   for line in content.splitLines():
     if line.strip(trailing = false).startsWith("#"):
@@ -96,7 +85,8 @@ proc urlPinsFrom(content: string): HashSet[string] =
 proc nimbleUrlPins(path: string): HashSet[string] =
   urlPinsFrom(readFile(path))
 
-# {normalized url: rev} from the fetchgit blocks of nix/deps.nix.
+# Map normalized repository URLs to revisions from fetchgit blocks in
+# nix/deps.nix.
 proc nixEntriesFrom(content: string): Table[string, string] =
   var url = ""
   for line in content.splitLines():
@@ -110,8 +100,8 @@ proc nixEntriesFrom(content: string): Table[string, string] =
 proc nixEntries(path: string): Table[string, string] =
   nixEntriesFrom(readFile(path))
 
-# {lowercased name: normalized url} from Nimble's registry, with alias
-# entries followed one level, as Nimble does.
+# Map lowercase package names to normalized repository URLs. Resolve one
+# level of registry alias.
 proc registryFrom(jsonContent: string): Table[string, string] =
   var byName = initTable[string, JsonNode]()
   for p in parseJson(jsonContent):
@@ -135,11 +125,10 @@ proc registryUrls(): Table[string, string] =
   echo "gen_requires: cannot fetch the Nimble registry: " & lastErr
   quit(1)
 
-# Observe: does the tag that names the locked version point at the
-# locked revision? Plain and annotated tags both count (the "^{}"
-# variant is the target of an annotated tag). The comparison is against
-# exact expected lines, so no pattern language is involved. git's own
-# low-speed limits bound a stalled connection.
+# Return true when a plain tag or the peeled target of an annotated tag
+# for `version` equals `rev`. The comparison uses complete ls-remote
+# output lines. The git invocation below requests an abort when transfer
+# speed remains below one byte per second for 60 seconds.
 proc tagLineMatches(lsRemoteOutput, version, rev: string): bool =
   var expected: HashSet[string]
   for prefix in ["refs/tags/", "refs/tags/v"]:
@@ -208,8 +197,8 @@ proc main() =
 
   var outParts: seq[string]
   var record = @[
-    "# Diagnostic record: the facts scripts/gen_requires.nims observed",
-    "# on its last run. Written on every run; read by nothing.",
+    "# Diagnostic output from the most recent gen_requires.nims invocation.",
+    "# Not consumed by dependency setup or build rules.",
   ]
   for e in candidates:
     let inRegistry = registry.getOrDefault(e.name.toLowerAscii(), "") == normUrl(e.url)
@@ -244,10 +233,10 @@ proc main() =
   echo requires
 
 #---------------------------------------------------------------------
-# Self-test: checks the parsing procs above on each invocation.
+# Self-tests for the parsing helpers. Executed before main().
 #---------------------------------------------------------------------
 proc selfTest() =
-  # Mixed case and ".git" as this repository really uses them.
+  # Cover a mixed-case owner and the optional ".git" suffix.
   doAssert normUrl("https://github.com/NagyZoltanPeter/nim-brokers.git") ==
     "https://github.com/nagyzoltanpeter/nim-brokers"
   doAssert normUrl("https://github.com/vacp2p/nim-boringssl") ==
@@ -270,8 +259,8 @@ proc selfTest() =
 """)
   doAssert nix["https://github.com/status-im/nim-chronos"] ==
     "45f43a9ad8bd8bcf5903b42f365c1c879bd54240"
-  # A plain tag (libp2p v2.0.0) and an annotated tag's "^{}" target
-  # (brokers v3.3.0) both match; both lines are real ls-remote output.
+  # These tag lines were captured from the referenced repositories: a
+  # plain tag, then the peeled target of an annotated tag.
   doAssert tagLineMatches(
     "c43199378f46d0aaf61be1cad1ee1d63e8f665d6\trefs/tags/v2.0.0",
     "2.0.0", "c43199378f46d0aaf61be1cad1ee1d63e8f665d6")

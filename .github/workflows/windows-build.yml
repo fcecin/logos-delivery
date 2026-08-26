@@ -96,6 +96,7 @@ jobs:
       uses: ./.github/actions/nimble-deps
       with:
         nimble-version: ${{ env.NIMBLE_VERSION }}
+        nim-version: ${{ env.NIM_VERSION }}
         cache: 'false'
         extra-path: ${{ github.workspace }}/.nim_runtime/bin
         make-args: CC=gcc
@@ -117,6 +118,9 @@ jobs:
       run: |
         export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
         make liblogosdelivery STATIC=0 V=1 -j
+
+    - name: Audit installed deps
+      run: make audit-deps
 
     - name: Check Executable
       run: |

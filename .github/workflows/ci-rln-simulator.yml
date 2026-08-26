@@ -126,12 +126,16 @@ jobs:
         uses: ./.github/actions/nimble-deps
         with:
           nimble-version: ${{ env.NIMBLE_VERSION }}
+          nim-version: ${{ env.NIM_VERSION }}
 
       - name: Build wakunode2
         run: |
           make -j${NPROC} V=1 POSTGRES=1 \
             NIMFLAGS="-d:disableMarchNative -d:chronicles_colors:none" \
             wakunode2
+
+      - name: Audit installed deps
+        run: make audit-deps
 
       - name: Build local Docker image
         run: |
