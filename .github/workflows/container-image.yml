@@ -67,7 +67,6 @@ jobs:
           nim-version: ${{ env.NIM_VERSION }}
 
       - name: Build binaries
-        id: build
         if: ${{ steps.secrets.outcome == 'success' }}
         # Sequential make invocations: wakunode2 and logosdeliverynode each run
         # via `nimble <task>`. Under a single `make -j` the two nimble
@@ -80,6 +79,14 @@ jobs:
           make -j${NPROC} V=1 POSTGRES=1 NIMFLAGS="-d:disableMarchNative -d:chronicles_colors:none" wakunode2
           make -j${NPROC} V=1 POSTGRES=1 NIMFLAGS="-d:disableMarchNative -d:chronicles_colors:none" logosdeliverynode
 
+      - name: Audit installed deps
+        if: ${{ steps.secrets.outcome == 'success' }}
+        run: make audit-deps
+
+      - name: Build and push images
+        id: build
+        if: ${{ steps.secrets.outcome == 'success' }}
+        run: |
           SHORT_REF=$(git rev-parse --short HEAD)
 
           TAG=$([ "${PR_NUMBER}" == "" ] && echo "${SHORT_REF}" || echo "${PR_NUMBER}")
@@ -101,10 +108,6 @@ jobs:
           QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
           QUAY_USER: ${{ secrets.QUAY_USER }}
           PR_NUMBER: ${{ inputs.image_tag}}
-
-      - name: Audit installed deps
-        if: ${{ steps.secrets.outcome == 'success' }}
-        run: make audit-deps
 
       - name: Comment PR
         uses: thollander/actions-comment-pull-request@v2

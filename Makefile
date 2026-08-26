@@ -37,14 +37,14 @@ NIMBLE := nimble
 # placed after the task name are parsed by Nimble (parseFlag/actionCustom,
 # src/nimblepkg/options.nim:895). Because nimble.lock has no `nim` entry,
 # --useSystemNim tells those solves to use the compiler on PATH instead of
-# installing another compatible Nim package into nimbledeps/. The same
-# --requires string that constrained setup constrains the task solves,
-# so a task cannot install content that setup did not. The variable is
-# recursively expanded: the file is read when a task runs, after the
-# setup rule wrote it.
-# A missing requires.generated must fail the task, not degrade it: the
-# sentinel is not a valid requirement, so Nimble rejects it loudly.
-NIMBLE_TASK_FLAGS = --useSystemNim --requires "$$(cat requires.generated || echo missing_requires_generated)"
+# installing another compatible Nim package into nimbledeps/. Task
+# solves receive the same --requires string as setup; the post-task
+# audit verifies the installed revisions. The variable is recursively
+# expanded: the file is read when a task runs, after the setup rule
+# wrote it.
+# Every target that runs a task depends on build-deps, so make wrote
+# requires.generated before any task reads it.
+NIMBLE_TASK_FLAGS = --useSystemNim --requires "$$(cat requires.generated)"
 
 NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
 
@@ -403,7 +403,7 @@ clean:
 ###################
 .PHONY: docs coverage
 
-docs: | build deps
+docs: | build-deps build deps
 	echo -e $(BUILD_MSG) "build/$@" && \
 		$(NIMBLE) doc --run --index:on --project --out:.gh-pages logos-delivery/logos-delivery.nim logos_delivery.nims $(NIMBLE_TASK_FLAGS)
 
@@ -605,25 +605,25 @@ endif
 liblogosdelivery-android-arm64: ANDROID_ARCH=aarch64-linux-android
 liblogosdelivery-android-arm64: CPU=arm64
 liblogosdelivery-android-arm64: ABIDIR=arm64-v8a
-liblogosdelivery-android-arm64: | liblogosdelivery-android-precheck build deps
+liblogosdelivery-android-arm64: | liblogosdelivery-android-precheck build-deps build deps
 	$(MAKE) build-liblogosdelivery-for-android-arch ANDROID_ARCH=$(ANDROID_ARCH) CROSS_TARGET=$(ANDROID_ARCH) CPU=$(CPU) ABIDIR=$(ABIDIR) ANDROID_COMPILER=$(ANDROID_ARCH)$(ANDROID_TARGET)-clang
 
 liblogosdelivery-android-amd64: ANDROID_ARCH=x86_64-linux-android
 liblogosdelivery-android-amd64: CPU=amd64
 liblogosdelivery-android-amd64: ABIDIR=x86_64
-liblogosdelivery-android-amd64: | liblogosdelivery-android-precheck build deps
+liblogosdelivery-android-amd64: | liblogosdelivery-android-precheck build-deps build deps
 	$(MAKE) build-liblogosdelivery-for-android-arch ANDROID_ARCH=$(ANDROID_ARCH) CROSS_TARGET=$(ANDROID_ARCH) CPU=$(CPU) ABIDIR=$(ABIDIR) ANDROID_COMPILER=$(ANDROID_ARCH)$(ANDROID_TARGET)-clang
 
 liblogosdelivery-android-x86: ANDROID_ARCH=i686-linux-android
 liblogosdelivery-android-x86: CPU=i386
 liblogosdelivery-android-x86: ABIDIR=x86
-liblogosdelivery-android-x86: | liblogosdelivery-android-precheck build deps
+liblogosdelivery-android-x86: | liblogosdelivery-android-precheck build-deps build deps
 	$(MAKE) build-liblogosdelivery-for-android-arch ANDROID_ARCH=$(ANDROID_ARCH) CROSS_TARGET=$(ANDROID_ARCH) CPU=$(CPU) ABIDIR=$(ABIDIR) ANDROID_COMPILER=$(ANDROID_ARCH)$(ANDROID_TARGET)-clang
 
 liblogosdelivery-android-arm: ANDROID_ARCH=armv7a-linux-androideabi
 liblogosdelivery-android-arm: CPU=arm
 liblogosdelivery-android-arm: ABIDIR=armeabi-v7a
-liblogosdelivery-android-arm: | liblogosdelivery-android-precheck build deps
+liblogosdelivery-android-arm: | liblogosdelivery-android-precheck build-deps build deps
 	$(MAKE) build-liblogosdelivery-for-android-arch ANDROID_ARCH=$(ANDROID_ARCH) CROSS_TARGET=armv7-linux-androideabi CPU=$(CPU) ABIDIR=$(ABIDIR) ANDROID_COMPILER=$(ANDROID_ARCH)$(ANDROID_TARGET)-clang
 
 liblogosdelivery-android:
@@ -658,13 +658,13 @@ build-liblogosdelivery-for-ios-arch:
 liblogosdelivery-ios-device: IOS_ARCH=arm64
 liblogosdelivery-ios-device: IOS_SDK=iphoneos
 liblogosdelivery-ios-device: IOS_SDK_PATH=$(call get_ios_sdk_path,iphoneos)
-liblogosdelivery-ios-device: | liblogosdelivery-ios-precheck build deps
+liblogosdelivery-ios-device: | liblogosdelivery-ios-precheck build-deps build deps
 	$(MAKE) build-liblogosdelivery-for-ios-arch IOS_ARCH=$(IOS_ARCH) IOS_SDK=$(IOS_SDK) IOS_SDK_PATH=$(IOS_SDK_PATH)
 
 liblogosdelivery-ios-simulator: IOS_ARCH=arm64
 liblogosdelivery-ios-simulator: IOS_SDK=iphonesimulator
 liblogosdelivery-ios-simulator: IOS_SDK_PATH=$(call get_ios_sdk_path,iphonesimulator)
-liblogosdelivery-ios-simulator: | liblogosdelivery-ios-precheck build deps
+liblogosdelivery-ios-simulator: | liblogosdelivery-ios-precheck build-deps build deps
 	$(MAKE) build-liblogosdelivery-for-ios-arch IOS_ARCH=$(IOS_ARCH) IOS_SDK=$(IOS_SDK) IOS_SDK_PATH=$(IOS_SDK_PATH)
 
 liblogosdelivery-ios:
