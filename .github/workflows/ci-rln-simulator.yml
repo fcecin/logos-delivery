@@ -128,14 +128,10 @@ jobs:
           echo "$HOME/.nimble/bin" >> $GITHUB_PATH
           echo "$HOME/.local/nimble-${{ env.NIMBLE_VERSION }}/bin" >> $GITHUB_PATH
 
-      - name: Generate requires string
-        run: python3 scripts/gen_requires.py > requires.generated
-
       - name: Install nimble deps
         uses: ./.github/actions/nimble-deps
         with:
           nimble-version: ${{ env.NIMBLE_VERSION }}
-          cache-key: ${{ runner.os }}-nimbledeps-v4-nimble${{ env.NIMBLE_VERSION }}-${{ hashFiles('requires.generated', 'logos_delivery.nimble', 'BearSSL.mk', 'Nat.mk') }}
 
       - name: Build wakunode2
         run: |

@@ -96,6 +96,7 @@ jobs:
       uses: ./.github/actions/nimble-deps
       with:
         nimble-version: ${{ env.NIMBLE_VERSION }}
+        cache: 'false'
         extra-path: ${{ github.workspace }}/.nim_runtime/bin
         make-args: CC=gcc
 

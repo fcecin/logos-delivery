@@ -50,15 +50,7 @@ jobs:
           docker:
           - 'docker/**'
 
-    - name: Generate requires string
-      run: python3 scripts/gen_requires.py > requires.generated
-
-    - name: Compute dependency cache hash
-      id: deps-hash
-      run: echo "hash=${{ hashFiles('requires.generated', 'logos_delivery.nimble', 'BearSSL.mk', 'Nat.mk') }}" >> $GITHUB_OUTPUT
-
     outputs:
-      deps_hash: ${{ steps.deps-hash.outputs.hash }}
       common: ${{ steps.filter.outputs.common }}
       v2: ${{ steps.filter.outputs.v2 }}
       docker: ${{ steps.filter.outputs.docker }}
@@ -88,7 +80,6 @@ jobs:
         uses: ./.github/actions/nimble-deps
         with:
           nimble-version: ${{ env.NIMBLE_VERSION }}
-          cache-key: ${{ runner.os }}-nimbledeps-v4-nimble${{ env.NIMBLE_VERSION }}-${{ needs.changes.outputs.deps_hash }}
 
       - name: Build binaries
         # -j1: `all` builds wakunode2 and liblogosdelivery, each via `nimble
@@ -143,7 +134,6 @@ jobs:
         uses: ./.github/actions/nimble-deps
         with:
           nimble-version: ${{ env.NIMBLE_VERSION }}
-          cache-key: ${{ runner.os }}-nimbledeps-v4-nimble${{ env.NIMBLE_VERSION }}-${{ needs.changes.outputs.deps_hash }}
 
       - name: Run tests
         run: |
@@ -201,7 +191,7 @@ jobs:
   lint:
     name: "Lint"
     runs-on: ubuntu-22.04
-    needs: [build, changes]
+    needs: build
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -216,7 +206,6 @@ jobs:
         uses: ./.github/actions/nimble-deps
         with:
           nimble-version: ${{ env.NIMBLE_VERSION }}
-          cache-key: ${{ runner.os }}-nimbledeps-v4-nimble${{ env.NIMBLE_VERSION }}-${{ needs.changes.outputs.deps_hash }}
 
       - name: Build nph
         run: |
