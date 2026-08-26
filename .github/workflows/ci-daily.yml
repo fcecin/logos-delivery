@@ -11,9 +11,29 @@ env:
   NIMFLAGS: "--parallelBuild:${NPROC} --colors:off -d:chronicles_colors:none -d:disableMarchNative"
   NIM_PARAMS: "-d:disableMarchNative"
   NIM_VERSION: '2.2.4'
-  NIMBLE_VERSION: '0.22.3'
+  NIMBLE_VERSION: '0.24.1'
 
 jobs:
+  deps-freshness:
+    name: "nix/deps.nix freshness"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v27
+
+      - name: Regenerate nix/deps.nix and compare
+        run: |
+          # The generator reads repository revisions from nimble.lock; it
+          # does not select newer package versions or follow current release
+          # tags. The diff detects differences between the generated Nix
+          # expressions and the committed file. Unfetchable revisions,
+          # generator failures, and tool or environment incompatibilities
+          # also fail this step.
+          nix-shell -p nix-prefetch-git --run './tools/gen-nix-deps.sh nimble.lock /tmp/deps.nix.fresh'
+          diff /tmp/deps.nix.fresh nix/deps.nix
+
   build:
     strategy:
       fail-fast: false
@@ -34,11 +54,6 @@ jobs:
           nim-version: ${{ env.NIM_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Nimble ${{ env.NIMBLE_VERSION }}
-        run: |
-          cd /tmp && nimble install "nimble@${{ env.NIMBLE_VERSION }}" -y
-          echo "$HOME/.nimble/bin" >> $GITHUB_PATH
-
       - name: Get submodules hash
         id: submodules
         run: |
@@ -52,28 +67,17 @@ jobs:
             .git/modules
           key: ${{ runner.os }}-vendor-modules-${{ steps.submodules.outputs.hash }}
 
-      - name: Cache nimble deps
-        id: cache-nimbledeps
-        uses: actions/cache@v3
-        with:
-          path: |
-            nimbledeps/
-            nimble.paths
-          key: ${{ runner.os }}-nimbledeps-v2-nimble${{ env.NIMBLE_VERSION }}-${{ hashFiles('nimble.lock', 'BearSSL.mk', 'Nat.mk') }}
-
       - name: Install nimble deps
-        if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
-        run: |
-          # nim's source tree checksums differently across platforms, so its
-          # locked checksum is unreliable. --useSystemNim uses the CI nim and
-          # skips that check, while still verifying every other locked dep.
-          nimble setup --localdeps -y --useSystemNim
-          make rebuild-nat-libs-nimbledeps
-          make rebuild-bearssl-nimbledeps
-          touch nimbledeps/.nimble-setup
+        uses: ./.github/actions/nimble-deps
+        with:
+          nimble-version: ${{ env.NIMBLE_VERSION }}
+          nim-version: ${{ env.NIM_VERSION }}
 
       - name: Build binaries
         run: make V=1 examples tools
+
+      - name: Audit installed deps
+        run: make audit-deps
 
       - name: Notify Discord
         if: always()
