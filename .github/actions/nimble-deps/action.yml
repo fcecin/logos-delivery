@@ -52,7 +52,17 @@ runs:
         path: |
           nimbledeps/
           nimble.paths
-        key: ${{ runner.os }}-nimbledeps-v4-nimble${{ inputs.nimble-version }}-${{ hashFiles('requires.generated', 'logos_delivery.nimble', 'BearSSL.mk', 'Nat.mk') }}
+        key: ${{ runner.os }}-nimbledeps-v5-nimble${{ inputs.nimble-version }}-${{ hashFiles('requires.generated', 'nimble.lock', 'logos_delivery.nimble', 'BearSSL.mk', 'Nat.mk') }}
+
+    - name: Mark restored deps current
+      if: ${{ inputs.cache != 'false' && steps.cache.outputs.cache-hit == 'true' }}
+      shell: bash
+      # The restored setup stamp keeps its archived time, and the fresh
+      # requires.generated above would make the Makefile run setup again.
+      # A cache hit means the resolution inputs are identical (they are
+      # the cache key), and the audit step below verifies the content, so
+      # setup has nothing to add. The touch makes the stamp current.
+      run: touch nimbledeps/.nimble-setup
 
     - name: Install nimble deps
       if: ${{ inputs.cache == 'false' || steps.cache.outputs.cache-hit != 'true' }}

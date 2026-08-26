@@ -99,10 +99,12 @@ proc main() =
   var installedByUrl = initTable[string, (string, string)]()
   var installedByName = initTable[string, (string, string)]()
   var dirs: seq[string]
+  var metaless: seq[string]
   for path in listDirs(pkgs2):
     let d = path.split('/')[^1]
     let metaPath = path & "/nimblemeta.json"
     if not fileExists(metaPath):
+      metaless.add(d)
       continue
     let meta = parseJson(readFile(metaPath))
     let rev = metaField(meta, "vcsRevision")
@@ -148,6 +150,9 @@ proc main() =
   for d in dirs:
     if d notin matchedDirs:
       bad.add(d & ": installed but not in nimble.lock")
+  metaless.sort()
+  for d in metaless:
+    bad.add(d & ": installed without nimblemeta.json")
 
   for b in bad:
     echo "audit: " & b

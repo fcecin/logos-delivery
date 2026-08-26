@@ -59,11 +59,15 @@ if [ -n "${ASSET}" ]; then
   URL="https://github.com/nim-lang/nimble/releases/download/v${NIMBLE_VERSION}/nimble-${ASSET}.tar.gz"
   echo "Downloading prebuilt nimble ${NIMBLE_VERSION} (${ASSET})..."
   if curl -fsSL "${URL}" | tar -xz -C "${NIMBLE_DIR}"; then
-    "${NIMBLE_BIN}" --version | head -1
-    echo "Nimble ${NIMBLE_VERSION} installed to ${NIMBLE_BIN}"
-    exit 0
+    if "${NIMBLE_BIN}" --version >/dev/null 2>&1; then
+      "${NIMBLE_BIN}" --version | head -1
+      echo "Nimble ${NIMBLE_VERSION} installed to ${NIMBLE_BIN}"
+      exit 0
+    fi
+    echo "Prebuilt binary does not run, falling back to source build." >&2
+  else
+    echo "Prebuilt download failed, falling back to source build." >&2
   fi
-  echo "Prebuilt download failed, falling back to source build." >&2
 fi
 
 # Step 3: build Nimble from source with the Nim compiler on PATH.

@@ -122,12 +122,6 @@ jobs:
           nim-version: ${{ env.NIM_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Nimble ${{ env.NIMBLE_VERSION }}
-        run: |
-          scripts/install_nimble.sh "${{ env.NIMBLE_VERSION }}"
-          echo "$HOME/.nimble/bin" >> $GITHUB_PATH
-          echo "$HOME/.local/nimble-${{ env.NIMBLE_VERSION }}/bin" >> $GITHUB_PATH
-
       - name: Install nimble deps
         uses: ./.github/actions/nimble-deps
         with:
