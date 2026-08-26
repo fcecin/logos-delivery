@@ -129,13 +129,13 @@ jobs:
           make -j${NPROC} POSTGRES=1 CI=false wakunode2
           make -j${NPROC} CI=false chat2
           make -j${NPROC} POSTGRES=1 CI=false logosdeliverynode
-
-      - name: Audit installed deps
-        run: make audit-deps
           tar -cvzf ${{steps.vars.outputs.waku}} ./build/
 
           make -j${NPROC} POSTGRES=1 CI=false liblogosdelivery
           make -j${NPROC} POSTGRES=1 CI=false STATIC=1 liblogosdelivery
+
+      - name: Audit installed deps
+        run: make audit-deps
 
       - name: Create distributable liblogosdelivery package
         run: |
