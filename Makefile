@@ -33,17 +33,6 @@ NPH := $(HOME)/.nimble/bin/nph
 
 NIMBLE := nimble
 
-# Nimble 0.24.1 custom tasks perform dependency solving. Global options
-# placed after the task name are parsed by Nimble (parseFlag/actionCustom,
-# src/nimblepkg/options.nim:895). Because nimble.lock has no `nim` entry,
-# --useSystemNim tells those solves to use the compiler on PATH instead of
-# installing another compatible Nim package into nimbledeps/. Task
-# solves receive the same --requires string as setup; the post-task
-# audit verifies the installed revisions. The variable is recursively
-# expanded: the file is read when a task runs, after the setup rule
-# wrote it.
-# Every target that runs a task depends on build-deps, so make wrote
-# requires.generated before any task reads it.
 NIMBLE_TASK_FLAGS = --useSystemNim --requires "$$(cat requires.generated)"
 
 NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
