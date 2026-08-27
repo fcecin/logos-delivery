@@ -90,9 +90,6 @@ logos_delivery.nims:
 # When the registry URL and version tag both match the lock entry, the
 # generator emits "name == version" (e.g. chronos == 4.2.4). Otherwise it
 # emits "url#revision" (e.g. nim-secp256k1: no usable version tag).
-# Nimble 0.24.1 can still discard a URL revision when it merges competing
-# requirements for the same package. The audit after setup detects that
-# case.
 #
 # This ignored file is regenerated when absent or older than a listed
 # prerequisite. `make clean` removes it. CI invokes the generator directly
