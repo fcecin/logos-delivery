@@ -32,12 +32,15 @@ requires "nim >= 2.2.4",
   "faststreams",
   # Networking & P2P
   "https://github.com/vacp2p/nim-libp2p.git#v2.0.0",
-  "eth",
+  # 0.9.0 is the locked version; an unversioned "eth" resolves to nim-eth HEAD,
+  # which no longer ships eth/p2p/discoveryv5/enr.
+  "eth == 0.9.0",
   "nat_traversal",
   "dnsdisc",
   "dnsclient",
   "httputils >= 0.4.1",
-  "websock >= 0.3.0",
+  # < 0.4.2: websock 0.4.2 requires chronos >= 4.4.0 (chronos is pinned < 4.4.0).
+  "websock >= 0.3.0 & < 0.4.2",
   # Cryptography
   "nimcrypto == 0.6.4", # 0.6.4 used in libp2p. Version 0.7.3 makes test to crash on Ubuntu.
   "secp256k1",
@@ -193,7 +196,7 @@ proc buildMobileAndroid(srcDir = ".", params = "") =
     mkDir outDir
 
   exec "nim c" & " --out:" & outDir &
-    "/liblogosdelivery.so --threads:on --app:lib --opt:speed --noMain --mm:refc -d:chronicles_sinks=textlines[dynamic] --header -d:chronosEventEngine=epoll --passL:-L" &
+    "/liblogosdelivery.so --threads:on --app:lib --opt:speed --noMain --mm:refc -d:chronicles_sinks=textlines[dynamic] --header -d:chronosEventEngine=epoll -d:discv5_protocol_id=d5waku --passL:-L" &
     outdir & " --passL:-lrln --passL:-llog --cpu:" & cpu & " --nimMainPrefix:liblogosdelivery --os:android -d:androidNDK " & params &
     getNimParams() & " " & srcDir & "/liblogosdelivery.nim"
 
