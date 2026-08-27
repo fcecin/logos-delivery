@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
 # Installs a specific nimble version without using `nimble install nimble`.
 #
-# `nimble install nimble` is inherently fragile:
-#   - ETXTBSY: overwriting the running nimble binary in pkgs2/
-#   - JSON parse failures with older nimble versions reading packages_official.json
+# Install the selected executable under:
 #
-# Strategy:
-#   1. If the right version is already at ~/.nimble/bin/nimble → done.
-#   2. If a previously-compiled binary exists in pkgs2/ → re-link it.
-#   3. Otherwise: clone the nimble git repo, init submodules, build with nim,
-#      and atomically replace the target (mv avoids ETXTBSY on the old binary).
+#   ~/.local/nimble-<version>/bin
+#
+# The Makefile places this directory before ~/.nimble/bin on PATH. Nimble
+# may update package links under ~/.nimble/bin during setup, including the
+# `nimble` link when Nimble is installed as a package. Installing the
+# selected executable outside that directory avoids writing through that
+# link.
+#
+# Procedure:
+#   1. Reuse an executable already reporting the requested version.
+#   2. On a recognized platform, try the version-specific GitHub release
+#      asset.
+#   3. If download, extraction, or execution fails, build the requested
+#      tag from source with the Nim compiler on PATH.
 
 set -e
 
@@ -19,9 +26,10 @@ if [ -z "${NIMBLE_VERSION}" ]; then
   exit 1
 fi
 
-NIMBLE_BIN="${HOME}/.nimble/bin/nimble"
+NIMBLE_DIR="${HOME}/.local/nimble-${NIMBLE_VERSION}/bin"
+NIMBLE_BIN="${NIMBLE_DIR}/nimble"
 
-# 1. Already installed at the right version?
+# Step 1: reuse the executable if it reports the requested version.
 if [ -x "${NIMBLE_BIN}" ]; then
   nimble_ver=$("${NIMBLE_BIN}" --version 2>/dev/null \
     | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
@@ -31,21 +39,40 @@ if [ -x "${NIMBLE_BIN}" ]; then
   fi
 fi
 
-# 2. Already compiled into pkgs2/ from a previous (possibly partial) run?
-PKGS2_NIMBLE=$(ls -dt "${HOME}/.nimble/pkgs2/nimble-${NIMBLE_VERSION}-"*/nimble \
-  2>/dev/null | head -1 || true)
-if [ -n "${PKGS2_NIMBLE}" ] && [ -x "${PKGS2_NIMBLE}" ]; then
-  echo "Nimble ${NIMBLE_VERSION} found in pkgs2, re-linking to ${NIMBLE_BIN}."
-  mkdir -p "${HOME}/.nimble/bin"
-  ln -sf "${PKGS2_NIMBLE}" "${NIMBLE_BIN}"
-  exit 0
+mkdir -p "${NIMBLE_DIR}"
+
+# Step 2: try the version-specific prebuilt release asset.
+#
+# The URL identifies a release under github.com/nim-lang/nimble. After
+# extraction, the script checks that the binary can execute --version.
+# It does not independently verify an archive checksum. A failed
+# download, extraction, or execution falls through to the source build.
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64)  ASSET="linux_x64" ;;
+  Linux-aarch64) ASSET="linux_aarch64" ;;
+  Darwin-arm64)  ASSET="macosx_aarch64" ;;
+  Darwin-x86_64) ASSET="macosx_x64" ;;
+  MINGW*-x86_64|MSYS*-x86_64) ASSET="windows_x64" ;;
+  *)             ASSET="" ;;
+esac
+if [ -n "${ASSET}" ]; then
+  URL="https://github.com/nim-lang/nimble/releases/download/v${NIMBLE_VERSION}/nimble-${ASSET}.tar.gz"
+  echo "Downloading prebuilt nimble ${NIMBLE_VERSION} (${ASSET})..."
+  if curl -fsSL "${URL}" | tar -xz -C "${NIMBLE_DIR}"; then
+    if "${NIMBLE_BIN}" --version >/dev/null 2>&1; then
+      "${NIMBLE_BIN}" --version | head -1
+      echo "Nimble ${NIMBLE_VERSION} installed to ${NIMBLE_BIN}"
+      exit 0
+    fi
+    echo "Prebuilt binary does not run, falling back to source build." >&2
+  else
+    echo "Prebuilt download failed, falling back to source build." >&2
+  fi
 fi
 
-# 3. Build from source.
-NIM_BIN="${HOME}/.nimble/bin/nim"
-if [ ! -x "${NIM_BIN}" ]; then
-  NIM_BIN="$(command -v nim)"
-fi
+# Step 3: clone the requested version tag and build it with the Nim
+# compiler resolved from PATH.
+NIM_BIN="$(command -v nim)"
 
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
@@ -58,12 +85,13 @@ git clone --depth=1 --branch "v${NIMBLE_VERSION}" \
 
 echo "Building nimble ${NIMBLE_VERSION} with $("${NIM_BIN}" --version | head -1)..."
 cd "${WORK_DIR}/nimble"
-# nim reads nim.cfg / config.nims in the current dir, which sets vendor paths.
+# Nim reads nim.cfg and config.nims from the current directory; these
+# files add the vendored module paths used by the build.
 "${NIM_BIN}" c -d:release --path:src \
   -o:"${WORK_DIR}/nimble_new" src/nimble.nim
 
-mkdir -p "${HOME}/.nimble/bin"
-# Atomic rename: avoids ETXTBSY when the old binary at NIMBLE_BIN is still running.
+# Stage the executable under a separate pathname, then rename it over
+# the target. This avoids writing the target executable in place.
 cp "${WORK_DIR}/nimble_new" "${NIMBLE_BIN}.new.$$"
 mv -f "${NIMBLE_BIN}.new.$$" "${NIMBLE_BIN}"
 
