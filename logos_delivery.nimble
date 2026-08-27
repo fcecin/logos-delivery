@@ -79,8 +79,7 @@ requires "https://github.com/logos-messaging/nim-ffi#07ee8e1d6500762bab290465457
 # No tag at pinning time; revision was 19 commits after v0.3.1-rc.0.
 requires "https://github.com/logos-messaging/nim-sds.git#b12f5ee07c5b764303b51fb948b32a4ade1de3b5"
 
-# v3.3.0: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.3.0
-requires "https://github.com/NagyZoltanPeter/nim-brokers.git#19565dd80621e33f6da396ef3fb07c379d55c324"
+requires "https://github.com/NagyZoltanPeter/nim-brokers.git#v3.3.0"
 
 # v0.5.1: https://github.com/vacp2p/nim-lsquic/releases/tag/v0.5.1
 # libp2p requires "lsquic >= 0.4.1" by name. With Nimble 0.24.1, a
