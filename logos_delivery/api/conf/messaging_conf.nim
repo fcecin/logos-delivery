@@ -37,6 +37,8 @@ type MessagingClientConf* = object
     ## RLN epoch size, in seconds.
   reliabilityEnabled* {.name: "reliability".}: Opt[bool]
     ## Enable store-based send reliability.
+  anonymityLevel* {.name: "anonymity-level".}: Opt[AnonymityLevel]
+    ## Sender anonymity policy; anything but `None` mounts mix and sends through it.
   store*: Opt[bool] ## Enable the store protocol.
   storenode* {.name: "storenode".}: Opt[string]
   storeMessageDbUrl* {.name: "store-message-db-url".}: Opt[string]
@@ -128,6 +130,10 @@ proc toWakuNodeConf*(
     conf.rlnRelayChainId = self.rlnChainId.get()
   if self.rlnEpochSizeSec.isSome():
     conf.rlnEpochSizeSec = Opt.some(self.rlnEpochSizeSec.get().uint64)
+  if self.anonymityLevel.isSome():
+    conf.anonymityLevel = self.anonymityLevel.get()
+    if self.anonymityLevel.get() != AnonymityLevel.None:
+      conf.mix = Opt.some(true)
   if self.logLevel.isSome():
     conf.logLevel = self.logLevel.get()
   if self.logFormat.isSome():

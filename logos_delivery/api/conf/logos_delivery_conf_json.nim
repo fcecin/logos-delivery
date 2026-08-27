@@ -91,6 +91,11 @@ proc parseFlatConf(
   if kernel.preset.len > 0:
     messaging = merge(?resolvePreset(kernel.preset), messaging)
 
+  # [Legacy flat JSON config] `anonymityLevel` parses onto the kernel blob, but the
+  # send path reads it from the messaging conf, so lift it across.
+  if messaging.anonymityLevel.isNone():
+    messaging.anonymityLevel = Opt.some(kernel.anonymityLevel)
+
   return ok(
     LogosDeliveryConf(
       kernelConf: KernelConf(kernel),

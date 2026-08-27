@@ -22,7 +22,7 @@ import
 logScope:
   topics = "waku mix"
 
-const minMixPoolSize = 4
+const MinMixPoolSize* = 4
 
 type
   WakuMix* = ref object of MixProtocol
@@ -100,7 +100,7 @@ proc new*(
 
   processBootNodes(bootnodes, peermgr, m)
 
-  if m.nodePool.len < minMixPoolSize:
+  if m.nodePool.len < MinMixPoolSize:
     warn "publishing with mix won't work until atleast 3 mix nodes in node pool"
   return ok(m)
 
