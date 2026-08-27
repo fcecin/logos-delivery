@@ -15,7 +15,7 @@ installDirs = @["library", "migrations", "tools"]
 
 const RequiredNimVersion = "2.2.4"
   ## This is the nim compiler version that we are working on. Other versions may behave differently.
-const RequiredNimbleVersion = "0.22.3"
+const RequiredNimbleVersion = "0.24.1"
   ## Enforced nimble version to ensure a reproducible flow
 
 ### Dependencies
@@ -31,7 +31,6 @@ requires "nim >= 2.2.4",
   "toml_serialization",
   "faststreams",
   # Networking & P2P
-  "https://github.com/vacp2p/nim-libp2p.git#v2.0.0",
   # 0.9.0 is the locked version; an unversioned "eth" resolves to nim-eth HEAD,
   # which no longer ships eth/p2p/discoveryv5/enr.
   "eth == 0.9.0",
@@ -46,7 +45,6 @@ requires "nim >= 2.2.4",
   "secp256k1",
   "bearssl",
   # RPC & APIs
-  "https://github.com/status-im/nim-json-rpc.git#v0.6.1",
   "presto",
   "web3",
   # Database
@@ -65,21 +63,42 @@ requires "nim >= 2.2.4",
   "testutils",
   "unittest2"
 
-# Packages not on nimble (use git URLs)
+# URL requirements described above.
+# For commit-pinned releases, the preceding link records the associated
+# upstream release tag at the time the revision was selected.
 
-# v0.3.1-rc.0
+# v2.0.0: https://github.com/vacp2p/nim-libp2p/releases/tag/v2.0.0
+requires "https://github.com/vacp2p/nim-libp2p.git#c43199378f46d0aaf61be1cad1ee1d63e8f665d6"
+
+# v0.6.1: https://github.com/status-im/nim-json-rpc/releases/tag/v0.6.1
+requires "https://github.com/status-im/nim-json-rpc.git#6f1fff8ba685c9192fab153a9d66484ad9066e78"
+
+# v0.3.1-rc.0: https://github.com/logos-messaging/nim-ffi/releases/tag/v0.3.1-rc.0
 requires "https://github.com/logos-messaging/nim-ffi#07ee8e1d6500762bab290465457a8d23559de546"
 
+# No tag at pinning time; revision was 19 commits after v0.3.1-rc.0.
 requires "https://github.com/logos-messaging/nim-sds.git#b12f5ee07c5b764303b51fb948b32a4ade1de3b5"
 
 requires "https://github.com/NagyZoltanPeter/nim-brokers.git#v3.3.0"
 
-requires "https://github.com/vacp2p/nim-lsquic.git#v0.5.1"
-# v0.0.11: pins nim-lsquic's floating "nim-boringssl >= 0.0.4" range. Earlier
-# releases export the bundled BoringSSL symbols from shared libraries, letting
-# a host-process OpenSSL interpose them (issue #4085).
-requires "https://github.com/vacp2p/nim-boringssl#346429e4cda48e775f2d1eb3ccb8757edf4f3648"
+# v0.5.1: https://github.com/vacp2p/nim-lsquic/releases/tag/v0.5.1
+# libp2p requires "lsquic >= 0.4.1" by name. With Nimble 0.24.1, a
+# `#commit` constraint can be discarded while merging these requirements;
+# the exact numeric constraint was observed to select 0.5.1.
+requires "https://github.com/vacp2p/nim-lsquic.git == 0.5.1"
+
+# v0.0.11: https://github.com/vacp2p/nim-boringssl/releases/tag/v0.0.11
+# nim-lsquic requires "nim-boringssl >= 0.0.4". Releases before 0.0.11
+# export bundled BoringSSL symbols from shared libraries, permitting symbol
+# interposition by a host-process OpenSSL (issue #4085). In the tested
+# Nimble 0.24.1 resolution, combining a special `#commit` constraint with
+# lsquic's range selected v0.0.4; the numeric constraint selects 0.0.11.
+requires "https://github.com/vacp2p/nim-boringssl == 0.0.11"
+
+# No tag at pinning time; revision was one commit after v0.2.0.
 requires "https://github.com/vacp2p/nim-jwt.git#057ec95eb5af0eea9c49bfe9025b3312c95dc5f2"
+
+# No tag was recorded for this revision at pinning time.
 requires "https://github.com/logos-co/nim-libp2p-mix#380513117d556bf8f70066f5e72a7fd74fe36ba6"
 
 proc getMyCPU(): string =

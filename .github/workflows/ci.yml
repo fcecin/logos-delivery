@@ -16,7 +16,7 @@ env:
   NIMFLAGS: "--parallelBuild:${NPROC} --colors:off -d:chronicles_colors:none -d:disableMarchNative"
   NIM_PARAMS: "-d:disableMarchNative"
   NIM_VERSION: '2.2.4'
-  NIMBLE_VERSION: '0.22.3'
+  NIMBLE_VERSION: '0.24.1'
 
 jobs:
   changes: # changes detection
@@ -33,11 +33,13 @@ jobs:
         filters: |
           common:
           - '.github/workflows/**'
+          - '.github/actions/**'
+          - 'BearSSL.mk'
+          - 'Nat.mk'
+          - 'nix/**'
           - 'nimble.lock'
           - 'logos_delivery.nimble'
           - 'Makefile'
-          - 'BearSSL.mk'
-          - 'Nat.mk'
           - 'vendor/zerokit'
           - 'config.nims'
           - 'scripts/**'
@@ -80,30 +82,11 @@ jobs:
           nim-version: ${{ env.NIM_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Nimble ${{ env.NIMBLE_VERSION }}
-        run: |
-          cd /tmp && nimble install "nimble@${{ env.NIMBLE_VERSION }}" -y
-          echo "$HOME/.nimble/bin" >> $GITHUB_PATH
-
-      - name: Cache nimble deps
-        id: cache-nimbledeps
-        uses: actions/cache@v3
-        with:
-          path: |
-            nimbledeps/
-            nimble.paths
-          key: ${{ runner.os }}-nimbledeps-v2-nimble${{ env.NIMBLE_VERSION }}-${{ hashFiles('nimble.lock', 'BearSSL.mk', 'Nat.mk') }}
-
       - name: Install nimble deps
-        if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
-        run: |
-          # nim's source tree checksums differently across platforms, so its
-          # locked checksum is unreliable. --useSystemNim uses the CI nim and
-          # skips that check, while still verifying every other locked dep.
-          nimble setup --localdeps -y --useSystemNim
-          make rebuild-nat-libs-nimbledeps
-          make rebuild-bearssl-nimbledeps
-          touch nimbledeps/.nimble-setup
+        uses: ./.github/actions/nimble-deps
+        with:
+          nimble-version: ${{ env.NIMBLE_VERSION }}
+          nim-version: ${{ env.NIM_VERSION }}
 
       - name: Build binaries
         # -j1: `all` builds wakunode2 and liblogosdelivery, each via `nimble
@@ -114,6 +97,9 @@ jobs:
         # own --parallelBuild still parallelizes compilation. Mirrors the test
         # job, which already forces -j1.
         run: make V=1 -j1 all
+
+      - name: Audit installed deps
+        run: make audit-deps
 
       # Publish the freshly built shared library so the interop-tests workflow
       # can run the wrapper suite against it without rebuilding. Only the Linux
@@ -156,11 +142,6 @@ jobs:
           nim-version: ${{ env.NIM_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Nimble ${{ env.NIMBLE_VERSION }}
-        run: |
-          cd /tmp && nimble install "nimble@${{ env.NIMBLE_VERSION }}" -y
-          echo "$HOME/.nimble/bin" >> $GITHUB_PATH
-
       - name: Setup Android NDK
         id: setup-ndk
         uses: nttld/setup-ndk@v1
@@ -174,31 +155,22 @@ jobs:
           path: ~/.cargo/bin/cross
           key: ${{ runner.os }}-cross-${{ hashFiles('scripts/build_rln_android.sh') }}
 
-      - name: Cache nimble deps
-        id: cache-nimbledeps
-        uses: actions/cache@v3
-        with:
-          path: |
-            nimbledeps/
-            nimble.paths
-          # Separate key: the android build rewrites the nimbledeps archives
-          # with the NDK compiler, so never share the host jobs' cache.
-          key: ${{ runner.os }}-nimbledeps-android-${{ matrix.target }}-v2-nimble${{ env.NIMBLE_VERSION }}-${{ hashFiles('nimble.lock', 'BearSSL.mk', 'Nat.mk') }}
-
       - name: Install nimble deps
-        if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
-        run: |
-          # nim's source tree checksums differently across platforms, so its
-          # locked checksum is unreliable. --useSystemNim uses the CI nim and
-          # skips that check, while still verifying every other locked dep.
-          nimble setup --localdeps -y --useSystemNim
-          touch nimbledeps/.nimble-setup
+        uses: ./.github/actions/nimble-deps
+        with:
+          nimble-version: ${{ env.NIMBLE_VERSION }}
+          nim-version: ${{ env.NIM_VERSION }}
+          # The NDK compiler rewrites the nimbledeps archives, so this job does not share the host jobs' cache.
+          cache: 'false'
 
       - name: Build liblogosdelivery for android-${{ matrix.target }}
         # -j1: see the build job.
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: make V=1 -j1 liblogosdelivery-android-${{ matrix.target }}
+
+      - name: Audit installed deps
+        run: make audit-deps
 
       - name: Upload android libraries
         uses: actions/upload-artifact@v4
@@ -228,30 +200,11 @@ jobs:
           nim-version: ${{ env.NIM_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Nimble ${{ env.NIMBLE_VERSION }}
-        run: |
-          cd /tmp && nimble install "nimble@${{ env.NIMBLE_VERSION }}" -y
-          echo "$HOME/.nimble/bin" >> $GITHUB_PATH
-
-      - name: Cache nimble deps
-        id: cache-nimbledeps
-        uses: actions/cache@v3
-        with:
-          path: |
-            nimbledeps/
-            nimble.paths
-          key: ${{ runner.os }}-nimbledeps-v2-nimble${{ env.NIMBLE_VERSION }}-${{ hashFiles('nimble.lock', 'BearSSL.mk', 'Nat.mk') }}
-
       - name: Install nimble deps
-        if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
-        run: |
-          # nim's source tree checksums differently across platforms, so its
-          # locked checksum is unreliable. --useSystemNim uses the CI nim and
-          # skips that check, while still verifying every other locked dep.
-          nimble setup --localdeps -y --useSystemNim
-          make rebuild-nat-libs-nimbledeps
-          make rebuild-bearssl-nimbledeps
-          touch nimbledeps/.nimble-setup
+        uses: ./.github/actions/nimble-deps
+        with:
+          nimble-version: ${{ env.NIMBLE_VERSION }}
+          nim-version: ${{ env.NIM_VERSION }}
 
       - name: Run tests
         run: |
@@ -267,6 +220,9 @@ jobs:
 
           make V=1 POSTGRES=$postgres_enabled test
           make V=1 POSTGRES=$postgres_enabled testwakunode2
+
+      - name: Audit installed deps
+        run: make audit-deps
 
   build-docker-image:
     needs: changes
@@ -320,30 +276,11 @@ jobs:
           nim-version: ${{ env.NIM_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Nimble ${{ env.NIMBLE_VERSION }}
-        run: |
-          cd /tmp && nimble install "nimble@${{ env.NIMBLE_VERSION }}" -y
-          echo "$HOME/.nimble/bin" >> $GITHUB_PATH
-
-      - name: Cache nimble deps
-        id: cache-nimbledeps
-        uses: actions/cache@v3
-        with:
-          path: |
-            nimbledeps/
-            nimble.paths
-          key: ${{ runner.os }}-nimbledeps-v2-nimble${{ env.NIMBLE_VERSION }}-${{ hashFiles('nimble.lock', 'BearSSL.mk', 'Nat.mk') }}
-
       - name: Install nimble deps
-        if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
-        run: |
-          # nim's source tree checksums differently across platforms, so its
-          # locked checksum is unreliable. --useSystemNim uses the CI nim and
-          # skips that check, while still verifying every other locked dep.
-          nimble setup --localdeps -y --useSystemNim
-          make rebuild-nat-libs-nimbledeps
-          make rebuild-bearssl-nimbledeps
-          touch nimbledeps/.nimble-setup
+        uses: ./.github/actions/nimble-deps
+        with:
+          nimble-version: ${{ env.NIMBLE_VERSION }}
+          nim-version: ${{ env.NIM_VERSION }}
 
       - name: Build nph
         run: |
@@ -356,3 +293,6 @@ jobs:
           echo "using nph at ${NPH}"
           "${NPH}" examples logos_delivery tests tools apps *.@(nim|nims|nimble)
           git diff --exit-code
+
+      - name: Audit installed deps
+        run: make audit-deps
