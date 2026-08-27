@@ -19,23 +19,6 @@ const RequiredNimbleVersion = "0.24.1"
   ## Enforced nimble version to ensure a reproducible flow
 
 ### Dependencies
-#
-# Dependency declarations use two forms:
-#
-# 1. Name requirements are exported to consumers of this package. Their
-#    ranges describe the versions those consumers may select. nimble.lock
-#    records the exact revisions used by this repository's builds.
-#    scripts/gen_requires.nims derives additional setup constraints from the
-#    lock; those generated constraints are not part of this package metadata.
-#    Exact `== version` requirements in this block are also exported to
-#    consumers, and their reasons are documented inline.
-#
-# 2. URL requirements identify dependencies by repository URL. A commit hash
-#    identifies a revision independently of tag movement, but availability
-#    still depends on the upstream repository retaining that object and
-#    history. For lsquic and boringssl, exact numeric versions are used
-#    because Nimble 0.24.1 has been observed to discard a special `#commit`
-#    constraint when merging it with another package's name-based range.
 requires "nim >= 2.2.4",
   "chronos >= 4.2.0 & < 4.4.0",
   "taskpools",
