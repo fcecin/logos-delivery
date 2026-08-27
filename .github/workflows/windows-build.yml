@@ -120,7 +120,9 @@ jobs:
         make liblogosdelivery STATIC=0 V=1 -j
 
     - name: Audit installed deps
-      run: make audit-deps
+      run: |
+        export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$PATH"
+        make audit-deps
 
     - name: Check Executable
       run: |
