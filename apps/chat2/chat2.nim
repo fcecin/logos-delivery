@@ -325,7 +325,7 @@ proc processInput(rfd: AsyncFD, rng: crypto.Rng) {.async.} =
   # A static extip is known up front. The NATService maps ports when
   # the node starts.
   let (extIp, extTcpPort) =
-    if natStrategy.kind == NatExtIp:
+    if natStrategy.kind == NatStrategyKind.ExtIp:
       (
         Opt.some(natStrategy.extIp),
         Opt.some(Port(uint16(conf.tcpPort) + conf.portsShift)),

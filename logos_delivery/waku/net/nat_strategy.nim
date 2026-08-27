@@ -7,44 +7,44 @@ import std/[net, strutils]
 import results
 
 type
-  NatStrategyKind* = enum
-    NatNone
-    NatAny
-    NatUpnp
-    NatPmp
-    NatExtIp
+  NatStrategyKind* {.pure.} = enum
+    None
+    Any
+    Upnp
+    Pmp
+    ExtIp
 
   NatStrategy* = object
     case kind*: NatStrategyKind
-    of NatExtIp:
+    of ExtIp:
       extIp*: IpAddress
     else:
       discard
 
 func `$`*(strategy: NatStrategy): string =
   case strategy.kind
-  of NatNone:
-    "none"
-  of NatAny:
-    "any"
-  of NatUpnp:
-    "upnp"
-  of NatPmp:
-    "pmp"
-  of NatExtIp:
-    "extip:" & $strategy.extIp
+  of None:
+    return "none"
+  of Any:
+    return "any"
+  of Upnp:
+    return "upnp"
+  of Pmp:
+    return "pmp"
+  of ExtIp:
+    return "extip:" & $strategy.extIp
 
 func parseNatStrategy*(value: string): Result[NatStrategy, string] =
-  let normalized = value.toLowerAscii()
+  let normalized = value.strip().toLowerAscii()
   case normalized
   of "any":
-    ok(NatStrategy(kind: NatAny))
+    return ok(NatStrategy(kind: Any))
   of "none":
-    ok(NatStrategy(kind: NatNone))
+    return ok(NatStrategy(kind: None))
   of "upnp":
-    ok(NatStrategy(kind: NatUpnp))
+    return ok(NatStrategy(kind: Upnp))
   of "pmp":
-    ok(NatStrategy(kind: NatPmp))
+    return ok(NatStrategy(kind: Pmp))
   else:
     const ExtIpPrefix = "extip:"
     if not normalized.startsWith(ExtIpPrefix):
@@ -57,7 +57,7 @@ func parseNatStrategy*(value: string): Result[NatStrategy, string] =
       except ValueError:
         return err("not a valid IP address: " & ipString)
 
-    ok(NatStrategy(kind: NatExtIp, extIp: ip))
+    ok(NatStrategy(kind: ExtIp, extIp: ip))
 
 const DefaultNatDiscoveryTimeoutMs* = 1000'u32
   ## Node start awaits gateway discovery. miniupnpc waits the full timeout

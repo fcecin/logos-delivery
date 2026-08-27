@@ -19,19 +19,19 @@ logScope:
 const NatDiscoveryTimeout = DefaultNatDiscoveryTimeoutMs.int64.milliseconds
 
 proc natPortMapper*(strategy: NatStrategy): Opt[PortMapper] =
-  ## The libp2p port mapper for NatUpnp or NatPmp.
-  ## Resolve NatAny first with resolveNatStrategy.
+  ## The libp2p port mapper for the Upnp and Pmp strategies.
+  ## Resolve Any first with resolveNatStrategy.
   try:
     case strategy.kind
-    of NatUpnp:
-      Opt.some(PortMapper(UpnpMapper.new()))
-    of NatPmp:
-      Opt.some(PortMapper(NatPmpMapper.new()))
-    of NatAny, NatNone, NatExtIp:
-      Opt.none(PortMapper)
+    of NatStrategyKind.Upnp:
+      return Opt.some(PortMapper(UpnpMapper.new()))
+    of NatStrategyKind.Pmp:
+      return Opt.some(PortMapper(NatPmpMapper.new()))
+    of NatStrategyKind.Any, NatStrategyKind.None, NatStrategyKind.ExtIp:
+      return Opt.none(PortMapper)
   except ResourceExhaustedError as e:
     error "Failed to construct NAT port mapper", err = e.msg
-    Opt.none(PortMapper)
+    return Opt.none(PortMapper)
 
 type ProbeMapperFactory* =
   proc(strategy: NatStrategy): Opt[PortMapper] {.gcsafe, raises: [].}
@@ -56,13 +56,15 @@ proc resolveNatStrategy*(
     discoveryTimeout = NatDiscoveryTimeout,
     mapperFor: ProbeMapperFactory = nil,
 ): Future[NatStrategy] {.async: (raises: [CancelledError]).} =
-  ## Resolve NatAny with one startup probe: UPnP first, then NAT-PMP.
-  ## No answer resolves to NatNone. Every other kind passes through.
+  ## Resolve the Any strategy with one startup probe: UPnP first, then
+  ## NAT-PMP. No answer resolves to None. Every other kind passes through.
   ## Every constructed probe mapper is closed before this returns.
-  if strategy.kind != NatAny:
+  if strategy.kind != NatStrategyKind.Any:
     return strategy
 
-  for candidate in [NatStrategy(kind: NatUpnp), NatStrategy(kind: NatPmp)]:
+  for candidate in [
+    NatStrategy(kind: NatStrategyKind.Upnp), NatStrategy(kind: NatStrategyKind.Pmp)
+  ]:
     let mapper = (
       if mapperFor.isNil():
         natPortMapper(candidate)
@@ -77,17 +79,17 @@ proc resolveNatStrategy*(
     info "NAT gateway probe failed", strategy = $candidate, err = found.error
 
   warn "--nat any: no gateway answered discovery; continuing without port mapping"
-  NatStrategy(kind: NatNone)
+  return NatStrategy(kind: NatStrategyKind.None)
 
 proc natConfig*(
     strategy: NatStrategy, discoveryTimeout = NatDiscoveryTimeout
 ): Opt[NATConfig] =
-  ## The libp2p NATConfig for NatUpnp or NatPmp.
-  ## The NatExtIp address is static state in NetConfig.
+  ## The libp2p NATConfig for the Upnp and Pmp strategies.
+  ## The ExtIp address is static state in NetConfig.
   case strategy.kind
-  of NatUpnp:
-    Opt.some(upnpConfig(discoveryTimeout = discoveryTimeout))
-  of NatPmp:
-    Opt.some(natPmpConfig(discoveryTimeout = discoveryTimeout))
-  of NatAny, NatNone, NatExtIp:
-    Opt.none(NATConfig)
+  of NatStrategyKind.Upnp:
+    return Opt.some(upnpConfig(discoveryTimeout = discoveryTimeout))
+  of NatStrategyKind.Pmp:
+    return Opt.some(natPmpConfig(discoveryTimeout = discoveryTimeout))
+  of NatStrategyKind.Any, NatStrategyKind.None, NatStrategyKind.ExtIp:
+    return Opt.none(NATConfig)

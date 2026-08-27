@@ -100,7 +100,7 @@ proc networkConfiguration*(
   ## Only extip and the dns4 name vouch for an external IP here.
   ## NATService mappings arrive later through the mapper chain.
   var extIp =
-    if conf.natStrategy.kind == NatExtIp:
+    if conf.natStrategy.kind == NatStrategyKind.ExtIp:
       Opt.some(conf.natStrategy.extIp)
     else:
       Opt.none(IpAddress)

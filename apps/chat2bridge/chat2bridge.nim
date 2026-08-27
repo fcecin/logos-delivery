@@ -261,7 +261,7 @@ when isMainModule:
   ## A static extip is known up front. The NATService maps ports when
   ## the node starts, and the external port defaults to the bind port.
   let (nodev2ExtIp, extPort) =
-    if natStrategy.kind == NatExtIp:
+    if natStrategy.kind == NatStrategyKind.ExtIp:
       (
         Opt.some(natStrategy.extIp),
         Opt.some(Port(uint16(conf.libp2pTcpPort) + conf.portsShift)),
