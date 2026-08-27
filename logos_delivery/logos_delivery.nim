@@ -126,7 +126,7 @@ proc new*(
       if conf.entryLayer == EntryLayer.kernel:
         Opt.none(MessagingClientConf)
       else:
-        Opt.some(MessagingClientConf()),
+        Opt.some(MessagingClientConf(anonymityLevel: Opt.some(conf.anonymityLevel))),
     channelsConf:
       if conf.entryLayer == EntryLayer.channels:
         Opt.some(ReliableChannelManagerConf())

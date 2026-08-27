@@ -7,7 +7,7 @@
 ## so the messaging layer never inspects `waku.node` directly.
 {.push raises: [].}
 
-import std/[times, strutils]
+import std/[tables, times, strutils]
 import results, chronos
 
 import logos_delivery/waku/waku
@@ -23,6 +23,7 @@ import
     waku_lightpush/rpc,
     waku_lightpush/client,
     waku_lightpush/callbacks,
+    waku_mix,
   ]
 
 # WakuLightPushResult, PushMessageHandler, LightPushErrorCode (common) plus the
@@ -107,16 +108,61 @@ proc lightpushPeerAvailable*(self: Waku, shard: PubsubTopic): bool =
   ## True if a lightpush service peer is available for `shard`.
   return self.node.peerManager.selectPeer(WakuLightPushCodec, Opt.some(shard)).isSome()
 
+proc selectMixLightpushPeer*(self: Waku, shard: PubsubTopic): Opt[RemotePeerInfo] =
+  ## Picks a lightpush service peer for `shard` that is itself a mix node.
+  ## With `exit_is_dest` the lightpush server terminates the sphinx path, so
+  ## mix refuses any destination missing from the pool: a peer without a mix
+  ## public key can serve lightpush and still be unusable here.
+  ##
+  ## Follows `selectPeer`'s service-slot-first order on purpose. A statically
+  ## configured `--lightpushnode` lives in the slot and is invisible to
+  ## `selectPeers`: it enters the peer store from a bare multiaddr, with no
+  ## protocols and no shards, so both of that proc's filters drop it until
+  ## identify and waku-metadata have filled those books. Selecting only from
+  ## `selectPeers` would leave `mixReady` false on exactly the setup a mix
+  ## deployment uses. The slot's mix key is read back from the peer store,
+  ## since the slot itself holds a snapshot taken before discovery learned one.
+  let peerManager = self.node.peerManager
+  let slotted = peerManager.serviceSlots.getOrDefault(WakuLightPushCodec)
+  if not slotted.isNil():
+    let peer = peerManager.getPeer(slotted.peerId)
+    if peer.mixPubKey.isSome():
+      return Opt.some(peer)
+
+  for peer in peerManager.selectPeers(WakuLightPushCodec, Opt.some(shard)):
+    if peer.mixPubKey.isSome():
+      return Opt.some(peer)
+  return Opt.none(RemotePeerInfo)
+
+proc mixReady*(self: Waku, shard: PubsubTopic): bool =
+  ## True if mix can carry a publish for `shard` right now: mounted, enough
+  ## nodes in the pool to build a path, and a mix-capable exit to send to.
+  if self.node.wakuMix.isNil():
+    return false
+  if self.node.getMixNodePoolSize() < MinMixPoolSize:
+    return false
+  return self.selectMixLightpushPeer(shard).isSome()
+
 proc lightpushPublishToAny*(
-    self: Waku, shard: PubsubTopic, message: WakuMessage
+    self: Waku, shard: PubsubTopic, message: WakuMessage, mixify: bool = false
 ): Future[WakuLightPushResult] {.async.} =
   ## Selects a lightpush service peer for `shard` and publishes `message`
   ## through the node's lightpush flow. With RLN mounted the flow proves
   ## `message` only if it carries no proof, so an already-proven task reuses its
   ## nonce. Returns SERVICE_NOT_AVAILABLE when no peer is available.
-  let peer = self.node.peerManager.selectPeer(WakuLightPushCodec, Opt.some(shard)).valueOr:
+  let peerOpt =
+    if mixify:
+      self.selectMixLightpushPeer(shard)
+    else:
+      self.node.peerManager.selectPeer(WakuLightPushCodec, Opt.some(shard))
+  let peer = peerOpt.valueOr:
+    if mixify:
+      return lightpushResultServiceUnavailable(
+        "no mix-capable lightpush peer available for shard"
+      )
     return lightpushResultServiceUnavailable("no lightpush peer available for shard")
   try:
-    return await self.node.lightpushPublish(Opt.some(shard), message, Opt.some(peer))
+    return
+      await self.node.lightpushPublish(Opt.some(shard), message, Opt.some(peer), mixify)
   except CatchableError as e:
     return lightpushResultInternalError(e.msg)

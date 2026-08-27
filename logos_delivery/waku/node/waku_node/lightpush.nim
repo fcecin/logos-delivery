@@ -16,6 +16,7 @@ import
   libp2p/builders,
   libp2p/transports/tcptransport,
   libp2p/transports/wstransport,
+  libp2p/stream/connection,
   libp2p/utility,
   libp2p_mix
 
@@ -35,6 +36,56 @@ logScope:
   topics = "waku node lightpush api"
 
 const MountWithoutRelayError* = "cannot mount lightpush because relay is not mounted"
+
+const MixReplyTimeout* = chronos.seconds(5)
+  ## How long a mix-routed lightpush waits before giving up, so a broken path
+  ## costs one attempt instead of the whole send. Deliberately short: the send
+  ## service walks its tasks sequentially, so every message queued on the node
+  ## waits out this budget behind a stalled one.
+
+proc publishOverMix*(
+    node: WakuNode,
+    conn: Connection,
+    pubsubTopic: PubsubTopic,
+    message: WakuMessage,
+    replyTimeout: Duration = MixReplyTimeout,
+): Future[lightpush_protocol.WakuLightPushResult] {.async.} =
+  ## Publishes over an already-built mix connection under `replyTimeout`, and
+  ## returns within that budget no matter how the mix path misbehaves.
+  ## `replyTimeout` is a parameter only so tests can shorten it.
+  ##
+  ## Nothing below this bounds the wait. `MixEntryConnection.readOnce` blocks on
+  ## a future only the SURB reply completes, with no deadline, and mix dials its
+  ## first hop through `switch.dial` directly — bypassing the peer manager, and
+  ## so its `DefaultDialTimeout` — against a pool whose entries never expire.
+  ## Left unbounded, one dead mix node freezes the send-service loop for every
+  ## message on the node.
+  ##
+  ## Two details make the obvious spelling wrong. `chronos.withTimeout` cancels
+  ## the future and then *waits for that cancellation to finish*, so it inherits
+  ## any wedge in the unwind. And the unwind does wedge: the lightpush client
+  ## closes the connection with `closeWithEOF`, which reads the stream once more
+  ## for an EOF a mix connection never sends — if the stall was in the send, the
+  ## reply future is still pending and can no longer complete, because closing
+  ## cancelled the very closure that would have completed it. So: race a timer
+  ## rather than `withTimeout`, `reset` the stream so `closeWithEOF` takes its
+  ## reset-locally early return instead of re-reading, and let the cancellation
+  ## run detached so returning here never depends on it.
+  let publishFut =
+    node.wakuLightpushClient.publish(Opt.some(pubsubTopic), message, conn)
+  let deadline = sleepAsync(replyTimeout)
+  discard await race(FutureBase(publishFut), FutureBase(deadline))
+
+  if not publishFut.finished():
+    await conn.reset()
+    publishFut.cancelSoon()
+    debug "Mix lightpush timed out", pubsubTopic = pubsubTopic, timeout = replyTimeout
+    return lighpushErrorResult(
+      LightPushErrorCode.SERVICE_NOT_AVAILABLE, "Waku lightpush over mix timed out"
+    )
+
+  await deadline.cancelAndWait()
+  return await publishFut
 
 ## Waku lightpush
 proc mountLegacyLightPush*(
@@ -221,8 +272,7 @@ proc lightpushPublishHandler(
       target_peer_id = peer.peerId,
       msg_hash = msgHash,
       mixify = mixify
-    if defined(libp2p_mix_experimental_exit_is_dest) and mixify:
-      #indicates we want to use mix to send the message
+    if mixify:
       when defined(libp2p_mix_experimental_exit_is_dest):
         #TODO: How to handle multiple addresses?
         let conn = node.wakuMix.toConnection(
@@ -237,8 +287,13 @@ proc lightpushPublishHandler(
             "Waku lightpush with mix not available",
           )
 
-        return
-          await node.wakuLightpushClient.publish(Opt.some(pubsubTopic), message, conn)
+        return await node.publishOverMix(conn, pubsubTopic, message)
+      else:
+        # Never fall through to a clear-text publish: the caller asked for mix.
+        return lighpushErrorResult(
+          LightPushErrorCode.SERVICE_NOT_AVAILABLE,
+          "Waku lightpush with mix not available: built without libp2p_mix_experimental_exit_is_dest",
+        )
     else:
       return
         await node.wakuLightpushClient.publish(Opt.some(pubsubTopic), message, peer)
