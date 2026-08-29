@@ -99,7 +99,9 @@ echo "Building nimble ${NIMBLE_VERSION} with $("${NIM_BIN}" --version | head -1)
 cd "${WORK_DIR}/nimble"
 # Nim reads nim.cfg and config.nims from the current directory; these
 # files add the vendored module paths used by the build.
-"${NIM_BIN}" c -d:release --path:src \
+# A private cache: concurrent builds of the same sources otherwise share
+# one cache directory and corrupt each other.
+"${NIM_BIN}" c -d:release --path:src --nimcache:"${WORK_DIR}/nimcache" \
   -o:"${WORK_DIR}/nimble_new" src/nimble.nim
 
 # Stage the executable under a separate pathname, then rename it over

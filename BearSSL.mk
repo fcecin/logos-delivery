@@ -9,7 +9,7 @@
 ## bearssl (nimbledeps)  ##
 ###########################
 # Rebuilds libbearssl.a from the package installed by nimble under
-# nimbledeps/pkgs2/. Invoked via $(NIMBLEDEPS_STAMP) / build-deps.
+# nimbledeps/pkgs2/. Invoked via build-deps after ensure-nimbledeps.
 #
 # BEARSSL_NIMBLEDEPS_DIR is evaluated at parse time, so targets that
 # depend on it must be invoked via a recursive $(MAKE) call so the sub-make
