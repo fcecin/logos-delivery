@@ -4,14 +4,15 @@
 #
 # Run after setup or cache restoration:
 #
-#   nim e scripts/audit_deps.nims
+#   make audit-deps
 #
 # For each non-Nim lock entry, the audit locates an installed package by
 # normalized repository URL, falling back to the package name parsed from
 # its pkgs2 directory. Its nimblemeta.json vcsRevision must equal the
 # revision in nimble.lock. The reverse check rejects installed directories
 # that match no lock entry, and directories without nimblemeta.json are
-# also rejected.
+# also rejected. nimble.paths, which the compiler reads, must select every
+# lock package at the lock revision and nothing else.
 #
 # This validates Nimble's installed metadata. It does not hash or
 # otherwise compare every file in an installed package working tree.
@@ -66,7 +67,7 @@
 #   record f44cff901dff2a24fedcf4ef9e12a6f72355d58f and exit with
 #   status 0.
 
-import std/[json, strutils, algorithm, sets, tables]
+import std/[json, strutils, algorithm, sets, tables, os]
 
 let root = thisDir() & "/.."
 
@@ -94,6 +95,15 @@ proc nameFromDir(dir: string): string =
       return dir
     result = result[0 ..< cut]
 
+# One path form for comparison: absolute, forward slashes, no trailing
+# separator, lowercase on Windows.
+proc canon(path: string): string =
+  result = normalizedPath(absolutePath(path)).replace('\\', '/')
+  while result.len > 1 and result.endsWith("/"):
+    result.setLen(result.len - 1)
+  if hostOS == "windows":
+    result = result.toLowerAscii()
+
 proc main() =
   let lock = parseJson(readFile(root & "/nimble.lock"))["packages"]
   let pkgs2 = root & "/nimbledeps/pkgs2"
@@ -106,8 +116,8 @@ proc main() =
   var dirs: seq[string]
   var metaless: seq[string]
   for path in listDirs(pkgs2):
-    let d = path.split('/')[^1]
-    let metaPath = path & "/nimblemeta.json"
+    let d = lastPathPart(path)
+    let metaPath = path / "nimblemeta.json"
     if not fileExists(metaPath):
       metaless.add(d)
       continue
@@ -144,8 +154,7 @@ proc main() =
       continue
     matchedDirs.incl(hit[0])
     if hit[1] != want:
-      bad.add(name & ": lock has " & want & ", installed " & hit[0] &
-              " has " & hit[1])
+      bad.add(name & ": lock has " & want & ", installed " & hit[0] & " has " & hit[1])
     else:
       ok += 1
 
@@ -160,10 +169,74 @@ proc main() =
   for d in metaless:
     bad.add(d & ": installed without nimblemeta.json")
 
+  # nimble.paths is what the compiler reads (config.nims includes it). It
+  # must exist, disable the global Nimble path, and select every lock
+  # package at the lock revision from this tree's pkgs2 and nothing else.
+  # Metadata is read from the literal selected path.
+  let pathsFile = root & "/nimble.paths"
+  if not fileExists(pathsFile):
+    bad.add("nimble.paths: missing; run setup")
+  else:
+    var selected = initHashSet[string]()
+    var noNimblePath = false
+    var literals: seq[string]
+    for line in readFile(pathsFile).splitLines():
+      let l = line.strip()
+      if l.len == 0 or l.startsWith("#"):
+        continue
+      if l == "--noNimblePath":
+        noNimblePath = true
+        continue
+      if not (l.startsWith("--path:\"") and l.endsWith("\"")):
+        bad.add("nimble.paths contains an unsupported directive: " & l)
+        continue
+      # Nimble writes each path with strutils.escape, so a Windows path
+      # arrives with doubled backslashes. Decode with the inverse; the
+      # quotes are part of the encoded value.
+      try:
+        literals.add(unescape(l[7 .. ^1]))
+      except ValueError as exc:
+        bad.add(
+          "nimble.paths contains a malformed path directive: " & l & ": " & exc.msg
+        )
+
+    let pkgs2Abs = canon(pkgs2)
+    let rootAbs = canon(root)
+    for literal in literals:
+      let p = canon(literal)
+      if p == rootAbs:
+        continue # the project itself
+      if not p.startsWith(pkgs2Abs & "/"):
+        bad.add("nimble.paths selects " & p & ", outside " & pkgs2Abs)
+        continue
+      let d = p[pkgs2Abs.len + 1 .. ^1].split('/')[0]
+      let name = nameFromDir(d)
+      let metaPath = pkgs2 & "/" & d & "/nimblemeta.json"
+      if not fileExists(metaPath):
+        bad.add("nimble.paths selects " & d & ": no nimblemeta.json")
+        continue
+      let rev = metaField(parseJson(readFile(metaPath)), "vcsRevision")
+      if not lock.hasKey(name):
+        bad.add("nimble.paths selects " & d & ": not in nimble.lock")
+      elif lock[name]["vcsRevision"].getStr() != rev:
+        bad.add(
+          "nimble.paths selects " & d & " at " & rev & "; nimble.lock has " &
+            lock[name]["vcsRevision"].getStr()
+        )
+      selected.incl(name)
+    if not noNimblePath:
+      bad.add(
+        "nimble.paths: --noNimblePath missing; the global Nimble path is visible to the compiler"
+      )
+    for name in names:
+      if name != "nim" and name notin selected:
+        bad.add(name & ": in nimble.lock but not in nimble.paths")
+
   for b in bad:
     echo "audit: " & b
   echo "audit: " & $ok & "/" & $total & " installed packages match nimble.lock"
   if bad.len > 0:
+    echo "audit: the installed packages do not match nimble.lock. Delete nimbledeps/ and run make again."
     quit(1)
 
 #---------------------------------------------------------------------
@@ -179,13 +252,24 @@ proc selfTest() =
   doAssert nameFromDir("bearssl_pkey_decoder-0.1.0-8666edbc") == "bearssl_pkey_decoder"
   doAssert nameFromDir("nodash") == "nodash"
   # Both nimblemeta.json shapes: top-level and nested under metaData.
-  doAssert metaField(parseJson(
-    """{"vcsRevision": "d34aa46bf9d0a3ffff810fbd3c4d2fa024eb9368"}"""),
-    "vcsRevision") == "d34aa46bf9d0a3ffff810fbd3c4d2fa024eb9368"
-  doAssert metaField(parseJson(
-    """{"metaData": {"vcsRevision": "d34aa46bf9d0a3ffff810fbd3c4d2fa024eb9368"}}"""),
-    "vcsRevision") == "d34aa46bf9d0a3ffff810fbd3c4d2fa024eb9368"
+  doAssert metaField(
+    parseJson("""{"vcsRevision": "d34aa46bf9d0a3ffff810fbd3c4d2fa024eb9368"}"""),
+    "vcsRevision",
+  ) == "d34aa46bf9d0a3ffff810fbd3c4d2fa024eb9368"
+  doAssert metaField(
+    parseJson(
+      """{"metaData": {"vcsRevision": "d34aa46bf9d0a3ffff810fbd3c4d2fa024eb9368"}}"""
+    ),
+    "vcsRevision",
+  ) == "d34aa46bf9d0a3ffff810fbd3c4d2fa024eb9368"
   doAssert metaField(parseJson("""{}"""), "vcsRevision") == ""
+  # Nimble escapes the path it writes; a Windows value arrives doubled.
+  doAssert unescape("\"D:\\\\a\\\\b\"") == "D:\\a\\b"
+  # Containment compares canonical forms; a trailing separator is not a
+  # different directory, and a sibling with a longer name is not inside.
+  doAssert canon("/a/b/") == canon("/a/b")
+  doAssert not canon("/a/bc").startsWith(canon("/a/b") & "/")
+  doAssert canon("/a/b/c").startsWith(canon("/a/b") & "/")
 
 selfTest()
 main()

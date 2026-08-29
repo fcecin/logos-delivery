@@ -103,24 +103,29 @@ jobs:
     - name: Creating tmp directory
       run: mkdir -p tmp
 
+    # The required Nimble is under the Git Bash home; the MSYS2 HOME differs.
     - name: Building wakunode2.exe
       run: |
-        export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+        NIMBLE_ID=$(sed -n 's/^const RequiredNimbleRevision = "\([0-9a-f]*\)"/\1/p' logos_delivery.nimble)
+        export PATH="$(cygpath -u "$USERPROFILE")/.local/nimble-${NIMBLE_ID:-${{ env.NIMBLE_VERSION }}}/bin:$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
         make wakunode2 V=3 -j${{ env.NPROC }}
 
     - name: Building logosdeliverynode.exe
       run: |
-        export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+        NIMBLE_ID=$(sed -n 's/^const RequiredNimbleRevision = "\([0-9a-f]*\)"/\1/p' logos_delivery.nimble)
+        export PATH="$(cygpath -u "$USERPROFILE")/.local/nimble-${NIMBLE_ID:-${{ env.NIMBLE_VERSION }}}/bin:$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
         make logosdeliverynode POSTGRES=1 V=3 -j${{ env.NPROC }}
 
     - name: Building liblogosdelivery.dll
       run: |
-        export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+        NIMBLE_ID=$(sed -n 's/^const RequiredNimbleRevision = "\([0-9a-f]*\)"/\1/p' logos_delivery.nimble)
+        export PATH="$(cygpath -u "$USERPROFILE")/.local/nimble-${NIMBLE_ID:-${{ env.NIMBLE_VERSION }}}/bin:$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
         make liblogosdelivery STATIC=0 V=1 -j
 
     - name: Audit installed deps
       run: |
-        export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$PATH"
+        NIMBLE_ID=$(sed -n 's/^const RequiredNimbleRevision = "\([0-9a-f]*\)"/\1/p' logos_delivery.nimble)
+        export PATH="$(cygpath -u "$USERPROFILE")/.local/nimble-${NIMBLE_ID:-${{ env.NIMBLE_VERSION }}}/bin:$GITHUB_WORKSPACE/.nim_runtime/bin:$PATH"
         make audit-deps
 
     - name: Check Executable
