@@ -85,6 +85,7 @@ nimble.develop
 nimble.paths
 nimbledeps
 .nimbledeps-setup.lock
+.nimbledeps-prev
 
 **/anvil_state/state-deployed-contracts-mint-and-approved.json
 .gitnexus

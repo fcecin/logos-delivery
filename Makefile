@@ -139,7 +139,7 @@ build-deps: | ensure-nimbledeps
 clean:
 	rm -f requires.generated observed.generated 2> /dev/null || true
 	rm -rf build 2> /dev/null || true
-	rm -rf nimbledeps 2> /dev/null || true
+	rm -rf nimbledeps .nimbledeps-prev 2> /dev/null || true
 	rm -fr nimcache 2> /dev/null || true
 	rm nimble.paths 2> /dev/null || true
 	nimble clean

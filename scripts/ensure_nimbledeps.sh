@@ -4,10 +4,16 @@
 # Usage (from make): scripts/ensure_nimbledeps.sh
 #
 # Copies of the inputs that produced the current nimbledeps/ are kept in
-# nimbledeps/.inputs. When every copy matches byte for byte, only the audit
-# runs. Otherwise nimbledeps/ and nimble.paths are removed, Nimble installs
-# from empty, the audit runs, and the copies are written last. This is the
-# same rule as the CI cache key in .github/actions/nimble-deps.
+# nimbledeps/.inputs, the same rule as the CI cache key in
+# .github/actions/nimble-deps.
+#
+# A stamped generation whose copies match is audited and reused. Otherwise an
+# audited generation moves to .nimbledeps-prev/, uncommitted output is
+# discarded, and Nimble installs from empty. The audit, the copies and then
+# the stamp commit the replacement; only then is the previous generation
+# removed. A normal failure restores it. After an untrappable kill the next
+# run uses the stamp to keep the committed replacement or restore the
+# previous one.
 #
 # The lock, kept outside nimbledeps/, serializes generation replacement:
 # without it two Make processes with changed inputs would both remove the
@@ -24,6 +30,8 @@ MAKE_CMD="${MAKE:-make}"
 INPUTS="requires.generated nimble.lock logos_delivery.nimble BearSSL.mk Nat.mk"
 RECEIPTS="nimbledeps/.inputs"
 STAMP="nimbledeps/.nimble-setup"
+PREV=".nimbledeps-prev"
+QUARANTINED=0
 LOCK_DIR="${ROOT}/.nimbledeps-setup.lock"
 OWNER_FILE="${LOCK_DIR}/owner"
 WAIT_SECONDS=600
@@ -33,6 +41,45 @@ release_lock() {
     rm -f "${OWNER_FILE}"
     rmdir "${LOCK_DIR}" 2>/dev/null || true
   fi
+}
+
+# A generation is proven only when the audit passed and the copies committed.
+has_proven_generation() {
+  [ -f nimble.paths ] && [ -f "${STAMP}" ] || return 1
+  for f in ${INPUTS}; do
+    [ -f "${RECEIPTS}/${f}" ] || return 1
+  done
+}
+
+receipts_match_current() {
+  for f in ${INPUTS}; do
+    cmp -s "${f}" "${RECEIPTS}/${f}" || return 1
+  done
+}
+
+# Each half is restored only if it was moved: a run killed between the two
+# moves left the other half in place, and moving it back would lose it.
+restore_prev() {
+  if [ -d "${PREV}/nimbledeps" ]; then
+    rm -rf nimbledeps
+    mv "${PREV}/nimbledeps" nimbledeps
+  fi
+  if [ -f "${PREV}/nimble.paths" ]; then
+    rm -f nimble.paths
+    mv "${PREV}/nimble.paths" nimble.paths
+  fi
+  rmdir "${PREV}" 2>/dev/null || rm -rf "${PREV}"
+}
+
+cleanup() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ "${QUARANTINED}" -eq 1 ] && [ -d "${PREV}" ]; then
+    restore_prev
+    echo "nimbledeps: replacement failed, kept the previous generation" >&2
+  fi
+  release_lock
+  exit "${status}"
 }
 
 waited=0
@@ -59,30 +106,42 @@ while ! mkdir "${LOCK_DIR}" 2>/dev/null; do
   waited=$((waited + 1))
 done
 printf '%s\n' "$$" > "${OWNER_FILE}"
-trap release_lock EXIT
+trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 # NIMBLE_DIR would redirect Nimble away from nimbledeps/.
 unset NIMBLE_DIR
 
+# Recovered before the generation step, which needs the network: a failure
+# there must not leave the previous generation in .nimbledeps-prev/.
+if [ -d "${PREV}" ]; then
+  if has_proven_generation && receipts_match_current; then
+    rm -rf "${PREV}"
+  else
+    restore_prev
+    echo "nimbledeps: restored the previous generation" >&2
+  fi
+fi
+
 # Generated under the lock: both write fixed paths in this worktree.
 "${MAKE_CMD}" --no-print-directory logos_delivery.nims requires.generated
 
-current=1
-for f in ${INPUTS}; do
-  if ! cmp -s "${f}" "${RECEIPTS}/${f}"; then
-    current=0
-    break
-  fi
-done
-
-if [ "${current}" -eq 1 ]; then
+if has_proven_generation && receipts_match_current; then
   "${MAKE_CMD}" --no-print-directory audit-deps
   exit 0
 fi
 
-echo "nimbledeps: inputs changed, discarding nimbledeps/"
-rm -rf nimbledeps nimble.paths
+if has_proven_generation; then
+  echo "nimbledeps: inputs changed, quarantining nimbledeps/"
+  # Armed before the first move: a signal between the two must still roll back.
+  QUARANTINED=1
+  mkdir "${PREV}"
+  mv nimbledeps "${PREV}/nimbledeps"
+  mv nimble.paths "${PREV}/nimble.paths"
+else
+  echo "nimbledeps: inputs changed, discarding nimbledeps/ (nothing audited to keep)"
+  rm -rf nimbledeps nimble.paths
+fi
 mkdir -p nimbledeps
 
 # --useSystemNim uses the Nim compiler on PATH; --disableNimBinaries stops
@@ -98,3 +157,6 @@ fi
 mkdir -p "${RECEIPTS}"
 cp ${INPUTS} "${RECEIPTS}/"
 touch "${STAMP}"
+
+QUARANTINED=0
+rm -rf "${PREV}"

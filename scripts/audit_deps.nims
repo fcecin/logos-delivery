@@ -236,7 +236,7 @@ proc main() =
     echo "audit: " & b
   echo "audit: " & $ok & "/" & $total & " installed packages match nimble.lock"
   if bad.len > 0:
-    echo "audit: the installed packages do not match nimble.lock. Delete nimbledeps/ and run make again."
+    echo "audit: the installed packages do not match nimble.lock"
     quit(1)
 
 #---------------------------------------------------------------------
