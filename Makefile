@@ -21,22 +21,28 @@ endif
 REQUIRED_NIMBLE_VERSION := $(shell grep -E '^const RequiredNimbleVersion\s*=' logos_delivery.nimble | grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"')
 REQUIRED_NIMBLE_REVISION := $(shell grep -E '^const RequiredNimbleRevision\s*=' logos_delivery.nimble | grep -oE '"[0-9a-f]{40}"' | tr -d '"')
 
-# Put the revision-specific Nimble directory before ~/.nimble/bin.
-# `nimble setup` may update package links under ~/.nimble/bin, including
-# the `nimble` link. The revision-specific directory is outside that update
-# path. Keep ~/.nimble/bin later on PATH for tools such as nph.
+# make keeps its Nimble in ~/.local/nimble-<revision>/bin, written only by
+# scripts/install_nimble.sh: one directory per pinned Nimble, selected by
+# logos_delivery.nimble, outside the ~/.nimble/bin links that `nimble setup`
+# and Nim installers rewrite. Keep ~/.nimble/bin later on PATH for tools
+# such as nph.
 NIMBLE_TOOLDIR := $(HOME)/.local/nimble-$(REQUIRED_NIMBLE_REVISION)/bin
+ifndef ORIGINAL_PATH
+ORIGINAL_PATH := $(PATH)
+endif
+export ORIGINAL_PATH
 export PATH := $(NIMBLE_TOOLDIR):$(HOME)/.nimble/bin:$(PATH)
 
 # NIM binary location
 NIM_BINARY := $(shell which nim 2>/dev/null)
 NPH := $(HOME)/.nimble/bin/nph
 
-NIMBLE := nimble
+# NIMBLE_DIR would redirect Nimble away from nimbledeps/.
+NIMBLE := env -u NIMBLE_DIR nimble
 
-NIMBLE_TASK_FLAGS = --useSystemNim --requires "$$(cat requires.generated)"
-
-NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
+# A --requires value passed to a task is parsed as a task argument
+# (observed: it became the test name), so tasks get only these.
+NIMBLE_TASK_FLAGS = --useSystemNim --disableNimBinaries
 
 # Compilation parameters
 NIM_PARAMS ?=
@@ -98,38 +104,42 @@ logos_delivery.nims:
 requires.generated: nimble.lock logos_delivery.nimble nix/deps.nix scripts/gen_requires.nims | install-nimble
 	nim e --hints:off scripts/gen_requires.nims
 
-$(NIMBLEDEPS_STAMP): requires.generated logos_delivery.nimble | install-nimble build-nph logos_delivery.nims
-	# Options come after the command: Nimble reads pre-command options on
-	# custom tasks as compilation options. --useSystemNim uses the Nim
-	# compiler on PATH and omits Nim from the local dependency installation.
-	# Custom task invocations use the same option through NIMBLE_TASK_FLAGS.
-	$(NIMBLE) setup --localdeps -y --useSystemNim --requires "$$(cat requires.generated)"
+# nimbledeps/ is built from its declared inputs, or it is discarded and
+# rebuilt from empty: the same rule as the CI cache key.
+# scripts/ensure_nimbledeps.sh lists those inputs, takes the worktree lock,
+# generates the per-worktree files, compares copies kept in
+# nimbledeps/.inputs byte for byte, runs Nimble only from empty, and audits.
+#
+.PHONY: ensure-nimbledeps
+ensure-nimbledeps: | install-nimble
+	@scripts/ensure_nimbledeps.sh
 
-	$(MAKE) audit-deps
+# Compare the installed package set, its vcsRevision metadata and the
+# nimble.paths selection with nimble.lock. This detects the observed Nimble
+# 0.24.1 case where a solve exits successfully after selecting a different
+# special revision. ensure-nimbledeps runs it on every build, and CI runs
+# it again after the build and test steps, because custom tasks also solve
+# and can install. See scripts/audit_deps.nims for the matching rules.
+#
+# The auditor is compiled without config.nims, which includes the
+# nimble.paths it audits.
+AUDIT_DEPS := nim e --hints:off --skipUserCfg:on --skipParentCfg:on --skipProjCfg:on --noNimblePath scripts/audit_deps.nims
 
-	touch $@
-
-# Compare the installed package set and vcsRevision metadata with
-# nimble.lock. This detects the observed Nimble 0.24.1 case where a
-# solve exits successfully after selecting a different special revision.
-# The setup rule runs it after `nimble setup`, and CI runs it again after
-# the build and test steps, because custom tasks also solve and can
-# install. See scripts/audit_deps.nims for the matching rules.
 .PHONY: audit-deps
 audit-deps:
-	nim e --hints:off scripts/audit_deps.nims
+	$(AUDIT_DEPS)
 
 # Must be phony so the recipe always runs and the sub-make re-evaluates
 # BEARSSL_NIMBLEDEPS_DIR / NAT_TRAVERSAL_NIMBLEDEPS_DIR (parse-time variables)
 # after nimble setup has populated nimbledeps/.
 .PHONY: build-deps
-build-deps: | $(NIMBLEDEPS_STAMP)
+build-deps: | ensure-nimbledeps
 	$(MAKE) rebuild-bearssl-nimbledeps rebuild-nat-libs-nimbledeps
 
 clean:
 	rm -f requires.generated observed.generated 2> /dev/null || true
 	rm -rf build 2> /dev/null || true
-	rm -rf nimbledeps 2> /dev/null || true
+	rm -rf nimbledeps .nimbledeps-prev 2> /dev/null || true
 	rm -fr nimcache 2> /dev/null || true
 	rm nimble.paths 2> /dev/null || true
 	nimble clean
@@ -143,6 +153,11 @@ endif
 
 install-nimble: install-nim
 	scripts/install_nimble.sh $(REQUIRED_NIMBLE_VERSION) $(REQUIRED_NIMBLE_REVISION)
+	@$(MAKE) --no-print-directory check-environment
+
+.PHONY: check-environment
+check-environment:
+	@scripts/check_environment.sh "$(ORIGINAL_PATH)"
 
 build:
 	mkdir -p build
