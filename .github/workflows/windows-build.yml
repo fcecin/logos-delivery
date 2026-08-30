@@ -105,22 +105,22 @@ jobs:
 
     - name: Building wakunode2.exe
       run: |
-        export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+        export PATH="$(scripts/windows_nimble_path.sh):$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
         make wakunode2 V=3 -j${{ env.NPROC }}
 
     - name: Building logosdeliverynode.exe
       run: |
-        export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+        export PATH="$(scripts/windows_nimble_path.sh):$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
         make logosdeliverynode POSTGRES=1 V=3 -j${{ env.NPROC }}
 
     - name: Building liblogosdelivery.dll
       run: |
-        export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+        export PATH="$(scripts/windows_nimble_path.sh):$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
         make liblogosdelivery STATIC=0 V=1 -j
 
     - name: Audit installed deps
       run: |
-        export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$PATH"
+        export PATH="$(scripts/windows_nimble_path.sh):$GITHUB_WORKSPACE/.nim_runtime/bin:$PATH"
         make audit-deps
 
     - name: Check Executable
