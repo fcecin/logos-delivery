@@ -216,7 +216,7 @@ endif
 # the workflows, Jenkinsfiles and Dockerfiles use. Only NIM_PARAMS reaches the
 # build. Apply it after the defaults above, because Nim takes the last
 # definition of a define and the caller's value has to win.
-NIM_PARAMS := $(NIM_PARAMS) $(NIMFLAGS)
+NIM_PARAMS := $(NIM_PARAMS)
 
 # Export NIM_PARAMS so nimble can access it
 export NIM_PARAMS
