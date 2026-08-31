@@ -56,10 +56,10 @@ runs:
     - name: Install nimble deps
       shell: bash
       # No cache condition: the cache is an accelerator and decides
-      # nothing. The Makefile owns materialization and auditing. On a
-      # cache hit its setup rule runs once against the restored packages,
-      # constrained by the same requires string, and the audits bracket
-      # the result.
+      # nothing. The Makefile owns materialization and auditing. It
+      # compares the restored nimbledeps/.inputs with the current inputs
+      # byte for byte: equal means audit only, no Nimble; different means
+      # the restored tree is discarded and installed from empty.
       run: |
         if [ -n "${{ inputs.extra-path }}" ]; then
           export PATH="${{ inputs.extra-path }}:$PATH"

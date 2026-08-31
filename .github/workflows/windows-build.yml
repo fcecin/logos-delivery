@@ -62,6 +62,14 @@ jobs:
           mingw-w64-x86_64-clang
           mingw-w64-x86_64-nasm
 
+    - name: Use one HOME for MSYS2 and Git Bash
+      # MSYS2 resolves HOME inside its own tree, Git Bash uses %USERPROFILE%.
+      # scripts/install_nimble.sh writes to ${HOME} and the Makefile reads it,
+      # so the two shells otherwise build the pinned Nimble separately and keep
+      # separate ~/.nimble caches. Must precede anything that writes under HOME.
+      run: |
+        echo "db_home: windows" > /etc/nsswitch.conf
+
     - name: Configure Git in MSYS2 to keep LF line endings
       # The step above only configures Git for Windows. nimble clones its deps
       # from the MSYS2 shell, whose git reads a separate global config, so the

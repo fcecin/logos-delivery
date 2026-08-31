@@ -84,8 +84,9 @@ type WakuFilter* = ref object of LPProtocol
 
 ### Build System
 The project uses a Makefile that drives Nimble. Dependencies are resolved from
-`nimble.lock` into a local `nimbledeps/` directory (tracked by the
-`NIMBLEDEPS_STAMP` target).
+`nimble.lock` into a local `nimbledeps/` directory by the `ensure-nimbledeps`
+target, which replaces that directory when its declared inputs change and
+audits the installed packages against the lock.
 ```bash
 # Initial build (resolves Nimble deps automatically)
 make wakunode2
