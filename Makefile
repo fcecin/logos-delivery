@@ -41,7 +41,10 @@ NIMBLE_TASK_FLAGS = --useSystemNim --requires:"$$(cat requires.generated)"
 NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
 
 # Compilation parameters
-NIM_PARAMS ?=
+# NIMFLAGS is the documented way to pass compilation flags (README) and is what
+# the workflows, Jenkinsfiles and Dockerfiles use. Only NIM_PARAMS reaches the
+# build, so bridge them here; an explicit NIM_PARAMS still wins.
+NIM_PARAMS ?= $(NIMFLAGS)
 
 ifeq ($(detected_OS),Windows)
   MINGW_PATH = /mingw64
