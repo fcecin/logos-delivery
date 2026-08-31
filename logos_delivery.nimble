@@ -17,7 +17,10 @@ const RequiredNimVersion = "2.2.6"
   ## This is the nim compiler version that we are working on. Other versions may behave differently.
 const RequiredNimbleVersion = "0.24.1"
   ## Enforced nimble version to ensure a reproducible flow
-const RequiredNimbleRevision = "bc789ee6bcbfe315f81984a29318f6f8d4dcafa5"
+const RequiredNimbleRevision = "1a2b3ae900a8ccb307a118173e0c3a7cdfcfc121"
+  ## Release 0.24.1 discards the --requires constraints before it applies nimble.lock.
+  ## 5df81e6 fixes that and is unreleased. This is three commits later, and also
+  ## stops the solver reporting an exhausted search budget as an unsatisfiable graph.
 
 ### Dependencies
 requires "nim == 2.2.6",

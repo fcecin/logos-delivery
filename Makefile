@@ -34,7 +34,9 @@ NPH := $(HOME)/.nimble/bin/nph
 
 NIMBLE := nimble
 
-NIMBLE_TASK_FLAGS = --useSystemNim --requires "$$(cat requires.generated)"
+# Nimble accepts the generated value only in attached --requires:<value>
+# form; a separate argument leaves the constraints unapplied.
+NIMBLE_TASK_FLAGS = --useSystemNim --requires:"$$(cat requires.generated)"
 
 NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
 
@@ -103,7 +105,7 @@ $(NIMBLEDEPS_STAMP): requires.generated logos_delivery.nimble | install-nimble b
 	# custom tasks as compilation options. --useSystemNim uses the Nim
 	# compiler on PATH and omits Nim from the local dependency installation.
 	# Custom task invocations use the same option through NIMBLE_TASK_FLAGS.
-	$(NIMBLE) setup --localdeps -y --useSystemNim --requires "$$(cat requires.generated)"
+	$(NIMBLE) setup --localdeps -y --useSystemNim --requires:"$$(cat requires.generated)"
 
 	$(MAKE) audit-deps
 
