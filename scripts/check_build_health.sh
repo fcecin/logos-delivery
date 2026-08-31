@@ -5,11 +5,23 @@
 #
 #   scripts/check_build_health.sh
 #
-# Each case sets a make variable and checks the Nim flags that result. The
-# make database supplies the flags. This does not compile. It needs no Nim,
-# no Nimble, no dependencies and no network.
-#
+# Each case sets a make variable and checks the Nim flags that result.
 # A failed case prints the expected and the actual flags.
+#
+# Examples:
+#
+#   Variable          Effect
+#   ----------------  ------------------------------------------------
+#   NIMFLAGS=-d:x     adds -d:x, after the project defaults
+#   NIM_PARAMS=-d:x   nothing, use NIMFLAGS
+#   V=0               adds --verbosity:0 --hints:off, sets HANDLE_OUTPUT
+#   V=1               adds --verbosity:1, clears HANDLE_OUTPUT
+#   LOG_LEVEL=INFO    adds -d:chronicles_log_level="INFO"
+#   LOG_LEVEL empty   nothing, the Dockerfiles pass it empty
+#   DEBUG=0           adds -d:release -d:lto_incremental -d:strip
+#   DEBUG unset       adds -d:debug
+#   POSTGRES=1        adds -d:postgres
+#   DEBUG_DISCV5=1    adds -d:debugDiscv5
 
 set -uo pipefail
 
@@ -33,6 +45,47 @@ no() {
   fail=$((fail + 1))
 }
 
+# name, python program. The program prints "ok" or the reason it failed.
+expect_python() {
+  local name=$1 prog=$2
+  local got
+  got=$(python3 -c "${prog}" 2>&1)
+  if [ "${got}" = "ok" ]; then
+    ok "${name}"
+  else
+    no "${name}" "${got}"
+  fi
+}
+
+# Return the commands make would run for a target. -B ignores timestamps.
+recipe_of() {
+  make -Bn "$@" 2>/dev/null
+}
+
+# name, needle, make args...
+expect_recipe() {
+  local name=$1 needle=$2
+  shift 2
+  local got
+  got=$(recipe_of "$@")
+  case "${got}" in
+    *"${needle}"*) ok "${name}" ;;
+    *) no "${name}" "expected the recipe to contain: ${needle}" ;;
+  esac
+}
+
+# name, needle, make args...
+reject_recipe() {
+  local name=$1 needle=$2
+  shift 2
+  local got
+  got=$(recipe_of "$@")
+  case "${got}" in
+    *"${needle}"*) no "${name}" "expected the recipe NOT to contain: ${needle}" ;;
+    *) ok "${name}" ;;
+  esac
+}
+
 # Return the resolved NIM_PARAMS.
 nim_params() {
   make -pn "$@" 2>/dev/null | grep -E '^NIM_PARAMS :?=' | head -1
@@ -47,8 +100,8 @@ value_of() {
     | sed -E "s/^${name} :?=[[:space:]]*//; s/[[:space:]]+\$//"
 }
 
-# Return a variable from a recipe environment. The make database does not
-# show export directives.
+# Return a variable from a recipe environment. "make -pn" does not show
+# export directives.
 exported_value() {
   local name=$1
   shift
@@ -93,8 +146,8 @@ echo "build health"
 echo
 
 # --------------------------------------------------------------------------
-# NIMFLAGS is the public input. The README, the workflows, the Jenkins jobs
-# and the Dockerfiles use it. NIM_PARAMS is private.
+# Callers set NIMFLAGS. The README, the workflows, the Jenkins jobs and the
+# Dockerfiles use it. Make computes NIM_PARAMS from it.
 # --------------------------------------------------------------------------
 expect_flag "NIMFLAGS reaches the compiler" \
   "-d:health_sentinel" NIMFLAGS=-d:health_sentinel
@@ -115,7 +168,7 @@ else
   esac
 fi
 
-# An environment NIM_PARAMS must not reach the build.
+# A NIM_PARAMS set in the environment must not reach the build.
 env_bypass=$(NIM_PARAMS=-d:should_be_ignored nim_params NIMFLAGS=-d:health_sentinel)
 case "${env_bypass}" in
   *should_be_ignored*) no "ambient NIM_PARAMS cannot bypass NIMFLAGS" \
@@ -168,6 +221,68 @@ reject_flag "an unset DEBUG does not strip"    "-d:strip"
 expect_flag "POSTGRES=1 enables the postgres driver" "-d:postgres"    POSTGRES=1
 reject_flag "POSTGRES unset leaves it out"           "-d:postgres"
 expect_flag "DEBUG_DISCV5=1 enables discv5 tracing"  "-d:debugDiscv5" DEBUG_DISCV5=1
+
+# --------------------------------------------------------------------------
+# Nimble reads the constraints only from an attached --requires:<value>. A
+# separate argument leaves the value empty and Nimble discards nimble.lock.
+# --------------------------------------------------------------------------
+expect_recipe "setup attaches the constraints" \
+  '--requires:"$(cat requires.generated)"' nimbledeps/.nimble-setup
+reject_recipe "setup does not pass them as a separate argument" \
+  '--requires "' nimbledeps/.nimble-setup
+expect_recipe "custom tasks attach the constraints" \
+  '--requires:"$(cat requires.generated)"' wakunode2
+reject_recipe "custom tasks do not pass them as a separate argument" \
+  '--requires "' wakunode2
+
+# The constraints come from nimble.lock through the generator, and the audit
+# checks the result against the same lock.
+expect_recipe "setup regenerates the constraints first" \
+  "gen_requires.nims" nimbledeps/.nimble-setup
+expect_recipe "setup audits the result" \
+  "audit-deps" nimbledeps/.nimble-setup
+
+# --------------------------------------------------------------------------
+# The constraints are generated from nimble.lock. Every one must name the
+# revision the lock names, or the lock is not what the build installs.
+# --------------------------------------------------------------------------
+expect_python "the constraints agree with nimble.lock" "import json
+lock = json.load(open(\"nimble.lock\"))[\"packages\"]
+gen = [c.strip() for c in open(\"requires.generated\").read().split(\";\") if c.strip()]
+def norm(u): return u.lower().rstrip(\"/\").removesuffix(\".git\")
+byurl = {norm(v[\"url\"]): v for v in lock.values() if \"url\" in v}
+bad = []
+for c in gen:
+    if \" == \" in c:
+        n, v = c.split(\" == \")
+        if lock.get(n, {}).get(\"version\") != v:
+            bad.append(c + \" (lock has \" + str(lock.get(n, {}).get(\"version\")) + \")\")
+    elif c.startswith(\"http\") and \"#\" in c:
+        u, rev = c.rsplit(\"#\", 1)
+        if byurl.get(norm(u), {}).get(\"vcsRevision\") != rev:
+            bad.append(c)
+    else:
+        bad.append(\"unrecognised form: \" + c)
+print(\"ok\" if not bad else \"constraints disagree with nimble.lock: \" + \"; \".join(bad[:3]))"
+
+# --------------------------------------------------------------------------
+# The Nimble tasks concatenate their own defaults with NIM_PARAMS. The
+# caller's value has to come last. An invalid flag stops Nim before it
+# compiles, and the command is printed before it runs.
+# --------------------------------------------------------------------------
+emitted=$(make wakunode2 \
+  NIMFLAGS="-d:chronicles_log_level=HEALTHSENTINEL --nonexistent-flag-xyz" 2>&1 \
+  | grep -oE 'nim c [^|]*' | head -1)
+if [ -z "${emitted}" ]; then
+  no "the task puts the caller's flags last" "no nim command was emitted"
+else
+  before=${emitted%%-d:chronicles_log_level=HEALTHSENTINEL*}
+  case "${before}" in
+    *chronicles_log_level=*) ok "the task puts the caller's flags last" ;;
+    *) no "the task puts the caller's flags last" \
+         "the task default did not appear before the caller's value" ;;
+  esac
+fi
 
 echo
 echo "  ${pass} passed, ${fail} failed"
