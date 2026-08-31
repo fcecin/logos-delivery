@@ -46,6 +46,21 @@ NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
 # build, so bridge them here; an explicit NIM_PARAMS still wins.
 NIM_PARAMS ?= $(NIMFLAGS)
 
+# V selects build verbosity. Callers pass V=1; Nat.mk silences its sub-makes
+# with HANDLE_OUTPUT.
+V := 0
+NIM_PARAMS := $(NIM_PARAMS) --verbosity:$(V)
+HANDLE_OUTPUT :=
+ifeq ($(V), 0)
+  NIM_PARAMS := $(NIM_PARAMS) --hints:off
+  HANDLE_OUTPUT := >/dev/null
+endif
+
+# The Jenkins jobs expose LOG_LEVEL as a build parameter.
+ifdef LOG_LEVEL
+  NIM_PARAMS := $(NIM_PARAMS) -d:chronicles_log_level="$(LOG_LEVEL)"
+endif
+
 ifeq ($(detected_OS),Windows)
   MINGW_PATH = /mingw64
   NIM_PARAMS += --passC:"-I$(MINGW_PATH)/include"
@@ -325,7 +340,7 @@ lightpushwithmix: | build-deps build deps librln
 
 api_example: | build-deps build deps librln
 	echo -e $(BUILD_MSG) "build/$@" && \
-		$(ENV_SCRIPT) nim api_example $(NIM_PARAMS) logos_delivery.nims
+		nim api_example $(NIM_PARAMS) logos_delivery.nims
 
 build/%: | build-deps build deps librln
 	echo -e $(BUILD_MSG) "build/$*" && \
