@@ -40,9 +40,11 @@ NPH := $(HOME)/.nimble/bin/nph
 # NIMBLE_DIR would redirect Nimble away from nimbledeps/.
 NIMBLE := env -u NIMBLE_DIR nimble
 
-# A --requires value passed to a task is parsed as a task argument
-# (observed: it became the test name), so tasks get only these.
-NIMBLE_TASK_FLAGS = --useSystemNim --disableNimBinaries
+# Custom tasks also solve and can install, so they need the same constraints
+# as setup. The value must be attached: as a separate argument it is left
+# unconsumed and a task reads it as a task argument (observed: it became the
+# test name).
+NIMBLE_TASK_FLAGS = --useSystemNim --disableNimBinaries --requires:"$$(cat requires.generated)"
 
 # Compilation parameters
 NIM_PARAMS ?=
