@@ -214,10 +214,10 @@ ifeq ($(DEBUG_DISCV5), 1)
 NIM_PARAMS := $(NIM_PARAMS) -d:debugDiscv5
 endif
 
-# Export NIM_PARAMS so nimble can access it
 # Last, so a caller can override any default above.
 NIM_PARAMS := $(NIM_PARAMS) $(NIMFLAGS)
 
+# Export NIM_PARAMS so nimble can access it
 export NIM_PARAMS
 
 ##################
