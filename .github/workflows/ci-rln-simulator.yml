@@ -147,28 +147,21 @@ jobs:
           git clone https://github.com/logos-messaging/logos-delivery-simulator.git "$RUNNER_TEMP/logos-delivery-simulator"
           git -C "$RUNNER_TEMP/logos-delivery-simulator" checkout --detach ${{ steps.cfg.outputs.simulator_commit }}
 
-      - name: Repair the deployer's foundryup PATH
+      - name: Check the pinned simulator for known defects
         working-directory: ${{ runner.temp }}/logos-delivery-simulator
-        # docker-compose.yml bind mounts this script into the deployer, so it
-        # can be corrected here. Upstream it sets PATH after calling foundryup,
-        # and that failure is invisible because a command failing inside an &&
-        # list does not trip the script's set -e. Foundry's installer stopped
-        # putting foundryup on PATH, so every run since 2026-08-05 reached
-        # `forge install` without forge and exited 127.
-        # Delete this once the upstream script is fixed; it skips itself then.
         run: |
+          # deploy_rln_contract.sh calls foundryup before putting it on PATH,
+          # and relies on sourcing /root/.bashrc to find it. Foundry's installer
+          # stopped doing that, so the command is not found. The script sets
+          # set -e, but a command failing inside an && list does not trip it, so
+          # the run continues and dies twenty lines later at `forge install`
+          # with exit 127, which is all docker compose reports.
+          #
+          # Reported upstream. Not patched here: the fix belongs in that
+          # repository, and rewriting their script from this workflow would put
+          # a copy of their logic in ours. Bump SIMULATOR_COMMIT once it lands.
           if grep -q 'foundryup && export PATH' deploy_rln_contract.sh; then
-            awk '/foundryup && export PATH/ {
-                   print "curl -L https://foundry.paradigm.xyz | bash"
-                   print "export PATH=\"$PATH:$HOME/.foundry/bin\""
-                   print "foundryup"
-                   next
-                 } { print }' deploy_rln_contract.sh > patched.sh
-            mv patched.sh deploy_rln_contract.sh
-            chmod +x deploy_rln_contract.sh
-            echo "repaired the foundryup PATH ordering"
-          else
-            echo "::notice::deploy_rln_contract.sh no longer matches; repair skipped"
+            echo "::warning::pinned simulator has the known foundryup PATH defect; this run will fail at Bring up simulator with exit 127"
           fi
 
       - name: Write simulator .env
