@@ -87,6 +87,7 @@ jobs:
             echo "num_nodes=${IN_NUM_NODES:-$NUM_NODES}"
             echo "msg_limit=${IN_MSG_LIMIT:-$MSG_LIMIT}"
             echo "epoch_sec=${IN_EPOCH_SEC:-$EPOCH_SEC}"
+            echo "simulator_commit=${SIMULATOR_COMMIT}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Stash e2e test script outside the workspace
@@ -143,7 +144,32 @@ jobs:
 
       - name: Clone logos-delivery-simulator
         run: |
-          git clone --depth 1 https://github.com/logos-messaging/logos-delivery-simulator.git "$RUNNER_TEMP/logos-delivery-simulator"
+          git clone https://github.com/logos-messaging/logos-delivery-simulator.git "$RUNNER_TEMP/logos-delivery-simulator"
+          git -C "$RUNNER_TEMP/logos-delivery-simulator" checkout --detach ${{ steps.cfg.outputs.simulator_commit }}
+
+      - name: Repair the deployer's foundryup PATH
+        working-directory: ${{ runner.temp }}/logos-delivery-simulator
+        # docker-compose.yml bind mounts this script into the deployer, so it
+        # can be corrected here. Upstream it sets PATH after calling foundryup,
+        # and that failure is invisible because a command failing inside an &&
+        # list does not trip the script's set -e. Foundry's installer stopped
+        # putting foundryup on PATH, so every run since 2026-08-05 reached
+        # `forge install` without forge and exited 127.
+        # Delete this once the upstream script is fixed; it skips itself then.
+        run: |
+          if grep -q 'foundryup && export PATH' deploy_rln_contract.sh; then
+            awk '/foundryup && export PATH/ {
+                   print "curl -L https://foundry.paradigm.xyz | bash"
+                   print "export PATH=\"$PATH:$HOME/.foundry/bin\""
+                   print "foundryup"
+                   next
+                 } { print }' deploy_rln_contract.sh > patched.sh
+            mv patched.sh deploy_rln_contract.sh
+            chmod +x deploy_rln_contract.sh
+            echo "repaired the foundryup PATH ordering"
+          else
+            echo "::notice::deploy_rln_contract.sh no longer matches; repair skipped"
+          fi
 
       - name: Write simulator .env
         working-directory: ${{ runner.temp }}/logos-delivery-simulator

@@ -5,6 +5,6 @@
 	branch = v0.5.1
 [submodule "vendor/waku-rlnv2-contract"]
 	path = vendor/waku-rlnv2-contract
-	url = https://github.com/logos-messaging/waku-rlnv2-contract.git
+	url = https://github.com/logos-messaging/logos-delivery-rlnv2-contract.git
 	ignore = untracked
-	branch = master
+	branch = main
