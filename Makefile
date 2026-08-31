@@ -212,9 +212,9 @@ ifeq ($(DEBUG_DISCV5), 1)
 NIM_PARAMS := $(NIM_PARAMS) -d:debugDiscv5
 endif
 
-# NIMFLAGS is the public input. The README, the workflows, the Jenkinsfiles
-# and the Dockerfiles use it. Only NIM_PARAMS reaches the build. Apply
-# NIMFLAGS last. Nim uses the last definition of a define.
+# Callers set NIMFLAGS. The README, the workflows, the Jenkinsfiles and the
+# Dockerfiles use it. Only NIM_PARAMS reaches the build, so add NIMFLAGS to it
+# here. Add it last. Nim uses the last definition of a define.
 NIM_PARAMS := $(NIM_PARAMS) $(NIMFLAGS)
 
 # Export NIM_PARAMS so nimble can access it
