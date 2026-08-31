@@ -21,6 +21,10 @@ Recommended and tested toolchain versions (these are installed when you follow t
 - Nim 2.2.6
 - Nimble 0.24.1
 
+`make` installs the Nimble it uses to `~/.local/nimble-<id>/bin`, where `<id>` is the pinned revision or version from `logos_delivery.nimble`.
+
+`make check-environment` diagnoses environment state that affects the build.
+
 ### Prerequisites
 
 The standard developer tools, including a C compiler, GNU Make, Bash, and Git.

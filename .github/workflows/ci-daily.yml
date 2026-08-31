@@ -31,7 +31,8 @@ jobs:
           # expressions and the committed file. Unfetchable revisions,
           # generator failures, and tool or environment incompatibilities
           # also fail this step.
-          nix-shell -p nix-prefetch-git --run './tools/gen-nix-deps.sh nimble.lock /tmp/deps.nix.fresh'
+          # nix-prefetch-git from the nixpkgs revision that flake.lock pins.
+          nix shell --inputs-from . nixpkgs#nix-prefetch-git --command ./tools/gen-nix-deps.sh nimble.lock /tmp/deps.nix.fresh
           diff /tmp/deps.nix.fresh nix/deps.nix
 
   build:
@@ -74,7 +75,8 @@ jobs:
           nim-version: ${{ env.NIM_VERSION }}
 
       - name: Build binaries
-        run: make V=1 examples tools
+        # -j1: concurrent nimble tasks corrupt shared package metadata.
+        run: make V=1 -j1 examples tools
 
       - name: Audit installed deps
         run: make audit-deps

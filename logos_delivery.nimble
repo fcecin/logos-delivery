@@ -17,7 +17,7 @@ const RequiredNimVersion = "2.2.6"
   ## This is the nim compiler version that we are working on. Other versions may behave differently.
 const RequiredNimbleVersion = "0.24.1"
   ## Enforced nimble version to ensure a reproducible flow
-const RequiredNimbleRevision = "bc789ee6bcbfe315f81984a29318f6f8d4dcafa5"
+const RequiredNimbleRevision = "5df81e6edb8ee501cc458746739250b7414eca35"
 
 ### Dependencies
 requires "nim == 2.2.6",
