@@ -52,6 +52,8 @@ on:
 env:
   NPROC: 2
   MAKEFLAGS: "-j2"
+  # The build reads NIM_PARAMS; NIMFLAGS reaches only the Docker build args.
+  NIM_PARAMS: "-d:disableMarchNative"
   NIM_VERSION: '2.2.6'
   NIMBLE_VERSION: '0.24.1'
 
