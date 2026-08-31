@@ -62,6 +62,14 @@ jobs:
           mingw-w64-x86_64-clang
           mingw-w64-x86_64-nasm
 
+    - name: Use one HOME for MSYS2 and Git Bash
+      # MSYS2 resolves HOME inside its own tree, Git Bash uses %USERPROFILE%.
+      # scripts/install_nimble.sh writes to ${HOME} and the Makefile reads it,
+      # so the two shells otherwise build the pinned Nimble separately and keep
+      # separate ~/.nimble caches. Must precede anything that writes under HOME.
+      run: |
+        echo "db_home: windows" > /etc/nsswitch.conf
+
     - name: Configure Git in MSYS2 to keep LF line endings
       # The step above only configures Git for Windows. nimble clones its deps
       # from the MSYS2 shell, whose git reads a separate global config, so the
@@ -103,29 +111,24 @@ jobs:
     - name: Creating tmp directory
       run: mkdir -p tmp
 
-    # The required Nimble is under the Git Bash home; the MSYS2 HOME differs.
     - name: Building wakunode2.exe
       run: |
-        NIMBLE_ID=$(sed -n 's/^const RequiredNimbleRevision = "\([0-9a-f]*\)"/\1/p' logos_delivery.nimble)
-        export PATH="$(cygpath -u "$USERPROFILE")/.local/nimble-${NIMBLE_ID:-${{ env.NIMBLE_VERSION }}}/bin:$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+        export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
         make wakunode2 V=3 -j${{ env.NPROC }}
 
     - name: Building logosdeliverynode.exe
       run: |
-        NIMBLE_ID=$(sed -n 's/^const RequiredNimbleRevision = "\([0-9a-f]*\)"/\1/p' logos_delivery.nimble)
-        export PATH="$(cygpath -u "$USERPROFILE")/.local/nimble-${NIMBLE_ID:-${{ env.NIMBLE_VERSION }}}/bin:$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+        export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
         make logosdeliverynode POSTGRES=1 V=3 -j${{ env.NPROC }}
 
     - name: Building liblogosdelivery.dll
       run: |
-        NIMBLE_ID=$(sed -n 's/^const RequiredNimbleRevision = "\([0-9a-f]*\)"/\1/p' logos_delivery.nimble)
-        export PATH="$(cygpath -u "$USERPROFILE")/.local/nimble-${NIMBLE_ID:-${{ env.NIMBLE_VERSION }}}/bin:$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+        export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
         make liblogosdelivery STATIC=0 V=1 -j
 
     - name: Audit installed deps
       run: |
-        NIMBLE_ID=$(sed -n 's/^const RequiredNimbleRevision = "\([0-9a-f]*\)"/\1/p' logos_delivery.nimble)
-        export PATH="$(cygpath -u "$USERPROFILE")/.local/nimble-${NIMBLE_ID:-${{ env.NIMBLE_VERSION }}}/bin:$GITHUB_WORKSPACE/.nim_runtime/bin:$PATH"
+        export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$PATH"
         make audit-deps
 
     - name: Check Executable
