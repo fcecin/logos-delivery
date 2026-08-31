@@ -6,7 +6,7 @@ ARG MAKE_TARGET=wakunode2
 ARG NIM_COMMIT
 ARG HEAPTRACK_BUILD=0
 ARG POSTGRES=0
-ARG DEBUG=0
+ARG DEBUG
 ARG LOG_LEVEL
 
 # Get build tools and required header files

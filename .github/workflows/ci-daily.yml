@@ -13,6 +13,15 @@ env:
   NIMBLE_VERSION: '0.24.1'
 
 jobs:
+  build-health:
+    name: "Build health"
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/check-build-health
+
   deps-freshness:
     name: "nix/deps.nix freshness"
     runs-on: ubuntu-22.04

@@ -1,0 +1,11 @@
+name: 'Check build health'
+description: 'Assert that build configuration reaches the compiler'
+
+runs:
+  using: 'composite'
+  steps:
+    # Reads the Make variable database. No Nim, no Nimble, no dependencies and
+    # no network, so this reports before any build job has finished starting.
+    - name: Check build health
+      shell: bash
+      run: ./scripts/check_build_health.sh

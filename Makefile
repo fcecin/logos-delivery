@@ -41,10 +41,8 @@ NIMBLE_TASK_FLAGS = --useSystemNim --requires:"$$(cat requires.generated)"
 NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
 
 # Compilation parameters
-# NIMFLAGS is the documented way to pass compilation flags (README) and is what
-# the workflows, Jenkinsfiles and Dockerfiles use. Only NIM_PARAMS reaches the
-# build, so it is applied here, last, once the project defaults are in place.
-# Nim takes the last definition of a define, so what the caller asks for wins.
+# The project's own flags accumulate here. The caller's NIMFLAGS is applied
+# after them, at the end of the list below.
 NIM_PARAMS :=
 
 # V selects build verbosity. Callers pass V=1; Nat.mk silences its sub-makes
@@ -214,7 +212,10 @@ ifeq ($(DEBUG_DISCV5), 1)
 NIM_PARAMS := $(NIM_PARAMS) -d:debugDiscv5
 endif
 
-# Last, so a caller can override any default above.
+# NIMFLAGS is the documented way to pass compilation flags (README) and is what
+# the workflows, Jenkinsfiles and Dockerfiles use. Only NIM_PARAMS reaches the
+# build. Apply it after the defaults above, because Nim takes the last
+# definition of a define and the caller's value has to win.
 NIM_PARAMS := $(NIM_PARAMS) $(NIMFLAGS)
 
 # Export NIM_PARAMS so nimble can access it
@@ -433,6 +434,7 @@ docker-image:
 	docker build \
 		--build-arg="MAKE_TARGET=$(MAKE_TARGET)" \
 		--build-arg="NIMFLAGS=$(DOCKER_IMAGE_NIMFLAGS)" \
+		--build-arg="DEBUG=$(DEBUG)" \
 		--build-arg="HEAPTRACK_BUILD=$(HEAPTRACKER)" \
 		--label="commit=$(shell git rev-parse HEAD)" \
 		--label="version=$(GIT_VERSION)" \
