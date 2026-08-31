@@ -43,8 +43,9 @@ NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
 # Compilation parameters
 # NIMFLAGS is the documented way to pass compilation flags (README) and is what
 # the workflows, Jenkinsfiles and Dockerfiles use. Only NIM_PARAMS reaches the
-# build, so bridge them here; an explicit NIM_PARAMS still wins.
-NIM_PARAMS ?= $(NIMFLAGS)
+# build, so derive it here. NIMFLAGS is the only public input; a NIM_PARAMS
+# given on the make command line still wins, as the expert escape hatch.
+NIM_PARAMS := $(NIMFLAGS)
 
 # V selects build verbosity. Callers pass V=1; Nat.mk silences its sub-makes
 # with HANDLE_OUTPUT.
@@ -192,7 +193,7 @@ endif
 
 # Debug/Release mode
 ifeq ($(DEBUG), 0)
-NIM_PARAMS := $(NIM_PARAMS) -d:release
+NIM_PARAMS := $(NIM_PARAMS) -d:release -d:lto_incremental -d:strip
 else
 NIM_PARAMS := $(NIM_PARAMS) -d:debug
 endif

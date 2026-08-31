@@ -14,11 +14,7 @@ on:
 env:
   NPROC: 2
   MAKEFLAGS: "-j${NPROC}"
-  NIMFLAGS: "--parallelBuild:${NPROC}"
-  # logos_delivery.nimble reads compile flags from NIM_PARAMS, not NIMFLAGS. Without
-  # -d:disableMarchNative here, config.nims applies -march=native and
-  # secp256k1 fails to compile.
-  NIM_PARAMS: "-d:disableMarchNative"
+  NIMFLAGS: "--parallelBuild:${NPROC} -d:disableMarchNative"
   NIM_VERSION: '2.2.6'
   NIMBLE_VERSION: '0.24.1'
 
