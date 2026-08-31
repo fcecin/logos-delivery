@@ -41,12 +41,12 @@ NIMBLE_TASK_FLAGS = --useSystemNim --requires:"$$(cat requires.generated)"
 NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
 
 # Compilation parameters
-# The project's own flags accumulate here. The caller's NIMFLAGS is applied
+# The project's flags accumulate here. Make applies the caller's NIMFLAGS
 # after them, at the end of the list below.
 NIM_PARAMS :=
 
-# V selects build verbosity. Callers pass V=1; Nat.mk silences its sub-makes
-# with HANDLE_OUTPUT.
+# V selects verbosity. Callers pass V=1. Nat.mk uses HANDLE_OUTPUT to
+# silence the sub-makes.
 V := 0
 NIM_PARAMS := $(NIM_PARAMS) --verbosity:$(V)
 HANDLE_OUTPUT :=
@@ -212,10 +212,9 @@ ifeq ($(DEBUG_DISCV5), 1)
 NIM_PARAMS := $(NIM_PARAMS) -d:debugDiscv5
 endif
 
-# NIMFLAGS is the documented way to pass compilation flags (README) and is what
-# the workflows, Jenkinsfiles and Dockerfiles use. Only NIM_PARAMS reaches the
-# build. Apply it after the defaults above, because Nim takes the last
-# definition of a define and the caller's value has to win.
+# NIMFLAGS is the public input. The README, the workflows, the Jenkinsfiles
+# and the Dockerfiles use it. Only NIM_PARAMS reaches the build. Apply
+# NIMFLAGS last. Nim uses the last definition of a define.
 NIM_PARAMS := $(NIM_PARAMS) $(NIMFLAGS)
 
 # Export NIM_PARAMS so nimble can access it
