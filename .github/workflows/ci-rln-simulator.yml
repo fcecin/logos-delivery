@@ -87,7 +87,6 @@ jobs:
             echo "num_nodes=${IN_NUM_NODES:-$NUM_NODES}"
             echo "msg_limit=${IN_MSG_LIMIT:-$MSG_LIMIT}"
             echo "epoch_sec=${IN_EPOCH_SEC:-$EPOCH_SEC}"
-            echo "simulator_commit=${SIMULATOR_COMMIT}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Stash e2e test script outside the workspace
@@ -144,8 +143,7 @@ jobs:
 
       - name: Clone logos-delivery-simulator
         run: |
-          git clone https://github.com/logos-messaging/logos-delivery-simulator.git "$RUNNER_TEMP/logos-delivery-simulator"
-          git -C "$RUNNER_TEMP/logos-delivery-simulator" checkout --detach ${{ steps.cfg.outputs.simulator_commit }}
+          git clone --depth 1 https://github.com/logos-messaging/logos-delivery-simulator.git "$RUNNER_TEMP/logos-delivery-simulator"
 
       - name: Write simulator .env
         working-directory: ${{ runner.temp }}/logos-delivery-simulator
