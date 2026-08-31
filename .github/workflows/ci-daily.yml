@@ -86,6 +86,9 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
+          # A fork has no webhook secret, and curl fails the job on an empty
+          # URL. Match ci-rln-simulator.yml and skip the notice instead.
+          [ -z "$DISCORD_WEBHOOK_URL" ] && exit 0
           STATUS="${{ job.status }}"
           OS="${{ matrix.os }}"
           REPO="${{ github.repository }}"
