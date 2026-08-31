@@ -6,6 +6,8 @@ ARG MAKE_TARGET=wakunode2
 ARG NIM_COMMIT
 ARG HEAPTRACK_BUILD=0
 ARG POSTGRES=0
+ARG DEBUG=0
+ARG LOG_LEVEL
 
 # Get build tools and required header files
 RUN apk add --no-cache bash git build-base openssl-dev linux-headers curl jq libbsd-dev
@@ -27,7 +29,7 @@ RUN if [ "$HEAPTRACK_BUILD" = "1" ]; then \
 RUN make -j$(nproc) deps QUICK_AND_DIRTY_COMPILER=1 ${NIM_COMMIT}
 
 # Build the final node binary
-RUN make -j$(nproc) ${NIM_COMMIT} $MAKE_TARGET NIMFLAGS="${NIMFLAGS}" POSTGRES=${POSTGRES}
+RUN make -j$(nproc) ${NIM_COMMIT} $MAKE_TARGET NIMFLAGS="${NIMFLAGS}" POSTGRES=${POSTGRES} DEBUG=${DEBUG} LOG_LEVEL=${LOG_LEVEL}
 
 
 # PRODUCTION IMAGE -------------------------------------------------------------
