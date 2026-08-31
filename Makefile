@@ -43,9 +43,9 @@ NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
 # Compilation parameters
 # NIMFLAGS is the documented way to pass compilation flags (README) and is what
 # the workflows, Jenkinsfiles and Dockerfiles use. Only NIM_PARAMS reaches the
-# build, so derive it here. NIMFLAGS is the only public input; a NIM_PARAMS
-# given on the make command line still wins, as the expert escape hatch.
-NIM_PARAMS := $(NIMFLAGS)
+# build, so it is applied here, last, once the project defaults are in place.
+# Nim takes the last definition of a define, so what the caller asks for wins.
+NIM_PARAMS :=
 
 # V selects build verbosity. Callers pass V=1; Nat.mk silences its sub-makes
 # with HANDLE_OUTPUT.
@@ -215,6 +215,9 @@ NIM_PARAMS := $(NIM_PARAMS) -d:debugDiscv5
 endif
 
 # Export NIM_PARAMS so nimble can access it
+# Last, so a caller can override any default above.
+NIM_PARAMS := $(NIM_PARAMS) $(NIMFLAGS)
+
 export NIM_PARAMS
 
 ##################
@@ -286,7 +289,7 @@ testwaku: | build-deps build rln-deps librln
 wakunode2: | build-deps build deps librln
 ifeq ($(detected_OS),Windows)
 	echo -e $(BUILD_MSG) "build/$@" && \
-		nim c --out:build/wakunode2 --mm:refc --cpu:amd64 $(NIM_PARAMS) -d:chronicles_log_level=TRACE apps/wakunode2/wakunode2.nim
+		nim c --out:build/wakunode2 --mm:refc --cpu:amd64 -d:chronicles_log_level=TRACE $(NIM_PARAMS) apps/wakunode2/wakunode2.nim
 else
 	echo -e $(BUILD_MSG) "build/$@" && \
 		$(NIMBLE) wakunode2 $(NIMBLE_TASK_FLAGS)
@@ -297,7 +300,7 @@ endif
 logosdeliverynode: | build-deps build deps librln
 ifeq ($(detected_OS),Windows)
 	echo -e $(BUILD_MSG) "build/$@" && \
-		nim c --out:build/logosdeliverynode --mm:refc --cpu:amd64 $(NIM_PARAMS) -d:chronicles_log_level=TRACE apps/logos_delivery_node/logosdeliverynode.nim
+		nim c --out:build/logosdeliverynode --mm:refc --cpu:amd64 -d:chronicles_log_level=TRACE $(NIM_PARAMS) apps/logos_delivery_node/logosdeliverynode.nim
 else
 	echo -e $(BUILD_MSG) "build/$@" && \
 		$(NIMBLE) logosdeliverynode $(NIMBLE_TASK_FLAGS)
