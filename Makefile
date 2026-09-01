@@ -45,14 +45,21 @@ NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
 # order, and Nim keeps the last definition of a define, so a later entry wins
 # over an earlier one:
 #
-#   1. NIM_PARAMS from the environment. The ?= below keeps it.
-#   2. the project's own flags, added through the rest of this file.
-#   3. NIMFLAGS from the caller, added at the end.
+#   1. the project's own flags, added through the rest of this file.
+#   2. NIMFLAGS from the caller, added at the end, so the caller wins.
 #
-# NIM_PARAMS on the make command line does not join that list. It replaces the
-# list, the project's own flags included, because make gives a command line
-# variable precedence over every assignment here. The README warns against it.
-NIM_PARAMS ?=
+# := and not ?=, because this file exports NIM_PARAMS and several targets
+# recurse: test, audit-deps, the C library rebuilds, Android and iOS. A
+# sub-make inherits the assembled value, and ?= would keep it and append every
+# project flag a second time. := discards the inherited value and recomputes,
+# so a sub-make gets the same list as its parent. It also means NIM_PARAMS
+# from the environment is ignored; NIMFLAGS is the way in.
+#
+# A NIM_PARAMS on the make command line is unaffected by either operator. Make
+# gives a command line variable precedence over every assignment in this file,
+# so it replaces the whole list, the project's own flags included. The README
+# warns against it.
+NIM_PARAMS :=
 
 # V selects verbosity. Callers pass V=1. Nat.mk uses HANDLE_OUTPUT to
 # silence the sub-makes.
@@ -83,7 +90,7 @@ endif
 ## Main ##
 ##########
 # The Makefile automatically bootstraps dependency setup when needed for build and test targets.
-.PHONY: all test clean examples deps nimble install-nim install-nimble
+.PHONY: all test clean examples deps nimble install-nim install-nimble print-nimble-path
 
 # default target
 all: | wakunode2 logosdeliverynode liblogosdelivery
@@ -180,6 +187,11 @@ build:
 	mkdir -p build
 
 nimble: install-nimble
+
+# The build system puts NIMBLE_TOOLDIR first on PATH for its own invocations.
+# Print it so a shell can use the same Nimble.
+print-nimble-path:
+	@echo "$(NIMBLE_TOOLDIR)"
 
 ## Possible values: prod; debug
 TARGET ?= prod
@@ -430,15 +442,16 @@ docs: | build-deps build deps
 	echo -e $(BUILD_MSG) "build/$@" && \
 		$(NIMBLE) doc --run --index:on --project --out:.gh-pages logos-delivery/logos-delivery.nim logos_delivery.nims $(NIMBLE_TASK_FLAGS)
 
-coverage:
+coverage: | build-deps build rln-deps librln
 	echo -e $(BUILD_MSG) "build/$@" && \
-		./scripts/run_cov.sh -y
+		LIBRLN_FILE=$(LIBRLN_FILE) ./scripts/run_cov.sh -y
 
 #####################
 ## Container image ##
 #####################
 DOCKER_IMAGE_NIMFLAGS ?= -d:chronicles_colors:none -d:insecure -d:postgres
-DOCKER_IMAGE_NIMFLAGS := $(DOCKER_IMAGE_NIMFLAGS) $(HEAPTRACK_PARAMS)
+# The heaptracker define is not added here. HEAPTRACK_BUILD below applies the
+# Nim patch and the inner make adds the define from HEAPTRACKER.
 
 docker-image: MAKE_TARGET ?= wakunode2
 docker-image: DEBUG ?= 0

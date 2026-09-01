@@ -19,8 +19,8 @@
 #   Variable          Effect
 #   ----------------  ------------------------------------------------
 #   NIMFLAGS=-d:x     adds -d:x, after the defines it may conflict with
-#   NIM_PARAMS=-d:x   from the environment, the base the project appends to;
-#                     on the make command line it replaces the whole set
+#   NIM_PARAMS=-d:x   nothing from the environment; on the make command line
+#                     it replaces the whole set, project flags included
 #   V=0               adds --verbosity:0 --hints:off, sets HANDLE_OUTPUT
 #   V=1               adds --verbosity:1, clears HANDLE_OUTPUT
 #   LOG_LEVEL=INFO    adds -d:chronicles_log_level="INFO"
@@ -140,6 +140,28 @@ reject_flag() {
   esac
 }
 
+# name, make args... The invocation must fail. -n so nothing is built.
+expect_make_fails() {
+  local name=$1
+  shift
+  if make -n "$@" >/dev/null 2>&1; then
+    no "${name}" "make -n $* exited 0"
+  else
+    ok "${name}"
+  fi
+}
+
+# name, make args... The invocation must parse.
+expect_make_parses() {
+  local name=$1
+  shift
+  if make -n "$@" >/dev/null 2>&1; then
+    ok "${name}"
+  else
+    no "${name}" "make -n $* failed"
+  fi
+}
+
 # name, expected, actual
 expect_eq() {
   if [ "$2" = "$3" ]; then
@@ -176,20 +198,29 @@ else
   esac
 fi
 
-# NIM_PARAMS from the environment is the base the project appends to. Callers
-# outside this repository rely on it, so keep it, and keep NIMFLAGS after it.
-env_base=$(NIM_PARAMS=-d:health_base nim_params NIMFLAGS=-d:health_sentinel)
-case "${env_base}" in
-  *-d:health_base*) ok "an environment NIM_PARAMS still reaches the build" ;;
-  *) no "an environment NIM_PARAMS still reaches the build" \
-       "expected to contain: -d:health_base" \
-       "actual: ${env_base:-<no NIM_PARAMS>}" ;;
-esac
-case "${env_base%%-d:health_sentinel*}" in
-  *-d:health_base*) ok "NIMFLAGS wins over an environment NIM_PARAMS" ;;
-  *) no "NIMFLAGS wins over an environment NIM_PARAMS" \
-       "the caller's flag must come after the environment's" \
-       "actual: ${env_base:-<no NIM_PARAMS>}" ;;
+# NIM_PARAMS is exported and several targets recurse, so a sub-make must not
+# append the project's flags a second time.
+rec=$(mktemp)
+{
+  printf 'include Makefile\n'
+  printf '_outer:\n'
+  printf '\t@echo "OUTER $(NIM_PARAMS)"\n'
+  printf '\t@$(MAKE) -s -f %s _inner\n' "${rec}"
+  printf '_inner:\n'
+  printf '\t@echo "INNER $(NIM_PARAMS)"\n'
+} > "${rec}"
+rec_out=$(make -s -f "${rec}" _outer NIMFLAGS=-d:health_sentinel 2>/dev/null)
+rm -f "${rec}"
+expect_eq "a sub-make gets the same NIM_PARAMS" \
+  "$(printf '%s\n' "${rec_out}" | sed -n 's/^OUTER //p')" \
+  "$(printf '%s\n' "${rec_out}" | sed -n 's/^INNER //p')"
+
+# The environment cannot preload the list. NIMFLAGS is the way in.
+env_leak=$(NIM_PARAMS=-d:health_leak nim_params NIMFLAGS=-d:health_sentinel)
+case "${env_leak}" in
+  *health_leak*) no "an environment NIM_PARAMS cannot preload the list" \
+                    "it leaked in: ${env_leak}" ;;
+  *) ok "an environment NIM_PARAMS cannot preload the list" ;;
 esac
 
 # The Nimble tasks read NIM_PARAMS with getEnv. Make must export it.
@@ -236,6 +267,15 @@ reject_flag "an unset DEBUG does not strip"    "-d:strip"
 expect_flag "POSTGRES=1 enables the postgres driver" "-d:postgres"    POSTGRES=1
 reject_flag "POSTGRES unset leaves it out"           "-d:postgres"
 expect_flag "DEBUG_DISCV5=1 enables discv5 tracing"  "-d:debugDiscv5" DEBUG_DISCV5=1
+
+# --------------------------------------------------------------------------
+# `make test <file> [name]` passes the file and the name as extra goals, which
+# the catch-all absorbs. Every other unknown target must fail, or a stale
+# invocation succeeds while doing nothing.
+# --------------------------------------------------------------------------
+expect_make_fails  "an unknown target fails"            update
+expect_make_fails  "an arbitrary unknown target fails"  definitely-not-a-target
+expect_make_parses "make test <file> still parses"      test tests/all_tests_waku.nim
 
 # --------------------------------------------------------------------------
 # Nimble reads the constraints only from an attached --requires:<value>. A
@@ -298,6 +338,25 @@ else
          "the task default did not appear before the caller's value" ;;
   esac
 fi
+
+# --------------------------------------------------------------------------
+# The build installs a pinned Nimble revision and puts it first on PATH. The
+# release with the same version number is a different build and reports the
+# same version, so check the revision. The case above already ran a build,
+# which installs it.
+# --------------------------------------------------------------------------
+# print-nimble-path is what the README tells a developer to use, so test that,
+# not a second way of finding the same binary.
+tooldir=$(make print-nimble-path 2>/dev/null)
+expect_eq "print-nimble-path names the pinned revision" \
+  "$(value_of REQUIRED_NIMBLE_REVISION)" \
+  "$("${tooldir}/nimble" --version 2>/dev/null | sed -n 's/^git hash: //p')"
+
+# ~/.nimble/bin/nimble is a link that `nimble setup` rewrites. It must not
+# shadow the pinned binary.
+expect_eq "the pinned Nimble is the one make runs" \
+  "${tooldir}/nimble" \
+  "$(printf 'include Makefile\n_p:\n\t@command -v nimble\n' | make -s -f - _p 2>/dev/null)"
 
 echo
 echo "  ${pass} passed, ${fail} failed"

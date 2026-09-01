@@ -1,0 +1,101 @@
+name: TEMP / test build_windows.sh
+
+# TEMPORARY. Delete before the upstream PR.
+#
+# scripts/build_windows.sh has no CI coverage, so a change to it cannot be
+# verified. This job runs the real script with the same setup ci / build-windows
+# uses, up to the point where that job starts building. The script then does the
+# building, so a failure here is the script's.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - 'test/**'
+      - 'fix/**'
+
+env:
+  NIM_VERSION: '2.2.6'
+  NIMBLE_VERSION: '0.24.1'
+
+jobs:
+  test-script:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    env:
+      MSYSTEM: MINGW64
+
+    steps:
+    - name: Configure Git to keep LF line endings
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.eol lf
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup MSYS2
+      uses: msys2/setup-msys2@v2
+      with:
+        update: true
+        install: >-
+          git
+          base-devel
+          mingw-w64-x86_64-toolchain
+          make
+          cmake
+          upx
+          unzip
+          mingw-w64-x86_64-rust
+          mingw-w64-x86_64-postgresql
+          mingw-w64-x86_64-gcc
+          mingw-w64-x86_64-gcc-libs
+          mingw-w64-x86_64-libwinpthread-git
+          mingw-w64-x86_64-zlib
+          mingw-w64-x86_64-openssl
+          mingw-w64-x86_64-python
+          mingw-w64-x86_64-cmake
+          mingw-w64-x86_64-llvm
+          mingw-w64-x86_64-clang
+          mingw-w64-x86_64-nasm
+
+    - name: Configure Git in MSYS2 to keep LF line endings
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.eol lf
+
+    - name: Manually install nasm
+      run: |
+        bash scripts/install_nasm_in_windows.sh
+        source $HOME/.bashrc
+
+    - name: Add UPX to PATH
+      run: |
+        echo "/usr/bin:$PATH" >> $GITHUB_PATH
+        echo "/mingw64/bin:$PATH" >> $GITHUB_PATH
+        echo "/usr/lib:$PATH" >> $GITHUB_PATH
+        echo "/mingw64/lib:$PATH" >> $GITHUB_PATH
+
+    - name: Install Nim ${{ env.NIM_VERSION }}
+      uses: jiro4989/setup-nim-action@v2
+      with:
+        nim-version: ${{ env.NIM_VERSION }}
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+    # The script does its own dependency check, tmp directory and builds.
+    - name: Run scripts/build_windows.sh
+      run: ./scripts/build_windows.sh
+
+    # The same three artifacts ci / build-windows checks for.
+    - name: Check the binaries it claims to have built
+      run: |
+        ls -la build/
+        test -f build/wakunode2.exe
+        test -f build/logosdeliverynode.exe
+        test -f build/liblogosdelivery.dll
