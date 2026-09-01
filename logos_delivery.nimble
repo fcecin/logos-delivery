@@ -156,12 +156,12 @@ proc buildLibrary(lib_name: string, srcDir = "./", params = "", `type` = "static
 
 proc buildLibDynamicWindows(libName: string, folderName: string) =
   buildLibrary libName & ".dll", folderName,
-    """-d:chronicles_line_numbers --warning:Deprecated:off --warning:UnusedImport:on -d:chronicles_log_level=TRACE """,
+    """-d:chronicles_line_numbers --warning:Deprecated:off --warning:UnusedImport:on """,
     "dynamic", libName & ".nim", libname
 
 proc buildLibDynamicLinux(libName: string, folderName: string) =
   buildLibrary libName & ".so", folderName,
-    """-d:chronicles_line_numbers --warning:Deprecated:off --warning:UnusedImport:on -d:chronicles_log_level=TRACE """,
+    """-d:chronicles_line_numbers --warning:Deprecated:off --warning:UnusedImport:on """,
     "dynamic", libName & ".nim", libname
 
 proc buildLibDynamicMac(libName: string, folderName: string) =
@@ -173,17 +173,17 @@ proc buildLibDynamicMac(libName: string, folderName: string) =
   else:
     {.error: "Unsupported macOS architecture".}
   buildLibrary libName & ".dylib", folderName,
-    archFlags & " -d:chronicles_line_numbers --warning:Deprecated:off --warning:UnusedImport:on -d:chronicles_log_level=TRACE",
+    archFlags & " -d:chronicles_line_numbers --warning:Deprecated:off --warning:UnusedImport:on",
     "dynamic", libName & ".nim", libname
 
 proc buildLibStaticWindows(libName: string, folderName: string) =
   buildLibrary libName & ".lib", folderName,
-    """-d:chronicles_line_numbers --warning:Deprecated:off --warning:UnusedImport:on -d:chronicles_log_level=TRACE """,
+    """-d:chronicles_line_numbers --warning:Deprecated:off --warning:UnusedImport:on """,
     "static", libName & ".nim", libname
 
 proc buildLibStaticLinux(libName: string, folderName: string) =
   buildLibrary libName & ".a", folderName,
-    """-d:chronicles_line_numbers --warning:Deprecated:off --warning:UnusedImport:on -d:chronicles_log_level=TRACE """,
+    """-d:chronicles_line_numbers --warning:Deprecated:off --warning:UnusedImport:on """,
     "static", libName & ".nim", libname
 
 proc buildLibStaticMac(libName: string, folderName: string) =
@@ -195,7 +195,7 @@ proc buildLibStaticMac(libName: string, folderName: string) =
   else:
     {.error: "Unsupported macOS architecture".}
   buildLibrary libName & ".a", folderName,
-    archFlags & " -d:chronicles_line_numbers --warning:Deprecated:off --warning:UnusedImport:on -d:chronicles_log_level=TRACE",
+    archFlags & " -d:chronicles_line_numbers --warning:Deprecated:off --warning:UnusedImport:on",
     "static", libName & ".nim", libname
 
 ### Mobile Android
