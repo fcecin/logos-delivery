@@ -70,8 +70,24 @@ proc parallelPings*(node: WakuNode, peerIds: seq[PeerId]): Future[int] {.async.}
     let fut = pingPeer(node, peerId)
     pingFuts.add(fut)
 
+  # allFutures does not cancel the futures it waits on, so a ping still running
+  # when this call ends would outlive it and touch a node that is already
+  # stopping. That happens on two paths: the timeout below, and cancellation of
+  # the caller while it waits here. Both must reap the children, so the reap
+  # runs from a finally rather than after the await.
+  proc reapStragglers(): Future[void] {.async: (raises: []).} =
+    var stragglers: seq[Future[void]]
+    for fut in pingFuts:
+      if not fut.finished():
+        stragglers.add(fut.cancelAndWait())
+    if stragglers.len > 0:
+      await noCancel allFutures(stragglers)
+
   # Wait for all pings to complete
-  discard await allFutures(pingFuts).withTimeout(5.seconds)
+  try:
+    discard await allFutures(pingFuts).withTimeout(5.seconds)
+  finally:
+    await noCancel reapStragglers()
 
   var successCount = 0
   for fut in pingFuts:
