@@ -6,7 +6,15 @@ ARG MAKE_TARGET=wakunode2
 ARG NIM_COMMIT
 ARG HEAPTRACK_BUILD=0
 ARG POSTGRES=0
+# Jenkins and `make docker-image` pass both of these as build arguments.
+#
+# DEBUG selects the build mode. Make reads 0 as release and an unset value as
+# debug, so no default here leaves a direct `docker build` unchanged.
+# `make docker-image` passes DEBUG=0.
 ARG DEBUG
+# LOG_LEVEL is the chronicles compile-time floor: statements below it are not
+# compiled into the binary. Unset leaves the floor chronicles selects from the
+# build mode.
 ARG LOG_LEVEL
 
 # Get build tools and required header files
@@ -21,15 +29,19 @@ RUN apk update && apk upgrade
 # Ran separately from 'make' to avoid re-doing
 RUN git submodule update --init --recursive
 
-RUN if [ "$HEAPTRACK_BUILD" = "1" ]; then \
-      git apply --directory=vendor/nimbus-build-system/vendor/Nim docs/tutorial/nim.2.2.4_heaptracker_addon.patch; \
-    fi
-
 # Slowest build step for the sake of caching layers
 RUN make -j$(nproc) deps QUICK_AND_DIRTY_COMPILER=1 ${NIM_COMMIT}
 
+# The heaptracker hooks live in Nim's allocator, so patch the Nim that deps
+# installed. Resolve it from the symlink rather than assuming a path.
+RUN if [ "$HEAPTRACK_BUILD" = "1" ]; then \
+      export PATH="$HOME/.nimble/bin:$PATH"; \
+      NIM_ROOT=$(dirname "$(dirname "$(readlink -f "$(command -v nim)")")"); \
+      git -C "$NIM_ROOT" apply /app/docs/tutorial/nim.2.2.4_heaptracker_addon.patch; \
+    fi
+
 # Build the final node binary
-RUN make -j$(nproc) ${NIM_COMMIT} $MAKE_TARGET NIMFLAGS="${NIMFLAGS}" POSTGRES=${POSTGRES} DEBUG=${DEBUG} LOG_LEVEL=${LOG_LEVEL}
+RUN make -j$(nproc) ${NIM_COMMIT} $MAKE_TARGET NIMFLAGS="${NIMFLAGS}" POSTGRES=${POSTGRES} DEBUG=${DEBUG} LOG_LEVEL=${LOG_LEVEL} HEAPTRACKER=${HEAPTRACK_BUILD}
 
 
 # PRODUCTION IMAGE -------------------------------------------------------------

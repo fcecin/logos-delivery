@@ -30,7 +30,6 @@ export PATH := $(NIMBLE_TOOLDIR):$(HOME)/.nimble/bin:$(PATH)
 
 # NIM binary location
 NIM_BINARY := $(shell which nim 2>/dev/null)
-NPH := $(HOME)/.nimble/bin/nph
 
 NIMBLE := nimble
 
@@ -41,9 +40,19 @@ NIMBLE_TASK_FLAGS = --useSystemNim --requires:"$$(cat requires.generated)"
 NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
 
 # Compilation parameters
-# The project's flags accumulate here. Make applies the caller's NIMFLAGS
-# after them, at the end of the list below.
-NIM_PARAMS :=
+#
+# NIM_PARAMS is the flag list the build receives. Make assembles it in this
+# order, and Nim keeps the last definition of a define, so a later entry wins
+# over an earlier one:
+#
+#   1. NIM_PARAMS from the environment. The ?= below keeps it.
+#   2. the project's own flags, added through the rest of this file.
+#   3. NIMFLAGS from the caller, added at the end.
+#
+# NIM_PARAMS on the make command line does not join that list. It replaces the
+# list, the project's own flags included, because make gives a command line
+# variable precedence over every assignment here. The README warns against it.
+NIM_PARAMS ?=
 
 # V selects verbosity. Callers pass V=1. Nat.mk uses HANDLE_OUTPUT to
 # silence the sub-makes.
@@ -94,9 +103,13 @@ else
 	$(MAKE) compile-test TEST_FILE="$(test_file)" TEST_NAME="$(call test_name)"
 endif
 
-# this prevents make from erroring on unknown targets
+# `make test <file> [name]` passes the file and the name as extra goals. Absorb
+# them here so make does not look for targets by those names. Any other unknown
+# target must still fail, or a stale invocation succeeds while doing nothing.
+ifeq ($(firstword $(MAKECMDGOALS)),test)
 %:
 	@true
+endif
 
 logos_delivery.nims:
 	ln -s logos_delivery.nimble $@
@@ -214,7 +227,8 @@ endif
 
 # Callers set NIMFLAGS. The README, the workflows, the Jenkinsfiles and the
 # Dockerfiles use it. Only NIM_PARAMS reaches the build, so add NIMFLAGS to it
-# here. Add it last. Nim uses the last definition of a define.
+# here, after the defines it may conflict with. Nim uses the last
+# definition of a define.
 NIM_PARAMS := $(NIM_PARAMS) $(NIMFLAGS)
 
 # Export NIM_PARAMS so nimble can access it
@@ -400,10 +414,10 @@ endif
 
 nph/%: | build-nph
 	echo -e $(FORMAT_MSG) "nph/$*" && \
-		$(NPH) $*
+		"$$(command -v nph)" $*
 
 print-nph-path:
-	@echo "$(NPH)"
+	@command -v nph
 
 clean:
 
@@ -427,6 +441,7 @@ DOCKER_IMAGE_NIMFLAGS ?= -d:chronicles_colors:none -d:insecure -d:postgres
 DOCKER_IMAGE_NIMFLAGS := $(DOCKER_IMAGE_NIMFLAGS) $(HEAPTRACK_PARAMS)
 
 docker-image: MAKE_TARGET ?= wakunode2
+docker-image: DEBUG ?= 0
 docker-image: DOCKER_IMAGE_TAG ?= $(MAKE_TARGET)-$(GIT_VERSION)
 docker-image: DOCKER_IMAGE_NAME ?= wakuorg/nwaku:$(DOCKER_IMAGE_TAG)
 docker-image:
@@ -434,6 +449,7 @@ docker-image:
 		--build-arg="MAKE_TARGET=$(MAKE_TARGET)" \
 		--build-arg="NIMFLAGS=$(DOCKER_IMAGE_NIMFLAGS)" \
 		--build-arg="DEBUG=$(DEBUG)" \
+		--build-arg="LOG_LEVEL=$(LOG_LEVEL)" \
 		--build-arg="HEAPTRACK_BUILD=$(HEAPTRACKER)" \
 		--label="commit=$(shell git rev-parse HEAD)" \
 		--label="version=$(GIT_VERSION)" \

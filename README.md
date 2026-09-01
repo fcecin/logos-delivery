@@ -151,7 +151,7 @@ Refer to [logos-delivery-js repo](https://github.com/logos-messaging/logos-deliv
 
 ## Formatting
 
-Nim files are expected to be formatted using the latest [`nph`](https://github.com/arnetheduck/nph), which `make build-nph` installs.
+Nim files are expected to be formatted using [`nph`](https://github.com/arnetheduck/nph). `make build-nph` installs one if it is not already on your PATH.
 
 You can easily format file with the `make nph/<relative path to nim> file` command.
 For example:

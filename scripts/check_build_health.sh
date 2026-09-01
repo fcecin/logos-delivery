@@ -5,19 +5,26 @@
 #
 #   scripts/check_build_health.sh
 #
-# Each case sets a make variable and checks the Nim flags that result.
-# A failed case prints the expected and the actual flags.
+# The cases check four things:
+#
+#   the Nim flags a make variable produces
+#   the commands make would run for a target
+#   the generated constraints against nimble.lock
+#   the command a Nimble task emits
+#
+# A failed case prints the expected and the actual value.
 #
 # Examples:
 #
 #   Variable          Effect
 #   ----------------  ------------------------------------------------
-#   NIMFLAGS=-d:x     adds -d:x, after the project defaults
-#   NIM_PARAMS=-d:x   nothing, use NIMFLAGS
+#   NIMFLAGS=-d:x     adds -d:x, after the defines it may conflict with
+#   NIM_PARAMS=-d:x   from the environment, the base the project appends to;
+#                     on the make command line it replaces the whole set
 #   V=0               adds --verbosity:0 --hints:off, sets HANDLE_OUTPUT
 #   V=1               adds --verbosity:1, clears HANDLE_OUTPUT
 #   LOG_LEVEL=INFO    adds -d:chronicles_log_level="INFO"
-#   LOG_LEVEL empty   nothing, the Dockerfiles pass it empty
+#   LOG_LEVEL empty   nothing
 #   DEBUG=0           adds -d:release -d:lto_incremental -d:strip
 #   DEBUG unset       adds -d:debug
 #   POSTGRES=1        adds -d:postgres
@@ -152,7 +159,8 @@ echo
 expect_flag "NIMFLAGS reaches the compiler" \
   "-d:health_sentinel" NIMFLAGS=-d:health_sentinel
 
-# Nim uses the last definition of a define. NIMFLAGS must come last.
+# Nim uses the last definition of a define. NIMFLAGS must come after the
+# project defines it may conflict with.
 ordering=$(nim_params NIMFLAGS=-d:health_sentinel)
 if [ -z "${ordering}" ]; then
   no "NIMFLAGS wins over project defaults" "NIM_PARAMS did not resolve"
@@ -168,13 +176,20 @@ else
   esac
 fi
 
-# A NIM_PARAMS set in the environment must not reach the build.
-env_bypass=$(NIM_PARAMS=-d:should_be_ignored nim_params NIMFLAGS=-d:health_sentinel)
-case "${env_bypass}" in
-  *should_be_ignored*) no "ambient NIM_PARAMS cannot bypass NIMFLAGS" \
-                          "an environment NIM_PARAMS leaked into the build" \
-                          "actual: ${env_bypass}" ;;
-  *) ok "ambient NIM_PARAMS cannot bypass NIMFLAGS" ;;
+# NIM_PARAMS from the environment is the base the project appends to. Callers
+# outside this repository rely on it, so keep it, and keep NIMFLAGS after it.
+env_base=$(NIM_PARAMS=-d:health_base nim_params NIMFLAGS=-d:health_sentinel)
+case "${env_base}" in
+  *-d:health_base*) ok "an environment NIM_PARAMS still reaches the build" ;;
+  *) no "an environment NIM_PARAMS still reaches the build" \
+       "expected to contain: -d:health_base" \
+       "actual: ${env_base:-<no NIM_PARAMS>}" ;;
+esac
+case "${env_base%%-d:health_sentinel*}" in
+  *-d:health_base*) ok "NIMFLAGS wins over an environment NIM_PARAMS" ;;
+  *) no "NIMFLAGS wins over an environment NIM_PARAMS" \
+       "the caller's flag must come after the environment's" \
+       "actual: ${env_base:-<no NIM_PARAMS>}" ;;
 esac
 
 # The Nimble tasks read NIM_PARAMS with getEnv. Make must export it.
@@ -243,8 +258,8 @@ expect_recipe "setup audits the result" \
   "audit-deps" nimbledeps/.nimble-setup
 
 # --------------------------------------------------------------------------
-# The constraints are generated from nimble.lock. Every one must name the
-# revision the lock names, or the lock is not what the build installs.
+# The constraints are generated from nimble.lock. A named constraint must
+# give the locked version, a URL constraint the locked revision.
 # --------------------------------------------------------------------------
 expect_python "the constraints agree with nimble.lock" "import json
 lock = json.load(open(\"nimble.lock\"))[\"packages\"]
@@ -274,12 +289,12 @@ emitted=$(make wakunode2 \
   NIMFLAGS="-d:chronicles_log_level=HEALTHSENTINEL --nonexistent-flag-xyz" 2>&1 \
   | grep -oE 'nim c [^|]*' | head -1)
 if [ -z "${emitted}" ]; then
-  no "the task puts the caller's flags last" "no nim command was emitted"
+  no "the task puts the caller's flags after its own" "no nim command was emitted"
 else
   before=${emitted%%-d:chronicles_log_level=HEALTHSENTINEL*}
   case "${before}" in
-    *chronicles_log_level=*) ok "the task puts the caller's flags last" ;;
-    *) no "the task puts the caller's flags last" \
+    *chronicles_log_level=*) ok "the task puts the caller's flags after its own" ;;
+    *) no "the task puts the caller's flags after its own" \
          "the task default did not appear before the caller's value" ;;
   esac
 fi

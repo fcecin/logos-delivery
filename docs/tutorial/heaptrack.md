@@ -51,7 +51,7 @@ git commit -m "Add heaptrack support to Nim compiler - temporary patch"
 ```
 
 > Until heaptrack support is not available in official Nim, so it is important to keep it in the `nimbus-build-system` repository.
-> Commit ensures that `make update` will not override the patch unintentionally.
+> Commit ensures that a later submodule update will not override the patch unintentionally.
 
 > We are planning to make it available through an official PR for Nim.
 
