@@ -73,6 +73,16 @@ proc parallelPings*(node: WakuNode, peerIds: seq[PeerId]): Future[int] {.async.}
   # Wait for all pings to complete
   discard await allFutures(pingFuts).withTimeout(5.seconds)
 
+  # allFutures does not cancel the futures it waits on, so a ping still running
+  # when the timeout expires would outlive this call and touch a node that is
+  # already stopping. Cancel the stragglers and wait for them here.
+  var stragglers: seq[Future[void]]
+  for fut in pingFuts:
+    if not fut.finished():
+      stragglers.add(fut.cancelAndWait())
+  if stragglers.len > 0:
+    await noCancel allFutures(stragglers)
+
   var successCount = 0
   for fut in pingFuts:
     if not fut.completed() or fut.failed():
