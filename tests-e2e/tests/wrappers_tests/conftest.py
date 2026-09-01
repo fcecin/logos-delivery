@@ -25,6 +25,12 @@ def build_node_config(**overrides):
         "lightpush": False,
         "peerExchange": False,
         "discv5Discovery": False,
+        # No gateway exists on CI runners, so the libp2p NAT service loops on
+        # failed port mapping, adding and removing its address mapper. That
+        # races PeerInfo.expandAddrs, which iterates addressMappers across an
+        # await, and trips Nim's "seq changed while iterating" assertion on the
+        # FFI thread, killing the process with no pytest report.
+        "nat": "none",
     }
     config.update(overrides)
     return config
