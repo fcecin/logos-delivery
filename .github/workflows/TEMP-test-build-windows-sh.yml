@@ -14,6 +14,7 @@ on:
       - master
       - 'test/**'
       - 'fix/**'
+      - 'build/**'
 
 env:
   NIM_VERSION: '2.2.6'
