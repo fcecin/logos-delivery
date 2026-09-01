@@ -547,14 +547,17 @@ proc stop*(waku: Waku): Future[Result[void, string]] {.async: (raises: []).} =
     if not waku.wakuDiscv5.isNil():
       await waku.wakuDiscv5.stop()
 
+    ## Stop the health monitor before the node. Its keepalive loop pings peers
+    ## through the node's switch and peer manager, so it must not be running
+    ## while node.stop() tears those down.
+    if not waku.healthMonitor.isNil():
+      await waku.healthMonitor.stopHealthMonitor()
+
     if not waku.node.isNil():
       await waku.node.stop()
 
     if not waku.dnsRetryLoopHandle.isNil():
       await waku.dnsRetryLoopHandle.cancelAndWait()
-
-    if not waku.healthMonitor.isNil():
-      await waku.healthMonitor.stopHealthMonitor()
 
     ## Clear all providers registered in start() so a later start() can re-set them.
     RequestConnectionStatus.clearProvider(waku.brokerCtx)
