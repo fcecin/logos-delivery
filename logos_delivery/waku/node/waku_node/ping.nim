@@ -43,11 +43,24 @@ proc pingPeer(node: WakuNode, peerId: PeerId): Future[Result[void, string]] {.as
       debug "pingPeer: failed dialing peer", peerId = peerId
       return err("pingPeer failed dialing peer peerId: " & $peerId)
     defer:
-      # Always close the stream
-      try:
-        await stream.close()
-      except CatchableError as e:
-        debug "Error closing ping connection", peerId = peerId, error = e.msg
+      # Always close the stream, best effort.
+      #
+      # LPStream.close is declared `raw: true`, so it returns whatever its
+      # dispatched implementation returns rather than a future the async
+      # wrapper allocated. That can be nil, and `await nil` raises an
+      # AssertionDefect inside chronos that no `except CatchableError` can
+      # catch: it kills the whole process. Check before awaiting.
+      let closeFut =
+        try:
+          stream.close()
+        except CatchableError as e:
+          debug "Error closing ping connection", peerId = peerId, error = e.msg
+          nil
+      if not closeFut.isNil():
+        try:
+          await closeFut
+        except CatchableError as e:
+          debug "Error closing ping connection", peerId = peerId, error = e.msg
 
     # Perform ping
     let pingDuration = await node.libp2pPing.ping(stream)
