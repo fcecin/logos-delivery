@@ -690,11 +690,15 @@ proc stop*(node: WakuNode) {.async.} =
     except Exception:
       error "exception stopping the node", error = getCurrentExceptionMsg()
 
-  if not node.wakuArchive.isNil():
-    await node.wakuArchive.stopWait()
-
+  ## Stop the store resume loop before the archive it writes into.
+  ## periodicSetLastOnline (waku_store/resume.nim) wakes every minute and
+  ## writes a timestamp through the archive, so it must not still be running
+  ## once wakuArchive has stopped.
   if not node.wakuStoreResume.isNil():
     await node.wakuStoreResume.stopWait()
+
+  if not node.wakuArchive.isNil():
+    await node.wakuArchive.stopWait()
 
   if not node.wakuPeerExchangeClient.isNil() and
       not node.wakuPeerExchangeClient.pxLoopHandle.isNil():
