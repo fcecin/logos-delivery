@@ -668,6 +668,12 @@ proc start*(node: WakuNode) {.async.} =
 proc stop*(node: WakuNode) {.async.} =
   ## By stopping the switch we are stopping all the underlying mounted protocols
 
+  ## Lower the running flag before anything is torn down. Background loops such
+  ## as the health monitor's keepalive gate on `started` precisely so they do
+  ## not touch the node while it stops; leaving it true until the end of this
+  ## proc let them run against an already stopped switch and peer manager.
+  node.started = false
+
   # Cancel the background relay reconnection (may still be in its backoff wait).
   if not node.relayReconnectFut.isNil():
     await node.relayReconnectFut.cancelAndWait()
