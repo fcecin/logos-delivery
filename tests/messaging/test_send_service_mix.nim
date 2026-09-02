@@ -1,6 +1,6 @@
 {.used.}
 
-import std/[net, sequtils]
+import std/[net, sequtils, strutils]
 import chronos, chronicles, testutils/unittests, results, stew/byteutils
 
 import
@@ -304,6 +304,7 @@ type StubMixConn = ref object of Connection
   replyReceivedFut: Future[void]
   sendStall: Future[void].Raising([CancelledError])
   stallInSend: bool
+  failSend: bool
   cached: seq[byte]
 
 method readOnce(
@@ -337,6 +338,10 @@ method write(
   # expire, so dialing a mix node that has gone away is the routine failure.
   if s.stallInSend:
     await s.sendStall
+  if s.failSend:
+    # What `MixEntryConnection.write` raises when the first hop cannot be
+    # dialed: the failure is reported on the stream, not as a dial error.
+    raise newException(LPStreamError, "Failed to dial to next hop")
 
 method closeImpl(s: StubMixConn): Future[void] {.async: (raises: []).} =
   if not s.incomingFut.isNil():
@@ -345,8 +350,8 @@ method closeImpl(s: StubMixConn): Future[void] {.async: (raises: []).} =
 method getWrapped(s: StubMixConn): Connection =
   nil
 
-proc newStubMixConn(stallInSend = false): StubMixConn =
-  var inst = StubMixConn(stallInSend: stallInSend)
+proc newStubMixConn(stallInSend = false, failSend = false): StubMixConn =
+  var inst = StubMixConn(stallInSend: stallInSend, failSend: failSend)
   inst.incoming = newAsyncQueue[seq[byte]]()
   inst.replyReceivedFut = newFuture[void]("stub.replyReceived")
   inst.sendStall = Future[void].Raising([CancelledError]).init("stub.sendStall")
@@ -402,6 +407,31 @@ suite "Mix send path - the reply budget":
     check:
       res.isErr()
       res.error.code == LightPushErrorCode.SERVICE_NOT_AVAILABLE
+
+  asyncTest "a first hop that cannot be dialed fails the attempt at once":
+    ## Mix reports a refused first hop as a stream error on the write. The
+    ## lightpush client must not then drain the connection for an EOF: on a mix
+    ## connection that read blocks on a reply that can never come, and an
+    ## immediate failure would cost the whole reply budget. Told apart from a
+    ## timeout by the verdict's text, which does not depend on timing.
+    let conn = newStubMixConn(failSend = true)
+    let msg = fakeWakuMessage(contentTopic = "/test/1/anonymity/proto")
+
+    let publishFut = waku.node.publishOverMix(
+      Connection(conn), PubsubTopic("/waku/2/rs/3/0"), msg, chronos.seconds(5)
+    )
+    let guard = sleepAsync(chronos.seconds(2))
+    discard await race(FutureBase(publishFut), FutureBase(guard))
+    await guard.cancelAndWait()
+
+    if not publishFut.finished():
+      publishFut.cancelSoon()
+      raiseAssert "a failed send waited for the reply budget instead of returning"
+    let res = await publishFut
+    check:
+      res.isErr()
+      res.error.code == LightPushErrorCode.SERVICE_NOT_AVAILABLE
+      "timed out" notin res.error.desc.get("")
 
   asyncTest "a stalled first-hop dial is given up on too":
     ## The sibling shape, and the one that bites hardest: with the stall in the
