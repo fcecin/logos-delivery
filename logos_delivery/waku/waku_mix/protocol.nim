@@ -59,22 +59,28 @@ proc processBootNodes(
         peerId = peerId, scheme = peerPubKey.scheme
       continue
 
-    let multiAddr = MultiAddress.init(node.multiAddr).valueOr:
-      error "Failed to parse multiaddress", multiAddr = node.multiAddr, error = error
-      continue
+    ## The wire address, without the `/p2p/<id>` part `parsePeerInfo` has just
+    ## taken the peer id from. Mix matches pool addresses against its transport
+    ## patterns exactly, so an address that still carries the peer id is never
+    ## "supported": the node would sit in the pool until the first path build
+    ## picked it, then be evicted for having no usable address.
+    let multiAddr = pInfo.addrs[0]
 
-    ## `addPeer` before `nodePool.add`, not after: it writes the address book at
-    ## default confidence, which would undo the `Infinite` confidence the pool
-    ## sets to keep libp2p's hourly address pruning off our configured mix nodes.
+    ## `nodePool.add` first, `addPeer` second. The pool writes the address at
+    ## `Infinite` confidence, which keeps libp2p's hourly address pruning off a
+    ## configured mix node, but only when the address is not in the book yet.
+    ## `addPeer` can safely follow: libp2p's address book never lowers the
+    ## confidence of an address it already holds. The other order leaves the
+    ## entry at the default confidence, and the bootnode silently expires.
+    let mixPubInfo = MixPubInfo.init(peerId, multiAddr, node.pubKey, peerPubKey.skkey)
+    mix.nodePool.add(mixPubInfo)
+    count.inc()
+
     peermgr.addPeer(
       RemotePeerInfo.init(
         peerId, @[multiAddr], publicKey = peerPubKey, mixPubKey = Opt.some(node.pubKey)
       )
     )
-
-    let mixPubInfo = MixPubInfo.init(peerId, multiAddr, node.pubKey, peerPubKey.skkey)
-    mix.nodePool.add(mixPubInfo)
-    count.inc()
   mix_pool_size.set(count)
   info "using mix bootstrap nodes ", count = count
 

@@ -1,13 +1,15 @@
 {.used.}
 
-import std/net
+import std/[net, sequtils]
 import chronos, chronicles, testutils/unittests, results, stew/byteutils
 
 import
-  libp2p_mix/curve25519,
-  libp2p/[peerid, multiaddress],
+  libp2p_mix/[curve25519, pool],
+  libp2p/[peerid, multiaddress, peerstore],
   libp2p/stream/connection,
   logos_delivery/waku/waku,
+  logos_delivery/waku/waku_mix,
+  logos_delivery/waku/node/waku_node,
   logos_delivery/waku/api/publish,
   logos_delivery/waku/node/peer_manager,
   logos_delivery/waku/node/peer_manager/waku_peer_store,
@@ -268,6 +270,28 @@ suite "Mix send path - exit peer selection":
     let selected = waku.selectMixLightpushPeer(shard).valueOr:
       raiseAssert "the slotted lightpush node should be offered as a mix exit"
     check selected.peerId == peerId
+
+  asyncTest "a statically configured mix node is a usable pool entry, pinned against pruning":
+    ## `--mixnode` takes the peer's full multiaddr. Mix matches pool addresses
+    ## against its transport patterns exactly, so the wire address has to be
+    ## stored without the `/p2p/` part, and at `Infinite` confidence so that
+    ## libp2p's hourly address pruning leaves a configured node alone.
+    let peerId = PeerId.init(generateSecp256k1Key()).tryGet()
+    let keyPair = generateKeyPair().expect("mix key pair")
+    let bootnode = MixNodePubInfo(
+      multiAddr: "/ip4/127.0.0.1/tcp/60000/p2p/" & $peerId, pubKey: keyPair.publicKey
+    )
+    let (mixPrivKey, _) = generateKeyPair().expect("mix key pair")
+    (await waku.node.mountMix(3'u16, mixPrivKey, @[bootnode])).isOkOr:
+      raiseAssert "failed to mount mix: " & error
+
+    let peerStore = waku.node.peerManager.switch.peerStore
+    check:
+      waku.node.getMixNodePoolSize() == 1
+      MixNodePool.new(peerStore).get(peerId).isSome()
+      peerStore[AddressBook].entries(peerId).anyIt(
+        it.confidence == AddressConfidence.Infinite
+      )
 
 ## A stand-in for `libp2p_mix`'s `MixEntryConnection`, reproducing the three
 ## behaviours that make a lost SURB reply dangerous: `write` succeeds (the
