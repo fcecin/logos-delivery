@@ -433,6 +433,27 @@ suite "Mix send path - the reply budget":
       res.error.code == LightPushErrorCode.SERVICE_NOT_AVAILABLE
       "timed out" notin res.error.desc.get("")
 
+  asyncTest "stopping the send mid-flight lets the cancellation through":
+    ## The send service stops with `cancelAndWait` on its loop. A publish that
+    ## swallowed that cancellation, or whose unwind wedged, would hang the stop
+    ## forever, with every message on the node still queued behind it.
+    let conn = newStubMixConn(stallInSend = true)
+    let msg = fakeWakuMessage(contentTopic = "/test/1/anonymity/proto")
+
+    let publishFut = waku.node.publishOverMix(
+      Connection(conn), PubsubTopic("/waku/2/rs/3/0"), msg, chronos.seconds(30)
+    )
+    await sleepAsync(chronos.milliseconds(50))
+
+    let cancelFut = publishFut.cancelAndWait()
+    let guard = sleepAsync(chronos.seconds(5))
+    discard await race(FutureBase(cancelFut), FutureBase(guard))
+    await guard.cancelAndWait()
+
+    if not cancelFut.finished():
+      raiseAssert "cancelling the mix publish never completed"
+    check publishFut.cancelled()
+
   asyncTest "a stalled first-hop dial is given up on too":
     ## The sibling shape, and the one that bites hardest: with the stall in the
     ## send, the reply future is still pending when the client's
