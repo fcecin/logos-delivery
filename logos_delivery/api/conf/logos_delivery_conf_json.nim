@@ -18,6 +18,8 @@ const
   # a flat blob before the WakuNodeConf walker sees them (it would reject them).
   KeyReliabilityEnabled = "reliabilityenabled"
   KeyReliability = "reliability"
+  KeyAnonymityLevel = "anonymitylevel"
+  KeyAnonymityLevelCli = "anonymity-level"
 
 proc parseMode(s: string): Result[LogosDeliveryMode, string] =
   case s.strip().toLowerAscii()
@@ -59,19 +61,22 @@ proc parseFlatConf(
     mode: LogosDeliveryMode, topJsonNode: var Table[string, (string, JsonNode)]
 ): ConfResult[LogosDeliveryConf] =
   ## [Legacy flat JSON config] Flat shape: a blob of `WakuNodeConf` fields. `mode`
-  ## expands to protocol flags over raw kernel defaults, `reliabilityEnabled` routes
-  ## to the messaging conf (it left the kernel), and the rest parses as a
-  ## `WakuNodeConf`. Full stack. Delete this proc and its call site to drop support.
+  ## expands to protocol flags over raw kernel defaults, `reliabilityEnabled` and
+  ## `anonymityLevel` route to the messaging conf (they live there, not in the
+  ## kernel), and the rest parses as a `WakuNodeConf`. Full stack. Delete this
+  ## proc and its call site to drop support.
   var messaging = MessagingClientConf()
-  var reliabilityFields: Table[string, (string, JsonNode)]
-  for key in [KeyReliabilityEnabled, KeyReliability]:
+  var messagingFields: Table[string, (string, JsonNode)]
+  for key in [
+    KeyReliabilityEnabled, KeyReliability, KeyAnonymityLevel, KeyAnonymityLevelCli
+  ]:
     if topJsonNode.hasKey(key):
-      reliabilityFields[key] = topJsonNode.getOrDefault(key)
+      messagingFields[key] = topJsonNode.getOrDefault(key)
       topJsonNode.del(key)
-  if reliabilityFields.len > 0:
+  if messagingFields.len > 0:
     ?applyJsonFieldsToConf(
-      messaging, reliabilityFields, "Failed to parse reliability field",
-      "Unrecognized reliability option(s) found",
+      messaging, messagingFields, "Failed to parse messaging field",
+      "Unrecognized messaging option(s) found",
     )
 
   # [Legacy flat JSON config] The blob is a raw WakuNodeConf, exactly as the
@@ -91,10 +96,16 @@ proc parseFlatConf(
   if kernel.preset.len > 0:
     messaging = merge(?resolvePreset(kernel.preset), messaging)
 
-  # [Legacy flat JSON config] `anonymityLevel` parses onto the kernel blob, but the
-  # send path reads it from the messaging conf, so lift it across.
-  if messaging.anonymityLevel.isNone():
-    messaging.anonymityLevel = Opt.some(kernel.anonymityLevel)
+  # The structured path gets this from `toWakuNodeConf`; the flat blob builds
+  # its kernel record directly, so the messaging setting's kernel half is
+  # applied here. An explicit `mix: false` next to it is a contradiction.
+  if messaging.mixRequired():
+    if kernel.mix == Opt.some(false):
+      return err(
+        "anonymityLevel=" & $messaging.anonymityLevel.get() &
+          " needs mix, but mix=false was set"
+      )
+    kernel.mix = Opt.some(true)
 
   return ok(
     LogosDeliveryConf(

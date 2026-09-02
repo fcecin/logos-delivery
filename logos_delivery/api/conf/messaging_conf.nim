@@ -63,6 +63,12 @@ type MessagingClientConf* = object
     ## pragma or `parseCmdArg`, it is not reachable from the JSON config or a
     ## CLI flag.
 
+proc mixRequired*(self: MessagingClientConf): bool =
+  ## True when the anonymity level can only be honoured with mix mounted. The
+  ## level itself stays on this record: the send service reads it from here,
+  ## never from the kernel conf.
+  self.anonymityLevel.get(AnonymityLevel.None) != AnonymityLevel.None
+
 proc applyMode*(conf: var WakuNodeConf, mode: LogosDeliveryMode): ConfResult[void] =
   ## Sets the protocol flags implied by the mode.
   case mode
@@ -130,10 +136,10 @@ proc toWakuNodeConf*(
     conf.rlnRelayChainId = self.rlnChainId.get()
   if self.rlnEpochSizeSec.isSome():
     conf.rlnEpochSizeSec = Opt.some(self.rlnEpochSizeSec.get().uint64)
-  if self.anonymityLevel.isSome():
-    conf.anonymityLevel = self.anonymityLevel.get()
-    if self.anonymityLevel.get() != AnonymityLevel.None:
-      conf.mix = Opt.some(true)
+  if self.mixRequired():
+    # The kernel half of the setting: the send path can only route through a
+    # mix the node mounts.
+    conf.mix = Opt.some(true)
   if self.logLevel.isSome():
     conf.logLevel = self.logLevel.get()
   if self.logFormat.isSome():
