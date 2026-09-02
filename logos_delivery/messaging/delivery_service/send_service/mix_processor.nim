@@ -70,6 +70,20 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
       task.parkForRlnProofRefresh(self.waku)
       return
 
+    if error.code == LightPushErrorCode.PAYLOAD_TOO_LARGE:
+      # No retry and no other path will make the message fit a sphinx packet.
+      # `BestEffort` hands it to the plain path now rather than after the
+      # window; `Required` fails it now rather than at the delivery deadline.
+      if self.fallbackAllowed:
+        debug "Message too large for mix, handing the task to the plain send path",
+          requestId = task.requestId, msgHash = task.msgHash.to0xHex()
+        task.state = DeliveryState.FallbackRetry
+      else:
+        task.state = DeliveryState.FailedToDeliver
+        task.errorDesc = error.desc.get($error.code)
+        task.deliveryTime = Moment.now()
+      return
+
     case error.code
     of LightPushErrorCode.NO_PEERS_TO_RELAY, LightPushErrorCode.TOO_MANY_REQUESTS,
         LightPushErrorCode.OUT_OF_RLN_PROOF, LightPushErrorCode.SERVICE_NOT_AVAILABLE,

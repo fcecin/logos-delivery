@@ -50,6 +50,10 @@ server that is itself a mix node and terminates the path. So the node needs:
   statically configured `lightpushnode` qualifies as soon as its mix key has
   been learned.
 
+A sphinx packet is fixed-size and the mix path does not split messages, so a
+message of more than a few KiB cannot go through mix at all: `BestEffort`
+hands it to the plain path at once, `Required` fails it at once.
+
 Each mix attempt waits at most 5 s for the exit's reply before it is retried on
 the next round. That budget is short on purpose: the send service walks its
 queued messages one at a time, so every other message on the node waits behind

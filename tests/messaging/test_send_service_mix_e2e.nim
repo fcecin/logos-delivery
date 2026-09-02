@@ -12,9 +12,12 @@
 ## real configuration path, the real send-processor chain, real sphinx path
 ## construction and a real SURB reply, with nothing stubbed.
 
-import std/[net, sequtils]
+import std/[net, sequtils, strutils]
 import chronos, chronicles, testutils/unittests, results, stew/byteutils
-import libp2p/[peerid, peerstore, switch], libp2p_mix/curve25519, brokers/broker_context
+import
+  libp2p/[peerid, peerstore, switch],
+  libp2p_mix/[curve25519, padding],
+  brokers/broker_context
 import
   logos_delivery,
   logos_delivery/waku/[waku_node, waku_core, waku_mix],
@@ -304,6 +307,57 @@ suite "Mix send path - end to end over an in-process mixnet":
     check:
       inbox.read().payload == "best effort, still mixed".toBytes()
       not exitNode.switch.isConnected(sender.waku.node.peerId())
+
+  asyncTest "a message too large for mix falls back at once under BestEffort and fails at once under Required":
+    ## A sphinx packet cannot carry more than `DataSize` bytes and the mix path
+    ## does not fragment. Neither level should sit on such a message: the
+    ## `BestEffort` window and the `Required` deadline are both a minute.
+    let tooBig = newSeq[byte](DataSize)
+
+    block bestEffort:
+      let sender = await newAnonymousSender(AnonymityLevel.BestEffort, mixnet, exitNode)
+      defer:
+        (await sender.stop()).isOkOr:
+          raiseAssert "failed to stop the sender: " & error
+      let watch = watchSend(sender.waku.brokerCtx)
+      defer:
+        await watch.stop()
+
+      discard (
+        await sender.messagingClient.send(
+          MessageEnvelope.init(TestContentTopic, tooBig)
+        )
+      ).valueOr:
+        raiseAssert error
+
+      # Delivered by the plain lightpush path, which dials the exit directly.
+      check await watch.propagated.withTimeout(QuietPeriod)
+      if not await inbox.withTimeout(QuietPeriod):
+        raiseAssert "the relay peer never received the oversized message"
+      check:
+        inbox.read().payload.len == DataSize
+        exitNode.switch.isConnected(sender.waku.node.peerId())
+
+    block required:
+      let sender = await newAnonymousSender(AnonymityLevel.Required, mixnet, exitNode)
+      defer:
+        (await sender.stop()).isOkOr:
+          raiseAssert "failed to stop the sender: " & error
+      let watch = watchSend(sender.waku.brokerCtx)
+      defer:
+        await watch.stop()
+
+      discard (
+        await sender.messagingClient.send(
+          MessageEnvelope.init(TestContentTopic, tooBig)
+        )
+      ).valueOr:
+        raiseAssert error
+
+      check await watch.failed.withTimeout(QuietPeriod)
+      if watch.failed.finished():
+        check "too large" in watch.failed.read()
+      check not watch.propagated.finished()
 
   asyncTest "a Required send never falls back to a plain lightpush peer":
     ## The only lightpush server the sender knows is not a mix node, and no mix

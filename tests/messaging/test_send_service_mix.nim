@@ -305,6 +305,7 @@ type StubMixConn = ref object of Connection
   sendStall: Future[void].Raising([CancelledError])
   stallInSend: bool
   failSend: bool
+  oversized: bool
   cached: seq[byte]
 
 method readOnce(
@@ -342,6 +343,9 @@ method write(
     # What `MixEntryConnection.write` raises when the first hop cannot be
     # dialed: the failure is reported on the stream, not as a dial error.
     raise newException(LPStreamError, "Failed to dial to next hop")
+  if s.oversized:
+    # What it raises for a frame larger than one sphinx packet can carry.
+    raise newException(LPStreamError, "exceeds max msg size of 4000 bytes")
 
 method closeImpl(s: StubMixConn): Future[void] {.async: (raises: []).} =
   if not s.incomingFut.isNil():
@@ -350,8 +354,11 @@ method closeImpl(s: StubMixConn): Future[void] {.async: (raises: []).} =
 method getWrapped(s: StubMixConn): Connection =
   nil
 
-proc newStubMixConn(stallInSend = false, failSend = false): StubMixConn =
-  var inst = StubMixConn(stallInSend: stallInSend, failSend: failSend)
+proc newStubMixConn(
+    stallInSend = false, failSend = false, oversized = false
+): StubMixConn =
+  var inst =
+    StubMixConn(stallInSend: stallInSend, failSend: failSend, oversized: oversized)
   inst.incoming = newAsyncQueue[seq[byte]]()
   inst.replyReceivedFut = newFuture[void]("stub.replyReceived")
   inst.sendStall = Future[void].Raising([CancelledError]).init("stub.sendStall")
@@ -432,6 +439,20 @@ suite "Mix send path - the reply budget":
       res.isErr()
       res.error.code == LightPushErrorCode.SERVICE_NOT_AVAILABLE
       "timed out" notin res.error.desc.get("")
+
+  asyncTest "a message too large for a mix packet is reported as such, not as transient":
+    ## A sphinx packet is fixed-size and the entry connection does not
+    ## fragment, so no retry makes the message fit. The send processors treat
+    ## SERVICE_NOT_AVAILABLE as "try again next round"; this must not be that.
+    let conn = newStubMixConn(oversized = true)
+    let msg = fakeWakuMessage(contentTopic = "/test/1/anonymity/proto")
+
+    let res = await waku.node.publishOverMix(
+      Connection(conn), PubsubTopic("/waku/2/rs/3/0"), msg, chronos.seconds(5)
+    )
+    check:
+      res.isErr()
+      res.error.code == LightPushErrorCode.PAYLOAD_TOO_LARGE
 
   asyncTest "stopping the send mid-flight lets the cancellation through":
     ## The send service stops with `cancelAndWait` on its loop. A publish that

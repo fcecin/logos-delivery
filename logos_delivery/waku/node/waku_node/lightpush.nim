@@ -96,9 +96,19 @@ proc publishOverMix*(
   try:
     return await publishFut
   except LPStreamError as exc:
-    # The mix entry connection reports a first hop it could not dial, or a
-    # write it could not complete, as a stream error. Retryable: the next
-    # round builds a fresh path.
+    # A sphinx packet is fixed-size and this path does not fragment: a request
+    # the entry connection refuses as too large will never fit, whatever the
+    # path. Report it as such so the caller does not retry it.
+    if exc.msg.contains("exceeds max msg size"):
+      debug "Message too large for a mix packet",
+        pubsubTopic = pubsubTopic, error = exc.msg
+      return lighpushErrorResult(
+        LightPushErrorCode.PAYLOAD_TOO_LARGE,
+        "message too large for a mix packet: " & exc.msg,
+      )
+    # Anything else the mix entry connection reports on the stream (a first
+    # hop it could not dial, a write it could not complete) is retryable: the
+    # next round builds a fresh path.
     debug "Mix lightpush failed", pubsubTopic = pubsubTopic, error = exc.msg
     return lighpushErrorResult(
       LightPushErrorCode.SERVICE_NOT_AVAILABLE,
