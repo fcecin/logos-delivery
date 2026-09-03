@@ -226,17 +226,36 @@ jobs:
             build/ios/*/liblogosdelivery.h
           retention-days: 1
 
-  test:
+  tests:
+    # Two bags of test binaries, each one a job. The bags are a knapsack
+    # over the binaries' weights (compile plus run, at -j1 on the Ubuntu
+    # runner): the assignment minimizes the longest job, under the 60-minute
+    # limit. The job does not know what a binary holds; it runs its targets
+    # in order. Each job installs the dependencies once (about 5 min).
+    #
+    #   binary          compile   run     weight
+    #   testwaku        12 min    20 min  32 min   (the kernel)
+    #   testmessaging   11 min     7 min  18 min   (the layers above the kernel)
+    #   testcommon       5 min     0 min   5 min
+    #   testwakunode2    4 min     0 min   4 min
+    #
+    # Bag 1: testwaku (32). Bag 2: testmessaging, testcommon, testwakunode2 (27).
+    # When a binary's weight changes, re-balance the bags here.
     needs: changes
     if: ${{ needs.changes.outputs.v2 == 'true' || needs.changes.outputs.common == 'true' }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-15]
+        bag:
+          - number: 1
+            targets: testwaku
+          - number: 2
+            targets: testmessaging testcommon testwakunode2
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
 
-    name: test-${{ matrix.os }}
+    name: tests-${{ matrix.bag.number }}-${{ matrix.os }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -253,7 +272,7 @@ jobs:
           nimble-version: ${{ env.NIMBLE_VERSION }}
           nim-version: ${{ env.NIM_VERSION }}
 
-      - name: Run tests
+      - name: Run the test binaries of this bag
         run: |
           postgres_enabled=0
           if [ ${{ runner.os }} == "Linux" ]; then
@@ -265,60 +284,9 @@ jobs:
           export NIMFLAGS="--colors:off -d:chronicles_colors:none -d:disableMarchNative"
           export USE_LIBBACKTRACE=0
 
-          # The kernel test binaries by name. `make test` chains testcommon,
-          # testwaku and testmessaging; testmessaging has its own job below,
-          # because the second compile of the dependency graph does not fit
-          # this job's time limit next to testwaku.
-          make V=1 POSTGRES=$postgres_enabled testcommon
-          make V=1 POSTGRES=$postgres_enabled testwaku
-          make V=1 POSTGRES=$postgres_enabled testwakunode2
-
-      - name: Audit installed deps
-        run: make audit-deps
-
-  test-messaging:
-    needs: changes
-    if: ${{ needs.changes.outputs.v2 == 'true' || needs.changes.outputs.common == 'true' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, macos-15]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-
-    name: test-messaging-${{ matrix.os }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Nim ${{ env.NIM_VERSION }}
-        uses: jiro4989/setup-nim-action@v2
-        with:
-          nim-version: ${{ env.NIM_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install nimble deps
-        uses: ./.github/actions/nimble-deps
-        with:
-          nimble-version: ${{ env.NIMBLE_VERSION }}
-          nim-version: ${{ env.NIM_VERSION }}
-
-      - name: Run the tests above the kernel
-        run: |
-          # The suites above the kernel (api, messaging, channels) in their
-          # own binary: all_tests_waku with them exceeds the refc limit of
-          # 3500 global markers. See tests/all_tests_messaging.nim.
-          postgres_enabled=0
-          if [ ${{ runner.os }} == "Linux" ]; then
-            sudo docker run --rm -d -e POSTGRES_PASSWORD=test123 -p 5432:5432 postgres:15.4-alpine3.18
-            postgres_enabled=1
-          fi
-
-          export MAKEFLAGS="-j1"
-          export NIMFLAGS="--colors:off -d:chronicles_colors:none -d:disableMarchNative"
-          export USE_LIBBACKTRACE=0
-
-          make V=1 POSTGRES=$postgres_enabled testmessaging
+          for target in ${{ matrix.bag.targets }}; do
+            make V=1 POSTGRES=$postgres_enabled $target
+          done
 
       - name: Audit installed deps
         run: make audit-deps
