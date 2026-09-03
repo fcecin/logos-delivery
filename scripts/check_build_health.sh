@@ -9,7 +9,7 @@
 #
 #   the Nim flags a make variable produces
 #   the commands make would run for a target
-#   the generated constraints against nimble.lock
+#   the URL requirements and nix/deps.nix against nimble.lock
 #   the command a Nimble task emits
 #
 # A failed case prints the expected and the actual value.
@@ -53,19 +53,7 @@ no() {
   fail=$((fail + 1))
 }
 
-# name, python program. The program prints "ok" or the reason it failed.
-expect_python() {
-  local name=$1 prog=$2
-  local got
-  got=$(python3 -c "${prog}" 2>&1)
-  if [ "${got}" = "ok" ]; then
-    ok "${name}"
-  else
-    no "${name}" "${got}"
-  fi
-}
-
-# name, command...: the command must exit 0; its output is shown on failure.
+# name, command... The command must exit 0.
 expect_ok() {
   local name=$1
   shift
@@ -305,9 +293,8 @@ expect_make_fails  "an arbitrary unknown target fails"  definitely-not-a-target
 expect_make_parses "make test <file> still parses"      test tests/all_tests_waku.nim
 
 # --------------------------------------------------------------------------
-# Dependency versions come from nimble.lock alone. Setup and the custom
-# tasks pass no --requires; the lock file is the only constraint, and the
-# audit checks the installed set and the pins against it.
+# Setup and the custom tasks pass no --requires. nimble.lock is the only
+# constraint.
 # --------------------------------------------------------------------------
 reject_recipe "setup passes no --requires" \
   '--requires' nimbledeps/.nimble-setup
@@ -323,11 +310,8 @@ expect_recipe "setup audits the result" \
   "audit-deps" nimbledeps/.nimble-setup
 
 # --------------------------------------------------------------------------
-# The preflight itself: every URL requirement in logos_delivery.nimble and
-# every entry in nix/deps.nix agrees with nimble.lock. Nimble matches a URL
-# requirement to the lock by exact URL and by version string; a mismatch
-# falls back to an online re-solve. The rules live in scripts/audit_deps.nims,
-# which runs its own self-tests first.
+# The preflight: URL requirements and nix/deps.nix agree with nimble.lock.
+# Rules in scripts/audit_deps.nims.
 # --------------------------------------------------------------------------
 expect_ok "the URL requirements and nix/deps.nix agree with nimble.lock" \
   nim e --hints:off scripts/audit_deps.nims pins

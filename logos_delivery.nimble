@@ -15,17 +15,12 @@ installDirs = @["library", "migrations", "tools"]
 
 const RequiredNimVersion = "2.2.6"
   ## This is the nim compiler version that we are working on. Other versions may behave differently.
-const RequiredNimbleVersion = "0.24.1"
-  ## Enforced nimble version to ensure a reproducible flow
 const RequiredNimbleRevision = "07caee397d628c9e93d81048268365c4c2414a80"
-  ## Unreleased. Release 0.24.1 matches nimble.lock entries by package name only, so
-  ## every URL requirement above misses the lock and every setup and task re-solves
-  ## the whole graph online. b1b0690 (2026-09-01) matches URL requirements to the
-  ## lock by URL, and 07caee3 (2026-09-02) installs from the locked URL and revision.
-  ## With both, setup and tasks resolve from nimble.lock alone and stay offline once
-  ## the packages are installed. Every URL pin above must carry the exact version
-  ## string its lock entry records (a tag or a commit); scripts/audit_deps.nims
-  ## checks that, because a mismatch silently falls back to the online re-solve.
+  ## Nimble git revision (40 hex digits) or release version ("0.25.0", built from tag
+  ## v0.25.0). This revision matches URL requirements to nimble.lock by URL and installs
+  ## from the locked URL and revision. Releases up to 0.24.1 match the lock by package
+  ## name only and re-solve URL requirements online. A URL pin must carry the version
+  ## string of its lock entry; scripts/audit_deps.nims checks this.
 
 ### Dependencies
 requires "nim == 2.2.6",

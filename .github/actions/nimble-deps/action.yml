@@ -5,9 +5,6 @@ description: >
   from nimble.lock.
 
 inputs:
-  nimble-version:
-    description: 'The Nimble version to install (RequiredNimbleVersion).'
-    required: true
   nim-version:
     description: 'The Nim version on PATH. A cache key component: the compiler builds the cached native libraries.'
     required: true
@@ -17,32 +14,21 @@ inputs:
   make-args:
     description: 'Extra arguments for the C library rebuild make calls.'
     default: ''
-  extra-path:
-    description: 'A PATH prefix for the steps of this action.'
-    default: ''
 
 runs:
   using: composite
   steps:
-    - name: Install Nimble ${{ inputs.nimble-version }}
+    - name: Install the pinned Nimble
       shell: bash
       run: |
-        if [ -n "${{ inputs.extra-path }}" ]; then
-          export PATH="${{ inputs.extra-path }}:$PATH"
-        fi
-        NIMBLE_REVISION=$(sed -n 's/^const RequiredNimbleRevision = "\([0-9a-f]*\)"/\1/p' logos_delivery.nimble)
-        scripts/install_nimble.sh "${{ inputs.nimble-version }}" "${NIMBLE_REVISION}"
+        NIMBLE_REVISION=$(sed -n 's/^const RequiredNimbleRevision = "\([^"]*\)"/\1/p' logos_delivery.nimble)
+        scripts/install_nimble.sh "${NIMBLE_REVISION}"
         echo "$HOME/.nimble/bin" >> $GITHUB_PATH
         echo "$HOME/.local/nimble-${NIMBLE_REVISION}/bin" >> $GITHUB_PATH
 
     - name: Preflight nimble.lock against the pins and nix/deps.nix
       shell: bash
-      # Fails fast, before the cache download, on the mismatch that would
-      # otherwise send `nimble setup` into an online re-solve.
       run: |
-        if [ -n "${{ inputs.extra-path }}" ]; then
-          export PATH="${{ inputs.extra-path }}:$PATH"
-        fi
         make preflight-deps
 
     - name: Cache nimble deps
@@ -53,26 +39,16 @@ runs:
         path: |
           nimbledeps/
           nimble.paths
-        # v6: packages installed by the Nimble revision that resolves from
-        # nimble.lock alone; earlier caches were populated by an online solve.
-        key: ${{ runner.os }}-${{ runner.arch }}-nimbledeps-v6-nim${{ inputs.nim-version }}-nimble${{ inputs.nimble-version }}-${{ hashFiles('nimble.lock', 'logos_delivery.nimble', 'BearSSL.mk', 'Nat.mk') }}
+        key: ${{ runner.os }}-${{ runner.arch }}-nimbledeps-v6-nim${{ inputs.nim-version }}-${{ hashFiles('nimble.lock', 'logos_delivery.nimble', 'BearSSL.mk', 'Nat.mk') }}
 
     - name: Install nimble deps
       shell: bash
-      # No cache condition: the cache is an accelerator and decides
-      # nothing. The Makefile owns materialization and auditing. On a
-      # cache hit its setup rule runs once against the restored packages,
-      # matching them to nimble.lock, and the audits bracket the result.
+      # Runs on cache hit and miss. The Makefile installs and audits from
+      # nimble.lock.
       run: |
-        if [ -n "${{ inputs.extra-path }}" ]; then
-          export PATH="${{ inputs.extra-path }}:$PATH"
-        fi
         make build-deps ${{ inputs.make-args }}
 
     - name: Audit installed deps
       shell: bash
       run: |
-        if [ -n "${{ inputs.extra-path }}" ]; then
-          export PATH="${{ inputs.extra-path }}:$PATH"
-        fi
         make audit-deps

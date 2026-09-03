@@ -18,8 +18,7 @@ ifneq (,$(findstring MINGW,$(detected_OS)))
   detected_OS := Windows
 endif
 
-REQUIRED_NIMBLE_VERSION := $(shell grep -E '^const RequiredNimbleVersion\s*=' logos_delivery.nimble | grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"')
-REQUIRED_NIMBLE_REVISION := $(shell grep -E '^const RequiredNimbleRevision\s*=' logos_delivery.nimble | grep -oE '"[0-9a-f]{40}"' | tr -d '"')
+REQUIRED_NIMBLE_REVISION := $(shell grep -E '^const RequiredNimbleRevision\s*=' logos_delivery.nimble | grep -oE '"[^"]+"' | tr -d '"')
 
 # Put the revision-specific Nimble directory before ~/.nimble/bin.
 # `nimble setup` may update package links under ~/.nimble/bin, including
@@ -33,10 +32,9 @@ NIM_BINARY := $(shell which nim 2>/dev/null)
 
 NIMBLE := nimble
 
-# Options come after the command: Nimble reads pre-command options on custom
-# tasks as compilation options. --useSystemNim uses the Nim compiler on PATH
-# and omits Nim from the local dependency installation. Dependency versions
-# come from nimble.lock alone; see scripts/audit_deps.nims.
+# Options go after the command; Nimble treats pre-command options on custom
+# tasks as compiler options. --useSystemNim uses the Nim on PATH and does not
+# install Nim under nimbledeps.
 NIMBLE_TASK_FLAGS = --useSystemNim
 
 NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
@@ -134,12 +132,11 @@ endif
 logos_delivery.nims:
 	ln -s logos_delivery.nimble $@
 
-# `nimble setup` installs the packages nimble.lock records, from the locked
-# URL at the locked revision. Every URL requirement in logos_delivery.nimble
-# has to match its lock entry, or Nimble falls back to an online re-solve of
-# the whole graph. The preflight rejects such a mismatch before the solve
-# runs, and the audit afterwards rejects an installed set that drifted.
-$(NIMBLEDEPS_STAMP): nimble.lock logos_delivery.nimble nix/deps.nix | install-nimble build-nph logos_delivery.nims
+# `nimble setup` installs the packages in nimble.lock from the locked URL and
+# revision. A requirement that does not match its lock entry makes Nimble
+# re-solve the graph online. The preflight rejects the mismatch first; the
+# audit rejects a drifted install afterwards.
+$(NIMBLEDEPS_STAMP): nimble.lock logos_delivery.nimble nix/deps.nix | install-nimble logos_delivery.nims
 	$(MAKE) preflight-deps
 
 	$(NIMBLE) setup --localdeps -y $(NIMBLE_TASK_FLAGS)
@@ -148,18 +145,15 @@ $(NIMBLEDEPS_STAMP): nimble.lock logos_delivery.nimble nix/deps.nix | install-ni
 
 	touch $@
 
-# Check the URL requirements in logos_delivery.nimble and nix/deps.nix
-# against nimble.lock. Needs no installed packages, so it runs before
-# `nimble setup` and before the CI cache is restored.
+# Check the URL requirements and nix/deps.nix against nimble.lock. Needs no
+# installed packages.
 .PHONY: preflight-deps
 preflight-deps:
 	nim e --hints:off scripts/audit_deps.nims pins
 
-# The preflight checks plus the installed package set: every lock entry
-# installed at the locked vcsRevision, nothing else installed. The setup
-# rule runs it after `nimble setup`, and CI runs it again after the build
-# and test steps, because custom tasks also solve and can install. See
-# scripts/audit_deps.nims for the matching rules.
+# The preflight checks plus the installed set: every lock entry at its
+# vcsRevision, nothing else. CI runs it again after builds, because tasks
+# also solve and can install.
 .PHONY: audit-deps
 audit-deps:
 	nim e --hints:off scripts/audit_deps.nims
@@ -186,7 +180,7 @@ ifneq ($(detected_OS),Windows)
 endif
 
 install-nimble: install-nim
-	scripts/install_nimble.sh $(REQUIRED_NIMBLE_VERSION) $(REQUIRED_NIMBLE_REVISION)
+	scripts/install_nimble.sh $(REQUIRED_NIMBLE_REVISION)
 
 build:
 	mkdir -p build

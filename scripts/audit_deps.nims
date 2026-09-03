@@ -1,86 +1,28 @@
-# Audit nimble.lock against its three consumers: the URL requirements in
-# logos_delivery.nimble, nix/deps.nix, and the packages installed under
-# nimbledeps/pkgs2.
+# Audit nimble.lock against the URL requirements in logos_delivery.nimble,
+# nix/deps.nix, and the packages installed under nimbledeps/pkgs2. Reads
+# files, writes nothing, exits 1 on any mismatch.
 #
-# Two modes:
+#   nim e scripts/audit_deps.nims pins   # requirements and nix only
+#   nim e scripts/audit_deps.nims        # plus the installed packages
 #
-#   nim e scripts/audit_deps.nims pins   # preflight: pins and nix only, no
-#                                        # nimbledeps needed; the Makefile runs
-#                                        # it before `nimble setup`
-#   nim e scripts/audit_deps.nims        # full: preflight plus the installed
-#                                        # packages; runs after setup and after
-#                                        # the build and test steps
+# Nimble installs from nimble.lock only when every root requirement matches
+# a lock entry: exact case-insensitive URL, and a special version (#tag or
+# #commit) equal as a string. Otherwise it re-solves the graph online.
 #
-# URL requirements. Nimble decides whether to install from nimble.lock or to
-# re-solve the whole dependency graph online by matching every root
-# requirement to a lock entry. For a URL requirement the match is
+#   requirement       lock version   accepted when
+#   ---------------   ------------   -----------------------------------
+#   url               any            always
+#   url#frag          #special       frag == special
+#   url#frag          plain          frag == vcsRevision
+#   url == x          plain          x == version
+#   url == x          #special       never
+#   url <range>       any            never; use "== x", "#tag" or "#commit"
 #
-#   cmpIgnoreCase(requirement.url, entry.url) == 0  and
-#   withinRange(entry.version, requirement.version)
-#
-# The URL comparison is exact apart from case: "nim-sds.git" and "nim-sds"
-# are different URLs to Nimble. A special version (#tag or #commit) is
-# within range only of the same string. A plain lock version is within
-# range of any special requirement, so Nimble would silently install the
-# locked revision under a pin that names a different commit; this audit is
-# stricter there and requires the commit to match. Rules, per URL quoted on
-# a non-comment line of logos_delivery.nimble:
-#
-#   form                     lock version   accepted when
-#   ----------------------   ------------   ---------------------------------
-#   url                      any            always (Nimble: verAny matches)
-#   url#frag                 #special       frag == special
-#   url#frag                 plain          frag == vcsRevision
-#   url == x                 plain          x == version
-#   url == x                 #special       never (Nimble: string mismatch)
-#   url <other range>        any            never: unsupported here; use
-#                                           "== x", "#tag" or "#commit"
-#
-# A URL that matches no lock entry exactly but matches one after
-# normalisation (case, trailing "/", ".git") is reported as such, because
-# that is the mistake Nimble does not forgive.
-#
-# nix/deps.nix. Every git lock entry must appear in nix/deps.nix with the
-# same revision, and every nix entry must correspond to a lock entry. URLs
-# are compared normalised, because tools/gen-nix-deps.sh writes them that
-# way. Regenerate with: tools/gen-nix-deps.sh nimble.lock nix/deps.nix
-#
-# Installed packages. For each non-Nim lock entry, an installed package is
-# located by normalised repository URL, falling back to the package name
-# parsed from its pkgs2 directory. Its nimblemeta.json vcsRevision must
-# equal the revision in nimble.lock. Installed directories that match no
-# lock entry, and directories without nimblemeta.json, are rejected. The
-# `nim` lock entry is skipped because these builds pass --useSystemNim.
-#
-# The audit does not help the build succeed: it can only fail it. It reads
-# files and writes nothing. Successful completion prints a summary and
-# exits with status 0. Any mismatch prints a diagnostic and exits 1. File
-# and JSON errors also propagate as failures.
-#
-# Update procedure:
-# 1. To accept a newly reviewed resolution, update logos_delivery.nimble
-#    as needed, run `nimble lock`, regenerate nix/deps.nix, perform a
-#    clean setup, and require this audit to pass.
-# 2. To change how a package is pinned without changing its revision (a
-#    tag pin to a commit pin or back), set the lock entry's "version" to
-#    the same string, then perform a clean setup and require this audit to
-#    pass.
-# 3. After removing a package, delete nimbledeps/ before setup because
-#    `nimble setup` does not remove directories for packages no longer
-#    selected.
-#
-# Relevant Nimble behaviour (the pinned revision, see RequiredNimbleRevision):
-# - solveLockFileDeps matches a URL requirement to a lock entry by URL
-#   (b1b0690) and installs from the locked URL and revision (07caee3).
-#   Releases up to 0.24.1 matched by package name only, so URL
-#   requirements never matched and every invocation re-solved online.
-# - Version equality with a special version on either side is a string
-#   comparison (src/nimblepkg/version.nim, `==`).
-# - Release 0.24.1 was observed to exit with status 0 after installing a
-#   revision different from a requested special revision (nim-secp256k1
-#   pinned to d8f1288b7c72f00be5fc2c5ea72bf5cae1eafb15 installed
-#   f44cff901dff2a24fedcf4ef9e12a6f72355d58f). The installed-package check
-#   exists for that class of failure.
+# nix/deps.nix must list every git lock entry at the locked revision and
+# nothing else (URLs compared normalised). Installed packages must be the
+# lock entries at their vcsRevision and nothing else; `nim` is skipped
+# (--useSystemNim). To re-pin a package at the same revision, set the lock
+# entry's "version" to the same string.
 
 import std/[json, strutils, algorithm, sets, tables, os]
 
@@ -96,11 +38,9 @@ proc normUrl(url: string): string =
 #---------------------------------------------------------------------
 
 type UrlReq = tuple[url, frag, range: string]
-  ## `url` as written; `frag` is the text after '#' ("" when absent);
-  ## `range` is the version constraint after a space ("" when absent),
-  ## e.g. ">= 0.5.1".
+  ## url as written; frag after '#'; range after a space (e.g. ">= 0.5.1").
 
-# Return every quoted URL requirement on a non-comment line.
+# Quoted URL requirements on non-comment lines.
 proc urlReqsFrom(content: string): seq[UrlReq] =
   for line in content.splitLines():
     if line.strip(trailing = false).startsWith("#"):
@@ -124,8 +64,7 @@ proc urlReqsFrom(content: string): seq[UrlReq] =
         result.add((url, frag, range))
       i += 2
 
-# Diagnostics for requirements that would miss their lock entry, or that
-# contradict it.
+# Requirements that miss or contradict their lock entry.
 proc pinMismatches(reqs: seq[UrlReq], lock: JsonNode): seq[string] =
   for req in reqs:
     var name = ""
@@ -143,9 +82,8 @@ proc pinMismatches(reqs: seq[UrlReq], lock: JsonNode): seq[string] =
         near = n & " (" & u & ")"
     if entry.isNil:
       if near.len > 0:
-        result.add(req.url & ": no lock entry with this exact URL; nearest is " &
-                   near & ". Nimble matches URL requirements to the lock by " &
-                   "exact string (case-insensitive), so this misses the lock")
+        result.add(req.url & ": no lock entry with this exact URL (nearest: " & near &
+                   "); Nimble compares URLs as exact case-insensitive strings")
       else:
         result.add(req.url & ": pinned in logos_delivery.nimble but not in nimble.lock")
       continue
@@ -175,7 +113,7 @@ proc pinMismatches(reqs: seq[UrlReq], lock: JsonNode): seq[string] =
 # nix/deps.nix
 #---------------------------------------------------------------------
 
-# Map normalised repository URLs to revisions from fetchgit blocks.
+# Normalised URL -> revision, from fetchgit blocks.
 proc nixEntriesFrom(content: string): Table[string, string] =
   var url = ""
   for line in content.splitLines():
@@ -218,17 +156,14 @@ proc nixMismatches(lock: JsonNode, nix: Table[string, string]): seq[string] =
 # Installed packages
 #---------------------------------------------------------------------
 
-# Read a metadata field from either nimblemeta.json layout observed in
-# this dependency set: top-level or nested under `metaData`.
+# nimblemeta.json field, top-level or under metaData.
 proc metaField(meta: JsonNode, field: string): string =
   if meta.hasKey(field):
     return meta[field].getStr()
   return meta{"metaData", field}.getStr()
 
-# Fallback parser for a pkgs2 directory name. Remove the final checksum
-# and version fields from `name-version-checksum`. This assumes the
-# encoded version field contains no hyphen; URL matching is preferred
-# when metadata provides it.
+# Package name from a pkgs2 directory name (name-version-checksum).
+# Assumes no hyphen in the version.
 proc nameFromDir(dir: string): string =
   result = dir
   for _ in 1 .. 2:
@@ -282,9 +217,7 @@ proc installedMismatches(lock: JsonNode, pkgs2: string, ok: var int, total: var 
     else:
       ok += 1
 
-  # Reject installed package directories not matched to a lock entry.
-  # This also detects packages added by a later task solve, such as a
-  # Nim toolchain or a floated dependency.
+  # Installed directories that match no lock entry.
   dirs.sort()
   for d in dirs:
     if d notin matchedDirs:
@@ -325,13 +258,11 @@ proc main() =
       $reqs.len & " URL requirements checked, nix/deps.nix checked"
 
 #---------------------------------------------------------------------
-# Self-tests for the parsers and the matching rules. Executed before main().
+# Self-tests, run before main().
 #---------------------------------------------------------------------
 proc selfTest() =
   doAssert normUrl("https://github.com/NagyZoltanPeter/nim-brokers.git") ==
     "https://github.com/nagyzoltanpeter/nim-brokers"
-  # A version contains no dash, so two rsplits recover the name, also
-  # when the name itself contains dashes or digits.
   doAssert nameFromDir("nim-2.2.10-17ec440fdb89") == "nim"
   doAssert nameFromDir("secp256k1-0.6.0.3.2-abfc2c1a") == "secp256k1"
   doAssert nameFromDir("bearssl_pkey_decoder-0.1.0-8666edbc") == "bearssl_pkey_decoder"
@@ -345,8 +276,7 @@ proc selfTest() =
     "vcsRevision") == "d34aa46bf9d0a3ffff810fbd3c4d2fa024eb9368"
   doAssert metaField(parseJson("""{}"""), "vcsRevision") == ""
 
-  # URL requirement parsing: fragment, range, bare, .git kept, comments and
-  # names that start with "http" ignored.
+  # URL requirement parsing.
   doAssert urlReqsFrom("""  "https://github.com/status-im/nim-websock#387a8eb",""") ==
     @[("https://github.com/status-im/nim-websock", "387a8eb", "")]
   doAssert urlReqsFrom("""requires "https://github.com/logos-messaging/nim-sds.git#b12f5ee"""") ==
@@ -360,7 +290,7 @@ proc selfTest() =
   doAssert urlReqsFrom("""# v0.4.0: https://github.com/status-im/nim-websock/releases/tag/v0.4.0""").len == 0
   doAssert urlReqsFrom("""  "httputils >= 0.4.1",""").len == 0
 
-  # Matching rules against a lock fixture.
+  # Matching rules.
   let lockFixture = parseJson("""{
     "websock": {"version": "#v0.4.0", "vcsRevision": "387a8eb", "url": "https://github.com/status-im/nim-websock"},
     "metrics": {"version": "0.2.2", "vcsRevision": "9f2e1d4a", "url": "https://github.com/status-im/nim-metrics"},
@@ -368,27 +298,24 @@ proc selfTest() =
   }""")
   proc bad(url, frag, range: string): int =
     pinMismatches(@[(url, frag, range)], lockFixture).len
-  # special lock version: fragment must be the same string
   doAssert bad("https://github.com/status-im/nim-websock", "v0.4.0", "") == 0
   doAssert bad("https://github.com/status-im/nim-websock", "387a8eb", "") == 1
   doAssert bad("https://github.com/status-im/nim-websock", "", "") == 0      # bare: verAny
   doAssert bad("https://github.com/status-im/nim-websock", "", "== 0.4.0") == 1
-  # plain lock version: a commit fragment must be the locked revision
   doAssert bad("https://github.com/status-im/nim-metrics", "9f2e1d4a", "") == 0
   doAssert bad("https://github.com/status-im/nim-metrics", "deadbeef", "") == 1
   doAssert bad("https://github.com/status-im/nim-metrics", "", "") == 0
   doAssert bad("https://github.com/status-im/nim-metrics", "", "== 0.2.2") == 0
   doAssert bad("https://github.com/status-im/nim-metrics", "", "== 0.2.3") == 1
   doAssert bad("https://github.com/status-im/nim-metrics", "", ">= 0.2.0") == 1  # unsupported range
-  # URL exactness: case is ignored, ".git" is not
   doAssert bad("https://github.com/Status-IM/nim-metrics", "", "") == 0
   doAssert bad("https://github.com/logos-messaging/nim-sds.git", "b12f5ee", "") == 0
   doAssert bad("https://github.com/logos-messaging/nim-sds", "b12f5ee", "") == 1
   doAssert pinMismatches(@[("https://github.com/logos-messaging/nim-sds", "b12f5ee", "")],
-    lockFixture)[0].contains("nearest is sds")
+    lockFixture)[0].contains("nearest: sds")
   doAssert bad("https://github.com/nowhere/pkg", "x", "") == 1
 
-  # nix parsing and cross-check in both directions.
+  # nix parsing and cross-check.
   let nix = nixEntriesFrom("""
   chronos = pkgs.fetchgit {
     url = "https://github.com/status-im/nim-chronos";
