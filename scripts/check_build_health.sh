@@ -308,6 +308,8 @@ expect_recipe "setup preflights the pins and nix before solving" \
   "audit_deps.nims pins" nimbledeps/.nimble-setup
 expect_recipe "setup audits the result" \
   "audit-deps" nimbledeps/.nimble-setup
+expect_recipe "the preflight runs nimble check" \
+  "nimble check" preflight-deps
 
 # --------------------------------------------------------------------------
 # The preflight: URL requirements and nix/deps.nix agree with nimble.lock.

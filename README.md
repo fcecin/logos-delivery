@@ -182,6 +182,15 @@ Run the following command to install it:
 make install-nph
 ```
 
+A second hook runs the dependency preflight (`make preflight-deps`: the URL
+requirements and `nix/deps.nix` against `nimble.lock`, then `nimble check`) when a
+commit touches `logos_delivery.nimble`, `nimble.lock`, `nix/deps.nix` or the audit
+script. It is offline and takes about a second. Install it with:
+
+```shell
+make install-deps-hook
+```
+
 ### Examples
 
 Examples can be found in the examples folder.

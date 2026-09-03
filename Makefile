@@ -145,11 +145,12 @@ $(NIMBLEDEPS_STAMP): nimble.lock logos_delivery.nimble nix/deps.nix | install-ni
 
 	touch $@
 
-# Check the URL requirements and nix/deps.nix against nimble.lock. Needs no
-# installed packages.
+# Check the URL requirements and nix/deps.nix against nimble.lock, then let
+# Nimble lint the nimble file. Needs no installed packages.
 .PHONY: preflight-deps
-preflight-deps:
+preflight-deps: | install-nimble
 	nim e --hints:off scripts/audit_deps.nims pins
+	$(NIMBLE) check --localdeps $(NIMBLE_TASK_FLAGS)
 
 # The preflight checks plus the installed set: every lock entry at its
 # vcsRevision, nothing else. CI runs it again after builds, because tasks
@@ -398,7 +399,7 @@ networkmonitor: | build-deps build deps librln
 ############
 ## Format ##
 ############
-.PHONY: build-nph install-nph print-nph-path
+.PHONY: build-nph install-nph install-deps-hook print-nph-path
 
 build-nph: | build deps
 ifneq ($(detected_OS),Windows)
@@ -422,6 +423,17 @@ else
 	echo "$(GIT_PRE_COMMIT_HOOK) already present, will NOT override"
 	exit 1
 endif
+
+# Run the dependency preflight before a commit that touches the dependency
+# files. Installs the hook, or appends to a hook that is already present.
+install-deps-hook:
+ifeq ("$(wildcard $(GIT_PRE_COMMIT_HOOK))","")
+	cp ./scripts/git_pre_commit_deps.sh $(GIT_PRE_COMMIT_HOOK)
+else
+	grep -q git_pre_commit_deps.sh $(GIT_PRE_COMMIT_HOOK) || \
+		printf '\n./scripts/git_pre_commit_deps.sh || exit 1\n' >> $(GIT_PRE_COMMIT_HOOK)
+endif
+	@echo "$(GIT_PRE_COMMIT_HOOK) runs scripts/git_pre_commit_deps.sh"
 
 nph/%: | build-nph
 	echo -e $(FORMAT_MSG) "nph/$*" && \
