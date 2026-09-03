@@ -449,17 +449,19 @@ class TestChannelDelivery:
         ) as sender:
             receiver_collector = EventCollector()
             receiver_config = {**node_config, "staticnodes": [sender.multiaddr]}
-            receiver_result = WrapperManager.create_and_start(config=receiver_config, event_cb=receiver_collector.event_callback)
-            assert receiver_result.is_ok(), f"Failed to start receiver: {receiver_result.err()}"
+            receiver_result = WrapperManager.create(config=receiver_config, event_cb=receiver_collector.event_callback)
+            assert receiver_result.is_ok(), f"Failed to create receiver: {receiver_result.err()}"
 
             with receiver_result.ok_value as receiver:
-                assert wait_for_connected(receiver_collector) is not None, "Receiver did not reach Connected/PartiallyConnected state"
-
                 subscribe_result = receiver.subscribe_content_topic(RC09_CONTENT_TOPIC)
                 assert subscribe_result.is_ok(), f"receiver subscribe_content_topic failed: {subscribe_result.err()}"
 
                 receiver_create = receiver.channel_create(channel_id, RC09_CONTENT_TOPIC, SENDER_B)
                 assert receiver_create.is_ok(), f"receiver channel_create failed: {receiver_create.err()}"
+
+                start_result = receiver.start_node()
+                assert start_result.is_ok(), f"Failed to start receiver: {start_result.err()}"
+                assert wait_for_connected(receiver_collector) is not None, "Receiver did not reach Connected/PartiallyConnected state"
 
                 delay(MESH_SETTLE_S)
 
