@@ -55,6 +55,8 @@ method isValidProcessor*(
 
 method sendImpl*(self: RelaySendProcessor, task: DeliveryTask) {.async.} =
   task.tryCount.inc()
+  # A copy received during this attempt names the path that carried it.
+  task.deliveryPath = DeliveryPath.Relay
   debug "Trying message delivery via Relay",
     requestId = task.requestId,
     msgHash = task.msgHash.to0xHex(),

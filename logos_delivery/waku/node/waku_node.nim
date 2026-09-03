@@ -218,12 +218,28 @@ proc getWakuPeerRecordGetter(node: WakuNode): GetWakuPeerRecord =
       mixKey = mixKey,
     )
 
+proc updateMixLocalAddress*(node: WakuNode) =
+  ## Gives the mix protocol the address that the node announces at this time.
+  ## Mix puts this address in each return path that the node builds.
+  ## `mountMix` runs before the sockets bind, so the address it stored can have
+  ## port 0 or a wildcard host. The first announced address that mix can encode
+  ## becomes the mix local address.
+  if node.wakuMix.isNil():
+    return
+  for address in node.announcedAddresses:
+    if node.wakuMix.setLocalMultiAddr(address).isOk():
+      info "Mix local address updated", address = $address
+      return
+  warn "No announced address is usable as the mix local address",
+    addrs = $node.announcedAddresses
+
 proc copyCommittedAddresses*(node: WakuNode) =
   ## Copy the committed peerInfo addresses into announcedAddresses
   ## and run the ENR refresh callback, once start has resolved the addresses.
   if node.baseAnnounced.isNone():
     return
   node.announcedAddresses = node.switch.peerInfo.addrs
+  node.updateMixLocalAddress()
   if not node.onCommittedAddresses.isNil():
     node.onCommittedAddresses()
 
@@ -362,7 +378,9 @@ proc mountMix*(
 
   let localaddrStr = node.announcedAddresses[0].toString().valueOr:
     return err("Failed to convert multiaddress to string.")
-  info "local addr", localaddr = localaddrStr
+  # The address at mount time. `updateMixLocalAddress` logs the address that
+  # the return paths use, after the sockets bind.
+  debug "local addr", localaddr = localaddrStr
 
   node.wakuMix = WakuMix.new(
     localaddrStr, node.peerManager, clusterId, mixPrivKey, mixnodes

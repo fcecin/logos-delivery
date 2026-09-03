@@ -13,6 +13,7 @@ import
   libp2p/protocols/ping,
   libp2p/protocols/pubsub/gossipsub,
   libp2p/protocols/pubsub/rpc/messages,
+  libp2p/stream/connection,
   libp2p/builders,
   libp2p/transports/tcptransport,
   libp2p/transports/wstransport,
@@ -34,6 +35,126 @@ logScope:
   topics = "waku node lightpush api"
 
 const MountWithoutRelayError* = "cannot mount lightpush because relay is not mounted"
+
+const MixReplySurbs* = 1'u8
+  ## Number of return paths (SURBs) in a mix-routed lightpush request. One is
+  ## sufficient for one reply, and each SURB adds bytes to the packet.
+
+const MixReplyTimeout* = chronos.seconds(5)
+  ## Time limit for the reply to a mix-routed lightpush request. A broken path
+  ## costs one attempt, not the full send. The limit is short so that an
+  ## attempt with no reply does not hold its batch of retries for long. The
+  ## mix entry connection gets the same value as `MixParameters.replyTimeout`,
+  ## so the two layers agree.
+
+const MixLibraryReplyTimeout* = MixReplyTimeout + MixReplyTimeout
+  ## The reply time limit given to the mix entry connection. Twice the send
+  ## path's limit, so that the timer of `publishOverMix` fires first and a
+  ## lost reply has one description (`MixReplyTimeoutDesc`). The library's
+  ## limit is the backstop.
+
+const MixReadOnceErrorPrefix = "error in readOnce: "
+  ## The mix entry connection wraps an unexpected error of its read in the
+  ## exact `LPStreamError` type with this prefix (`entry_connection.nim`,
+  ## `readOnce`). The read comes after the write.
+
+const MixReplyTimeoutDesc* = "Waku lightpush over mix timed out"
+  ## The description of the result of a mix attempt that got no reply within
+  ## `MixReplyTimeout`. The mix processor reads it: such an attempt may have
+  ## reached the exit node.
+
+const MixReplyUnreadableDesc* = "Waku lightpush over mix: the reply could not be read"
+  ## The start of the description of a mix attempt whose request was written
+  ## and whose reply could not be read (truncated, reset, closed). The mix
+  ## processor reads it: such an attempt may have reached the exit node.
+
+proc publishOverMix*(
+    node: WakuNode,
+    conn: Connection,
+    pubsubTopic: PubsubTopic,
+    message: WakuMessage,
+    replyTimeout: Duration = MixReplyTimeout,
+): Future[lightpush_protocol.WakuLightPushResult] {.async.} =
+  ## Publishes one lightpush request on a mix connection with the time limit
+  ## `replyTimeout`. The proc returns when the limit ends, in each failure mode
+  ## of the mix path. `replyTimeout` is a parameter so that tests can use a
+  ## short limit.
+  ##
+  ## The mix entry connection has its own reply time limit
+  ## (`MixParameters.replyTimeout`, applied in `readOnce`). That limit covers a
+  ## reply that does not arrive. It does not cover a stall in the send: mix
+  ## dials the first hop with `switch.dial` and not with the peer manager, so
+  ## `DefaultDialTimeout` does not apply, and pool entries do not expire. This
+  ## proc covers the two cases with one timer. Without it, one dead mix node
+  ## stops the send-service loop for all messages of the node.
+  ##
+  ## `chronos.withTimeout` is not usable here. It cancels the future and then
+  ## waits for the cancellation to complete. A stall in the send is inside a
+  ## libp2p dial, and this proc must return without a dependence on the
+  ## cancellation of that dial. Thus this proc uses `race` with a timer,
+  ## resets the stream, and does not wait for the cancellation.
+  let publishFut =
+    node.wakuLightpushClient.publish(Opt.some(pubsubTopic), message, conn)
+  let deadline = sleepAsync(replyTimeout)
+  try:
+    discard await race(FutureBase(publishFut), FutureBase(deadline))
+  except CancelledError as exc:
+    # The caller cancels the publish (the send service stops). `race` does not
+    # cancel its input futures. Reset the mix stream and cancel the futures in
+    # the same way as the time-limit branch below, then let the cancellation
+    # go up.
+    await conn.reset()
+    publishFut.cancelSoon()
+    deadline.cancelSoon()
+    raise exc
+
+  if not publishFut.finished():
+    await conn.reset()
+    publishFut.cancelSoon()
+    debug "Mix lightpush timed out", pubsubTopic = pubsubTopic, timeout = replyTimeout
+    return
+      lighpushErrorResult(LightPushErrorCode.SERVICE_NOT_AVAILABLE, MixReplyTimeoutDesc)
+
+  await deadline.cancelAndWait()
+  try:
+    return await publishFut
+  except LPStreamError as exc:
+    # A sphinx packet has a fixed size, and this path does not divide messages.
+    # A request that the entry connection refuses as too large does not fit on
+    # a different path. Report it as too large so that the caller does not
+    # retry it.
+    # The library has two size checks: the entry connection refuses a frame
+    # above `DataSize`, and the packet builder refuses a frame that does not
+    # fit next to the return paths.
+    if exc.msg.contains("exceeds max msg size") or
+        exc.msg.contains("exceeds maximum payload size"):
+      debug "Message too large for a mix packet",
+        pubsubTopic = pubsubTopic, error = exc.msg
+      return lighpushErrorResult(
+        LightPushErrorCode.PAYLOAD_TOO_LARGE,
+        "message too large for a mix packet: " & exc.msg,
+      )
+    # libp2p raises a subclass of `LPStreamError` for a reply it cannot read
+    # (truncated, reset, closed), and the mix entry connection wraps an
+    # unexpected error of its read in the exact type with a known prefix: the
+    # request was written, and the exit node may have published the message.
+    # The mix library raises the exact type for each failure before the write
+    # (the dial of the first hop, the write, a short pool, the packet build).
+    # The two get different descriptions, and the mix processor keeps its
+    # mark for the first.
+    if $exc.name != "LPStreamError" or exc.msg.startsWith(MixReadOnceErrorPrefix):
+      debug "Mix lightpush reply unreadable", pubsubTopic = pubsubTopic, error = exc.msg
+      return lighpushErrorResult(
+        LightPushErrorCode.SERVICE_NOT_AVAILABLE,
+        MixReplyUnreadableDesc & ": " & exc.msg,
+      )
+    # A failure before the write is retryable. The next round builds a new
+    # path.
+    debug "Mix lightpush failed", pubsubTopic = pubsubTopic, error = exc.msg
+    return lighpushErrorResult(
+      LightPushErrorCode.SERVICE_NOT_AVAILABLE,
+      "Waku lightpush over mix failed: " & exc.msg,
+    )
 
 ## Waku lightpush
 proc mountLegacyLightPush*(
@@ -220,15 +341,33 @@ proc lightpushPublishHandler(
       target_peer_id = peer.peerId,
       msg_hash = msgHash,
       mixify = mixify
-    if defined(libp2p_mix_experimental_exit_is_dest) and mixify:
-      #indicates we want to use mix to send the message
+    if mixify:
       when defined(libp2p_mix_experimental_exit_is_dest):
+        # A sphinx packet has a fixed size. The library gives the payload size
+        # that is available next to the return paths. A message that is larger
+        # than that cannot go through mix, whatever the request framing adds.
+        # The string check in `publishOverMix` covers the framing.
+        let maxPayload = getMaxMessageSizeForCodec(WakuLightPushCodec, MixReplySurbs).valueOr:
+          return lighpushErrorResult(
+            LightPushErrorCode.SERVICE_NOT_AVAILABLE,
+            "Waku lightpush with mix not available: " & error,
+          )
+        let encodedLen = message.encode().buffer.len
+        if encodedLen > maxPayload:
+          return lighpushErrorResult(
+            LightPushErrorCode.PAYLOAD_TOO_LARGE,
+            "message too large for a mix packet: " & $encodedLen & " bytes, maximum " &
+              $maxPayload,
+          )
         #TODO: How to handle multiple addresses?
         let conn = node.wakuMix.toConnection(
           MixDestination.exitNode(peer.peerId),
           WakuLightPushCodec,
-          MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(1))),
-            # indicating we only want a single path to be used for reply hence numSurbs = 1
+          MixParameters(
+            expectReply: Opt.some(true),
+            numSurbs: Opt.some(MixReplySurbs),
+            replyTimeout: Opt.some(MixLibraryReplyTimeout),
+          ),
         ).valueOr:
           debug "Could not create mix connection"
           return lighpushErrorResult(
@@ -236,8 +375,13 @@ proc lightpushPublishHandler(
             "Waku lightpush with mix not available",
           )
 
-        return
-          await node.wakuLightpushClient.publish(Opt.some(pubsubTopic), message, conn)
+        return await node.publishOverMix(conn, pubsubTopic, message)
+      else:
+        # The caller asked for mix. Do not publish in clear text.
+        return lighpushErrorResult(
+          LightPushErrorCode.SERVICE_NOT_AVAILABLE,
+          "Waku lightpush with mix not available: built without libp2p_mix_experimental_exit_is_dest",
+        )
     else:
       return
         await node.wakuLightpushClient.publish(Opt.some(pubsubTopic), message, peer)

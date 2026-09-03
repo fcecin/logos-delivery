@@ -93,6 +93,9 @@ requires "https://github.com/vacp2p/nim-boringssl#v0.0.11"
 requires "https://github.com/vacp2p/nim-jwt.git#057ec95eb5af0eea9c49bfe9025b3312c95dc5f2"
 
 # Temporary pin to the mix commit that widens its libp2p requirement.
+# The mix send path needs this commit or a later one: `MixParameters.replyTimeout`,
+# `setLocalMultiAddr` and `getMaxMessageSizeForCodec(codec, numSurbs)`. Check the
+# pin first at a rebase over another pull request that pins nim-libp2p-mix.
 requires "https://github.com/logos-co/nim-libp2p-mix#39d2ac78da7b7f33562eb7cd95d6280ca9fa0e94"
 
 proc getMyCPU(): string =
@@ -373,6 +376,9 @@ task test, "Build & run Waku tests":
 
 task testwakunode2, "Build & run wakunode2 app tests":
   test "all_tests_wakunode2"
+
+task testapi, "Build & run API layer tests (configuration, messaging, channels)":
+  test "all_tests_api"
 
 task example2, "Build Waku examples":
   buildBinary "api_example", "examples/api_example/"

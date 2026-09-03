@@ -36,6 +36,7 @@ proc sendPushRequest(
     peer: PeerId | RemotePeerInfo,
     conn: Opt[Connection] = Opt.none(Connection),
 ): Future[WakuLightPushResult] {.async.} =
+  let ownsConnection = conn.isNone()
   let connection = conn.valueOr:
     (await wl.peerManager.dialPeer(peer, WakuLightPushCodec)).valueOr:
       logos_delivery_lightpush_v3_errors.inc(labelValues = [dialFailure])
@@ -45,7 +46,14 @@ proc sendPushRequest(
       )
 
   defer:
-    await connection.closeWithEOF()
+    if ownsConnection:
+      await connection.closeWithEOF()
+    else:
+      # A connection from the caller (a mix entry connection) has no
+      # end-of-file. `closeWithEOF` reads the connection one more time. After a
+      # failed send, that read waits for a reply that does not come, and a
+      # failure that is known at once becomes a wait for the full time limit.
+      await connection.close()
 
   await connection.writeLP(req.encode().buffer)
 

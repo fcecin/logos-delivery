@@ -3,6 +3,7 @@ import results, libp2p/crypto/crypto
 
 import logos_delivery/api/conf/kernel_conf
 import logos_delivery/waku/common/logging
+import logos_delivery/waku/waku_mix
 import logos_delivery/waku/factory/networks_config
 import logos_delivery/messaging/rate_limit_manager/rate_limit_config
 
@@ -27,6 +28,13 @@ type MessagingClientConf* = object
     ## Maximum accepted message size (e.g. "150 KiB").
   entryNodes* {.name: "entry-node".}: Opt[seq[string]]
     ## Bootstrap / connectivity nodes (enrtree or multiaddr).
+  mixnodes* {.name: "mixnode".}: Opt[seq[MixNodePubInfo]]
+    ## Static mix nodes, as `multiaddr:mixPublicKey`. They are the first
+    ## entries of the mix pool. A level above `None` sends when the pool has
+    ## four or more nodes.
+  lightpushnode* {.name: "lightpushnode".}: Opt[string]
+    ## Lightpush service peer, as a multiaddr with `/p2p/<id>`. With a level
+    ## above `None`, it is the exit node when it is a mix node.
   ethRpcEndpoints* {.name: "rln-relay-eth-client-address".}: Opt[seq[EthRpcUrl]]
     ## Ethereum RPC endpoints (required for RLN validation); multiple for fail-over.
   rlnContractAddress* {.name: "rln-relay-eth-contract-address".}: Opt[string]
@@ -37,6 +45,9 @@ type MessagingClientConf* = object
     ## RLN epoch size, in seconds.
   reliabilityEnabled* {.name: "reliability".}: Opt[bool]
     ## Enable store-based send reliability.
+  anonymityLevel* {.name: "anonymity-level".}: Opt[AnonymityLevel]
+    ## Sender anonymity level. A value other than `None` mounts the mix protocol
+    ## and sends through mix.
   store*: Opt[bool] ## Enable the store protocol.
   storenode* {.name: "storenode".}: Opt[string]
   storeMessageDbUrl* {.name: "store-message-db-url".}: Opt[string]
@@ -60,6 +71,12 @@ type MessagingClientConf* = object
     ## Settable only programmatically: as a nested object with no `{.name.}`
     ## pragma or `parseCmdArg`, it is not reachable from the JSON config or a
     ## CLI flag.
+
+proc mixRequired*(self: MessagingClientConf): bool =
+  ## Returns true when the anonymity level needs the mix protocol on the node.
+  ## The level stays on this record. The send service reads it from here and
+  ## not from the kernel configuration.
+  self.anonymityLevel.get(AnonymityLevel.None) != AnonymityLevel.None
 
 proc applyMode*(conf: var WakuNodeConf, mode: LogosDeliveryMode): ConfResult[void] =
   ## Sets the protocol flags implied by the mode.
@@ -119,6 +136,10 @@ proc toWakuNodeConf*(
     conf.maxMessageSize = self.maxMessageSize.get()
   if self.entryNodes.isSome():
     conf.entryNodes = self.entryNodes.get()
+  if self.mixnodes.isSome():
+    conf.mixnodes = self.mixnodes.get()
+  if self.lightpushnode.isSome():
+    conf.lightpushnode = self.lightpushnode.get()
   if self.ethRpcEndpoints.isSome():
     conf.ethClientUrls = self.ethRpcEndpoints.get()
   if self.rlnContractAddress.isSome():
@@ -128,6 +149,9 @@ proc toWakuNodeConf*(
     conf.rlnRelayChainId = self.rlnChainId.get()
   if self.rlnEpochSizeSec.isSome():
     conf.rlnEpochSizeSec = Opt.some(self.rlnEpochSizeSec.get().uint64)
+  if self.mixRequired():
+    # The send path can only use a mix that the node mounts.
+    conf.mix = Opt.some(true)
   if self.logLevel.isSome():
     conf.logLevel = self.logLevel.get()
   if self.logFormat.isSome():

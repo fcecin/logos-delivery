@@ -17,19 +17,22 @@ proc send*(
   ## `DeliveryTask`, and hands it to the send service. Returns the request
   ## id the caller can correlate with `MessageSentEvent` / `MessageErrorEvent`.
   ?self.checkApiAvailability()
+  if self.sendService.isStopped():
+    return err("MessagingClient.send: the messaging client is stopped")
 
-  let isSubbed = self.waku.isSubscribed(envelope.contentTopic).valueOr(false)
-  if not isSubbed:
-    debug "Auto-subscribing to topic on send", contentTopic = envelope.contentTopic
-    self.waku.subscribe(envelope.contentTopic).isOkOr:
-      error "Failed to auto-subscribe", error = error
-      return err("Failed to auto-subscribe before sending: " & error)
+  if self.sendService.subscribesOnSend():
+    let isSubbed = self.waku.isSubscribed(envelope.contentTopic).valueOr(false)
+    if not isSubbed:
+      debug "Auto-subscribing to topic on send", contentTopic = envelope.contentTopic
+      self.waku.subscribe(envelope.contentTopic).isOkOr:
+        error "Failed to auto-subscribe", error = error
+        return err("Failed to auto-subscribe before sending: " & error)
 
   let requestId = RequestId.new(self.waku.rng)
 
   let deliveryTask = DeliveryTask.new(requestId, envelope, self.waku.brokerCtx).valueOr:
     return err("MessagingClient.send: Failed to create delivery task: " & error)
 
-  asyncSpawn self.sendService.send(deliveryTask)
+  self.sendService.trackedSend(deliveryTask)
 
   return ok(requestId)

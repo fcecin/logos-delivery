@@ -30,6 +30,13 @@ proc init*(
   ## conf for every layer, `kernel` included - it just yields no upper layers.
   ## `init(kernelConf)` is the raw entry that takes a caller's config as-is.
   let merged = merge(?resolvePreset(preset), messagingOverrides)
+  if entryLayer == EntryLayer.kernel and merged.mixRequired():
+    # The level is read by the send service, which the kernel entry layer does
+    # not build. Mix would mount for nothing.
+    return err(
+      "anonymityLevel=" & $merged.anonymityLevel.get() &
+        " needs the messaging entry layer: the kernel entry layer has no send path"
+    )
   var kernelConf = ?toWakuNodeConf(merged, mode)
   kernelConf.preset = preset
   kernelConf.entryLayer = entryLayer

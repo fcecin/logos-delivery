@@ -1,9 +1,17 @@
 import results, std/times, chronos
+import libp2p/peerid
 import brokers/broker_context
 import
   logos_delivery/waku/waku_core,
   logos_delivery/api/types,
   logos_delivery/waku/requests/node_requests
+
+type DeliveryPath* {.pure.} = enum
+  ## The send path that propagated a message.
+  Unknown
+  Mix
+  Relay
+  Lightpush
 
 type DeliveryState* {.pure.} = enum
   Entry
@@ -28,9 +36,40 @@ type DeliveryTask* = ref object
     ## Anchors the store-validation time cap (see propagationAge).
   firstAdmittedTime*: Opt[Moment]
     ## Set when the task first passes rate-limit admission; `none` while parked
-    ## waiting for epoch budget. Guards re-admission on retry and anchors the
-    ## delivery-timeout reaper, so a task parked for budget is not aged out
-    ## before it can be sent.
+    ## waiting for epoch budget. Guards re-admission on retry. An RLN proof
+    ## refresh clears it, so the new proof gets a new nonce.
+  deadlineStart*: Opt[Moment]
+    ## Set at the first admission and not reset. The delivery deadline and the
+    ## `Preferred` mix window run from this time. `firstAdmittedTime` is not
+    ## usable for them: an RLN proof refresh clears it, and that would restart
+    ## the deadline and the window at each stale proof.
+  avoidMixExit*: Opt[PeerId]
+    ## The exit node of the last failed mix attempt. The next attempt uses a
+    ## different exit node when one exists.
+  lastMixSendTime*: Opt[Moment]
+    ## Set when a mix attempt starts, kept when the attempt gets no reply,
+    ## cleared when the attempt fails for a known reason or the task goes to
+    ## the plain path. While set, a copy of the message that the node
+    ## receives is a mixed delivery, and a `Preferred` task waits
+    ## `MixReceiptWindow` before the plain path.
+  msgHashHex*: string
+    ## `msgHash` as hex, computed once by `hashHex`. The receipt scan compares
+    ## it for each received message.
+  receivedByNode*: bool
+    ## The node received its own message from the network. The message
+    ## propagated, whatever the result of the attempt in progress.
+  propagatedViaMix*: bool
+    ## True when the message went to the network through mix. The send
+    ## service does not validate such a message with a store node: a store
+    ## query with the message hash would connect the sender to the message.
+  deliveryPath*: DeliveryPath
+    ## The path of the last attempt or propagation. The result log lines show
+    ## it, so an operator sees a `Preferred` message that went out in clear
+    ## text.
+  mixExit*: Opt[PeerId] ## The exit node of the mix attempt that propagated the message.
+  handedToPlainPath*: bool
+    ## The mix processor gave the task to the plain path at least once. The
+    ## first hand-off is logged at INFO, the next ones at DEBUG.
   propagateEventEmitted*: bool
   errorDesc*: string
 
@@ -97,14 +136,33 @@ proc admissionAge*(self: DeliveryTask): timer.Duration =
   else:
     return ZeroDuration
 
-proc isDeliveryTimedOut*(self: DeliveryTask, maxTime: timer.Duration): bool =
-  ## True when an admitted task has been trying to deliver longer than `maxTime`
-  ## without ever propagating. A task never admitted (parked for budget) is
-  ## exempt: the clock runs from admission time, so waiting for budget does not count
-  ## against it.
-  return
-    self.firstAdmittedTime.isSome() and self.firstPropagatedTime.isNone() and
-    self.admissionAge() > maxTime
+proc deadlineAge*(self: DeliveryTask): timer.Duration =
+  ## Time since the first admission. ZeroDuration before the first admission.
+  ## An RLN proof refresh does not reset this value.
+  if self.deadlineStart.isSome():
+    return timer.Moment.now() - self.deadlineStart.get()
+  else:
+    return ZeroDuration
 
 proc isEphemeral*(self: DeliveryTask): bool =
   return self.msg.ephemeral
+
+proc needsStoreValidation*(self: DeliveryTask): bool =
+  ## True when the send service must confirm the message with a store node.
+  ## An ephemeral message is not stored. A message that went through mix is
+  ## not confirmed, because the query would show the sender to the store node.
+  return not self.isEphemeral() and not self.propagatedViaMix
+
+proc isDeliveryTimedOut*(self: DeliveryTask, maxTime: timer.Duration): bool =
+  ## True when a task passed admission more than `maxTime` ago and did not
+  ## propagate. A task that did not pass admission (parked for budget) is
+  ## exempt. The clock is `deadlineStart`, which nothing resets.
+  return
+    self.deadlineStart.isSome() and self.firstPropagatedTime.isNone() and
+    self.deadlineAge() > maxTime
+
+proc hashHex*(task: DeliveryTask): string =
+  ## The message hash as hex, computed once.
+  if task.msgHashHex.len == 0:
+    task.msgHashHex = task.msgHash.to0xHex()
+  return task.msgHashHex

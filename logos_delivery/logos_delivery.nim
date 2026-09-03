@@ -9,6 +9,7 @@
 
 {.push raises: [].}
 
+import std/net
 import results, chronos, chronicles
 
 # Each layer has a core module (type + new/start/stop) and an api/ folder whose
@@ -78,8 +79,26 @@ proc new*(
 ): Future[Result[LogosDelivery, string]] {.async.} =
   ## Builds the stack bottom-up from a resolved per-layer config; each layer is
   ## mounted iff its config is present.
-  let wakuConf = WakuNodeConf(conf.kernelConf).toWakuConf().valueOr:
-      return err("failed to handle the configuration: " & error)
+  var kernelConf = WakuNodeConf(conf.kernelConf)
+  if conf.messagingConf.isSome() and conf.messagingConf.get().mixRequired():
+    # The anonymity level is a messaging setting with a kernel side: the node
+    # must mount mix. Each constructor goes through here, so this is the one
+    # place that applies it.
+    if kernelConf.mix == Opt.some(false):
+      return err(
+        "anonymityLevel=" & $conf.messagingConf.get().anonymityLevel.get() &
+          " needs mix, but mix=false was set"
+      )
+    if kernelConf.listenAddress.family == IpAddressFamily.IPv6:
+      # The mix pool and the return paths take IPv4 addresses only. With an
+      # IPv6 bind, mix mounts and each mixed attempt fails.
+      return err(
+        "anonymityLevel=" & $conf.messagingConf.get().anonymityLevel.get() &
+          " needs an IPv4 listen address: mix routes IPv4 addresses only"
+      )
+    kernelConf.mix = Opt.some(true)
+  let wakuConf = kernelConf.toWakuConf().valueOr:
+    return err("failed to handle the configuration: " & error)
   let waku = (await Waku.new(wakuConf, appCallbacks)).valueOr:
     return err("failed to create Waku: " & error)
 

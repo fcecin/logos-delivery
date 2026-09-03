@@ -18,6 +18,8 @@ const
   # a flat blob before the WakuNodeConf walker sees them (it would reject them).
   KeyReliabilityEnabled = "reliabilityenabled"
   KeyReliability = "reliability"
+  KeyAnonymityLevel = "anonymitylevel"
+  KeyAnonymityLevelCli = "anonymity-level"
 
 proc parseMode(s: string): Result[LogosDeliveryMode, string] =
   case s.strip().toLowerAscii()
@@ -58,20 +60,24 @@ proc parseOverrides[T](defaults: T, node: JsonNode, label: string): Result[T, st
 proc parseFlatConf(
     mode: LogosDeliveryMode, topJsonNode: var Table[string, (string, JsonNode)]
 ): ConfResult[LogosDeliveryConf] =
-  ## [Legacy flat JSON config] Flat shape: a blob of `WakuNodeConf` fields. `mode`
-  ## expands to protocol flags over raw kernel defaults, `reliabilityEnabled` routes
-  ## to the messaging conf (it left the kernel), and the rest parses as a
-  ## `WakuNodeConf`. Full stack. Delete this proc and its call site to drop support.
+  ## [Legacy flat JSON config] The flat shape is one JSON object with the fields
+  ## of `WakuNodeConf`. The parser applies `mode` to the kernel defaults. The
+  ## keys `reliabilityEnabled` and `anonymityLevel` are fields of the messaging
+  ## configuration, so the parser moves them there. The other keys become a
+  ## `WakuNodeConf`. The result is the full stack. To remove the flat shape,
+  ## delete this proc and its call site.
   var messaging = MessagingClientConf()
-  var reliabilityFields: Table[string, (string, JsonNode)]
-  for key in [KeyReliabilityEnabled, KeyReliability]:
+  var messagingFields: Table[string, (string, JsonNode)]
+  for key in [
+    KeyReliabilityEnabled, KeyReliability, KeyAnonymityLevel, KeyAnonymityLevelCli
+  ]:
     if topJsonNode.hasKey(key):
-      reliabilityFields[key] = topJsonNode.getOrDefault(key)
+      messagingFields[key] = topJsonNode.getOrDefault(key)
       topJsonNode.del(key)
-  if reliabilityFields.len > 0:
+  if messagingFields.len > 0:
     ?applyJsonFieldsToConf(
-      messaging, reliabilityFields, "Failed to parse reliability field",
-      "Unrecognized reliability option(s) found",
+      messaging, messagingFields, "Failed to parse messaging field",
+      "Unrecognized messaging option(s) found",
     )
 
   # [Legacy flat JSON config] The blob is a raw WakuNodeConf, exactly as the
@@ -90,6 +96,19 @@ proc parseFlatConf(
   # here to stay faithful to master. An explicit reliability in the blob still wins.
   if kernel.preset.len > 0:
     messaging = merge(?resolvePreset(kernel.preset), messaging)
+
+  # The messaging configuration owns `anonymityLevel`. When the level needs
+  # mix, the kernel must mount mix. `toWakuNodeConf` sets `mix` for the
+  # structured JSON shape. The flat shape builds its kernel record here, so
+  # this code sets `mix` too. A flat object with `mix: false` and a level that
+  # needs mix is an error.
+  if messaging.mixRequired():
+    if kernel.mix == Opt.some(false):
+      return err(
+        "anonymityLevel=" & $messaging.anonymityLevel.get() &
+          " needs mix, but mix=false was set"
+      )
+    kernel.mix = Opt.some(true)
 
   return ok(
     LogosDeliveryConf(
