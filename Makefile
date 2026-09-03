@@ -33,9 +33,11 @@ NIM_BINARY := $(shell which nim 2>/dev/null)
 
 NIMBLE := nimble
 
-# Nimble accepts the generated value only in attached --requires:<value>
-# form; a separate argument leaves the constraints unapplied.
-NIMBLE_TASK_FLAGS = --useSystemNim --requires:"$$(cat requires.generated)"
+# Options come after the command: Nimble reads pre-command options on custom
+# tasks as compilation options. --useSystemNim uses the Nim compiler on PATH
+# and omits Nim from the local dependency installation. Dependency versions
+# come from nimble.lock alone; see scripts/audit_deps.nims.
+NIMBLE_TASK_FLAGS = --useSystemNim
 
 NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
 
@@ -132,39 +134,32 @@ endif
 logos_delivery.nims:
 	ln -s logos_delivery.nimble $@
 
-# Generate supplemental requirements for `nimble setup` from:
-# - package versions and revisions recorded in nimble.lock;
-# - URLs already declared in logos_delivery.nimble, which are omitted from
-#   the generated string to avoid adding a second constraint; and
-# - registry URL and version-tag refs observed by the generator.
-#
-# When the registry URL and version tag both match the lock entry, the
-# generator emits "name == version" (e.g. chronos == 4.2.4). Otherwise it
-# emits "url#revision" (e.g. nim-secp256k1: no usable version tag).
-#
-# This ignored file is regenerated when absent or older than a listed
-# prerequisite. `make clean` removes it. CI invokes the generator directly
-# on every dependency-setup run.
-requires.generated: nimble.lock logos_delivery.nimble nix/deps.nix scripts/gen_requires.nims | install-nimble
-	nim e --hints:off scripts/gen_requires.nims
+# `nimble setup` installs the packages nimble.lock records, from the locked
+# URL at the locked revision. Every URL requirement in logos_delivery.nimble
+# has to match its lock entry, or Nimble falls back to an online re-solve of
+# the whole graph. The preflight rejects such a mismatch before the solve
+# runs, and the audit afterwards rejects an installed set that drifted.
+$(NIMBLEDEPS_STAMP): nimble.lock logos_delivery.nimble nix/deps.nix | install-nimble build-nph logos_delivery.nims
+	$(MAKE) preflight-deps
 
-$(NIMBLEDEPS_STAMP): requires.generated logos_delivery.nimble | install-nimble build-nph logos_delivery.nims
-	# Options come after the command: Nimble reads pre-command options on
-	# custom tasks as compilation options. --useSystemNim uses the Nim
-	# compiler on PATH and omits Nim from the local dependency installation.
-	# Custom task invocations use the same option through NIMBLE_TASK_FLAGS.
-	$(NIMBLE) setup --localdeps -y --useSystemNim --requires:"$$(cat requires.generated)"
+	$(NIMBLE) setup --localdeps -y $(NIMBLE_TASK_FLAGS)
 
 	$(MAKE) audit-deps
 
 	touch $@
 
-# Compare the installed package set and vcsRevision metadata with
-# nimble.lock. This detects the observed Nimble 0.24.1 case where a
-# solve exits successfully after selecting a different special revision.
-# The setup rule runs it after `nimble setup`, and CI runs it again after
-# the build and test steps, because custom tasks also solve and can
-# install. See scripts/audit_deps.nims for the matching rules.
+# Check the URL requirements in logos_delivery.nimble and nix/deps.nix
+# against nimble.lock. Needs no installed packages, so it runs before
+# `nimble setup` and before the CI cache is restored.
+.PHONY: preflight-deps
+preflight-deps:
+	nim e --hints:off scripts/audit_deps.nims pins
+
+# The preflight checks plus the installed package set: every lock entry
+# installed at the locked vcsRevision, nothing else installed. The setup
+# rule runs it after `nimble setup`, and CI runs it again after the build
+# and test steps, because custom tasks also solve and can install. See
+# scripts/audit_deps.nims for the matching rules.
 .PHONY: audit-deps
 audit-deps:
 	nim e --hints:off scripts/audit_deps.nims
@@ -177,7 +172,6 @@ build-deps: | $(NIMBLEDEPS_STAMP)
 	$(MAKE) rebuild-bearssl-nimbledeps rebuild-nat-libs-nimbledeps
 
 clean:
-	rm -f requires.generated observed.generated 2> /dev/null || true
 	rm -rf build 2> /dev/null || true
 	rm -rf nimbledeps 2> /dev/null || true
 	rm -fr nimcache 2> /dev/null || true

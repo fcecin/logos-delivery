@@ -543,7 +543,7 @@
       }
     },
     "websock": {
-      "version": "#v0.4.0",
+      "version": "#387a8eb7e961e8fdd3b1a717d36bc53b55e4dc5d",
       "vcsRevision": "387a8eb7e961e8fdd3b1a717d36bc53b55e4dc5d",
       "url": "https://github.com/status-im/nim-websock",
       "downloadMethod": "git",

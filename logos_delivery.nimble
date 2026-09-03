@@ -17,10 +17,15 @@ const RequiredNimVersion = "2.2.6"
   ## This is the nim compiler version that we are working on. Other versions may behave differently.
 const RequiredNimbleVersion = "0.24.1"
   ## Enforced nimble version to ensure a reproducible flow
-const RequiredNimbleRevision = "1a2b3ae900a8ccb307a118173e0c3a7cdfcfc121"
-  ## Release 0.24.1 discards the --requires constraints before it applies nimble.lock.
-  ## 5df81e6 fixes that and is unreleased. 1a2b3ae is three commits later, and also
-  ## stops the solver reporting an exhausted search budget as an unsatisfiable graph.
+const RequiredNimbleRevision = "07caee397d628c9e93d81048268365c4c2414a80"
+  ## Unreleased. Release 0.24.1 matches nimble.lock entries by package name only, so
+  ## every URL requirement above misses the lock and every setup and task re-solves
+  ## the whole graph online. b1b0690 (2026-09-01) matches URL requirements to the
+  ## lock by URL, and 07caee3 (2026-09-02) installs from the locked URL and revision.
+  ## With both, setup and tasks resolve from nimble.lock alone and stay offline once
+  ## the packages are installed. Every URL pin above must carry the exact version
+  ## string its lock entry records (a tag or a commit); scripts/audit_deps.nims
+  ## checks that, because a mismatch silently falls back to the online re-solve.
 
 ### Dependencies
 requires "nim == 2.2.6",

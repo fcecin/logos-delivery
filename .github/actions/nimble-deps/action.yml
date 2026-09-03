@@ -1,8 +1,8 @@
 name: 'Install nimble deps'
 description: >
-  Installs the pinned Nimble, generates the requires string, restores the
-  nimbledeps cache unless disabled, and runs the Makefile rules that
-  materialize and audit the dependencies from nimble.lock.
+  Installs the pinned Nimble, restores the nimbledeps cache unless disabled,
+  and runs the Makefile rules that materialize and audit the dependencies
+  from nimble.lock.
 
 inputs:
   nimble-version:
@@ -35,13 +35,15 @@ runs:
         echo "$HOME/.nimble/bin" >> $GITHUB_PATH
         echo "$HOME/.local/nimble-${NIMBLE_REVISION}/bin" >> $GITHUB_PATH
 
-    - name: Generate requires string
+    - name: Preflight nimble.lock against the pins and nix/deps.nix
       shell: bash
+      # Fails fast, before the cache download, on the mismatch that would
+      # otherwise send `nimble setup` into an online re-solve.
       run: |
         if [ -n "${{ inputs.extra-path }}" ]; then
           export PATH="${{ inputs.extra-path }}:$PATH"
         fi
-        make requires.generated
+        make preflight-deps
 
     - name: Cache nimble deps
       id: cache
@@ -51,15 +53,16 @@ runs:
         path: |
           nimbledeps/
           nimble.paths
-        key: ${{ runner.os }}-${{ runner.arch }}-nimbledeps-v5-nim${{ inputs.nim-version }}-nimble${{ inputs.nimble-version }}-${{ hashFiles('requires.generated', 'nimble.lock', 'logos_delivery.nimble', 'BearSSL.mk', 'Nat.mk') }}
+        # v6: packages installed by the Nimble revision that resolves from
+        # nimble.lock alone; earlier caches were populated by an online solve.
+        key: ${{ runner.os }}-${{ runner.arch }}-nimbledeps-v6-nim${{ inputs.nim-version }}-nimble${{ inputs.nimble-version }}-${{ hashFiles('nimble.lock', 'logos_delivery.nimble', 'BearSSL.mk', 'Nat.mk') }}
 
     - name: Install nimble deps
       shell: bash
       # No cache condition: the cache is an accelerator and decides
       # nothing. The Makefile owns materialization and auditing. On a
       # cache hit its setup rule runs once against the restored packages,
-      # constrained by the same requires string, and the audits bracket
-      # the result.
+      # matching them to nimble.lock, and the audits bracket the result.
       run: |
         if [ -n "${{ inputs.extra-path }}" ]; then
           export PATH="${{ inputs.extra-path }}:$PATH"

@@ -65,6 +65,18 @@ expect_python() {
   fi
 }
 
+# name, command...: the command must exit 0; its output is shown on failure.
+expect_ok() {
+  local name=$1
+  shift
+  local got
+  if got=$("$@" 2>&1); then
+    ok "${name}"
+  else
+    no "${name}" "${got}"
+  fi
+}
+
 # Return the commands make would run for a target. -B ignores timestamps.
 recipe_of() {
   make -Bn "$@" 2>/dev/null
@@ -293,47 +305,32 @@ expect_make_fails  "an arbitrary unknown target fails"  definitely-not-a-target
 expect_make_parses "make test <file> still parses"      test tests/all_tests_waku.nim
 
 # --------------------------------------------------------------------------
-# Nimble reads the constraints only from an attached --requires:<value>. A
-# separate argument leaves the value empty and Nimble discards nimble.lock.
+# Dependency versions come from nimble.lock alone. Setup and the custom
+# tasks pass no --requires; the lock file is the only constraint, and the
+# audit checks the installed set and the pins against it.
 # --------------------------------------------------------------------------
-expect_recipe "setup attaches the constraints" \
-  '--requires:"$(cat requires.generated)"' nimbledeps/.nimble-setup
-reject_recipe "setup does not pass them as a separate argument" \
-  '--requires "' nimbledeps/.nimble-setup
-expect_recipe "custom tasks attach the constraints" \
-  '--requires:"$(cat requires.generated)"' wakunode2
-reject_recipe "custom tasks do not pass them as a separate argument" \
-  '--requires "' wakunode2
-
-# The constraints come from nimble.lock through the generator, and the audit
-# checks the result against the same lock.
-expect_recipe "setup regenerates the constraints first" \
-  "gen_requires.nims" nimbledeps/.nimble-setup
+reject_recipe "setup passes no --requires" \
+  '--requires' nimbledeps/.nimble-setup
+reject_recipe "custom tasks pass no --requires" \
+  '--requires' wakunode2
+expect_recipe "setup uses the system Nim" \
+  '--useSystemNim' nimbledeps/.nimble-setup
+expect_recipe "custom tasks use the system Nim" \
+  '--useSystemNim' wakunode2
+expect_recipe "setup preflights the pins and nix before solving" \
+  "audit_deps.nims pins" nimbledeps/.nimble-setup
 expect_recipe "setup audits the result" \
   "audit-deps" nimbledeps/.nimble-setup
 
 # --------------------------------------------------------------------------
-# The constraints are generated from nimble.lock. A named constraint must
-# give the locked version, a URL constraint the locked revision.
+# The preflight itself: every URL requirement in logos_delivery.nimble and
+# every entry in nix/deps.nix agrees with nimble.lock. Nimble matches a URL
+# requirement to the lock by exact URL and by version string; a mismatch
+# falls back to an online re-solve. The rules live in scripts/audit_deps.nims,
+# which runs its own self-tests first.
 # --------------------------------------------------------------------------
-expect_python "the constraints agree with nimble.lock" "import json
-lock = json.load(open(\"nimble.lock\"))[\"packages\"]
-gen = [c.strip() for c in open(\"requires.generated\").read().split(\";\") if c.strip()]
-def norm(u): return u.lower().rstrip(\"/\").removesuffix(\".git\")
-byurl = {norm(v[\"url\"]): v for v in lock.values() if \"url\" in v}
-bad = []
-for c in gen:
-    if \" == \" in c:
-        n, v = c.split(\" == \")
-        if lock.get(n, {}).get(\"version\") != v:
-            bad.append(c + \" (lock has \" + str(lock.get(n, {}).get(\"version\")) + \")\")
-    elif c.startswith(\"http\") and \"#\" in c:
-        u, rev = c.rsplit(\"#\", 1)
-        if byurl.get(norm(u), {}).get(\"vcsRevision\") != rev:
-            bad.append(c)
-    else:
-        bad.append(\"unrecognised form: \" + c)
-print(\"ok\" if not bad else \"constraints disagree with nimble.lock: \" + \"; \".join(bad[:3]))"
+expect_ok "the URL requirements and nix/deps.nix agree with nimble.lock" \
+  nim e --hints:off scripts/audit_deps.nims pins
 
 # --------------------------------------------------------------------------
 # The Nimble tasks concatenate their own defaults with NIM_PARAMS. The
