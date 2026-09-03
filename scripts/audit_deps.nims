@@ -65,10 +65,16 @@ proc isUrl(name: string): bool =
 
 type PreIdent = tuple[isNum: bool, num: int, str: string]
 
+# Leading digits as an int, saturating at high(int) like Nimble's
+# parseSaturatedNatural.
 proc leadingInt(s: string): int =
   for c in s:
     if c in Digits:
-      result = result * 10 + (ord(c) - ord('0'))
+      let d = ord(c) - ord('0')
+      if result > (high(int) - d) div 10:
+        result = high(int)
+      else:
+        result = result * 10 + d
     else:
       break
 
@@ -146,11 +152,12 @@ proc outsideRange(v: string, ran: JsonNode): string =
 # Requirements from `nimble dump --json`
 #---------------------------------------------------------------------
 
-# The repository path is passed explicitly: no `cd`, no shell operators, so
-# the command runs the same way on POSIX shells and on Windows.
+# The repository path is passed explicitly with platform-aware quoting: no
+# `cd`, no shell operators, so the command runs the same way on POSIX shells
+# and on Windows.
 proc dumpRequires(): JsonNode =
   let (output, code) = gorgeEx(
-    "nimble dump --json --localdeps --useSystemNim \"" & root & "\"")
+    "nimble dump --json --localdeps --useSystemNim " & quoteShell(root))
   let s = output.find('{')
   let e = output.rfind('}')
   if code != 0 or s < 0 or e < s:
@@ -423,6 +430,8 @@ proc selfTest() =
   doAssert cmpVer("1.0.0-alpha.beta", "1.0.0-beta") < 0
   doAssert cmpVer("1.0.0+build.7", "1.0.0") == 0         # build metadata ignored
   doAssert cmpVer("1.0.0-rc.1+sha.abc", "1.0.0-rc.1") == 0
+  doAssert cmpVer("1.0.0-9999999999999999999999999", "1.0.0-1") > 0   # saturates, no overflow
+  doAssert leadingInt("99999999999999999999999999") == high(int)
   doAssert outsideRange("1.0.0-rc.2", %*{"kind": "verEqLater", "ver": "1.0.0-rc.10"}).len > 0
 
   # Range evaluation on nimble dump's structure.

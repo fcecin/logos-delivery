@@ -5,7 +5,8 @@
 # Offline; about a second once the pinned Nimble is built.
 
 # --no-renames: a monitored file renamed away must show as its own deletion.
-files=$(git diff --cached --name-only --no-renames --diff-filter=ACMD \
+# T: a type change (file to symlink) counts too.
+files=$(git diff --cached --name-only --no-renames --diff-filter=ACMDT \
   | grep -E '^(logos_delivery\.nimble|nimble\.lock|nix/deps\.nix|scripts/audit_deps\.nims)$')
 [ -z "$files" ] && exit 0
 

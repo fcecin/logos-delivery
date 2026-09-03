@@ -414,10 +414,12 @@ else
 	echo "Skipping nph build on Windows (nph is only used on Unix-like systems)"
 endif
 
-GIT_PRE_COMMIT_HOOK := .git/hooks/pre-commit
+# Git's own location for the hook: honours core.hooksPath and linked worktrees.
+GIT_PRE_COMMIT_HOOK := $(shell git rev-parse --git-path hooks/pre-commit 2>/dev/null || echo .git/hooks/pre-commit)
 
 install-nph: build-nph
 ifeq ("$(wildcard $(GIT_PRE_COMMIT_HOOK))","")
+	mkdir -p $(dir $(GIT_PRE_COMMIT_HOOK))
 	cp ./scripts/git_pre_commit_format.sh $(GIT_PRE_COMMIT_HOOK)
 	chmod +x $(GIT_PRE_COMMIT_HOOK)
 else
@@ -427,18 +429,24 @@ endif
 
 # Run the dependency preflight before a commit that touches the dependency
 # files. Installs the hook; appends to the hook that `install-nph` installs;
-# refuses any other hook, which must call the script itself.
+# refuses any other hook, which must call the script itself. The combined
+# hook is written to a temporary file and moved into place, so a hook that
+# is a link to a tracked script never gets edited through the link.
+DEPS_HOOK_LINE := ./scripts/git_pre_commit_deps.sh || exit 1
 install-deps-hook:
 ifeq ("$(wildcard $(GIT_PRE_COMMIT_HOOK))","")
+	mkdir -p $(dir $(GIT_PRE_COMMIT_HOOK))
 	cp ./scripts/git_pre_commit_deps.sh $(GIT_PRE_COMMIT_HOOK)
 else
-	@if grep -q git_pre_commit_deps.sh $(GIT_PRE_COMMIT_HOOK); then \
+	@if cmp -s ./scripts/git_pre_commit_deps.sh $(GIT_PRE_COMMIT_HOOK) || \
+	    grep -qxF '$(DEPS_HOOK_LINE)' $(GIT_PRE_COMMIT_HOOK); then \
 		echo "$(GIT_PRE_COMMIT_HOOK) already runs scripts/git_pre_commit_deps.sh"; \
 	elif cmp -s ./scripts/git_pre_commit_format.sh $(GIT_PRE_COMMIT_HOOK); then \
-		printf '\n./scripts/git_pre_commit_deps.sh || exit 1\n' >> $(GIT_PRE_COMMIT_HOOK); \
+		{ cat ./scripts/git_pre_commit_format.sh; printf '\n%s\n' '$(DEPS_HOOK_LINE)'; } \
+			> $(GIT_PRE_COMMIT_HOOK).tmp && mv -f $(GIT_PRE_COMMIT_HOOK).tmp $(GIT_PRE_COMMIT_HOOK); \
 	else \
 		echo "$(GIT_PRE_COMMIT_HOOK) exists and is not the nph hook; add this line to it yourself:"; \
-		echo "  ./scripts/git_pre_commit_deps.sh || exit 1"; \
+		echo "  $(DEPS_HOOK_LINE)"; \
 		exit 1; \
 	fi
 endif
