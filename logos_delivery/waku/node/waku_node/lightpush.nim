@@ -21,6 +21,7 @@ import
 
 import
   ../waku_node,
+  ../../waku_mix,
   ../../waku_core,
   ../../waku_core/topics/sharding,
   ../../waku_lightpush_legacy/client as legacy_lightpush_client,
@@ -359,6 +360,10 @@ proc lightpushPublishHandler(
             "message too large for a mix packet: " & $encodedLen & " bytes, maximum " &
               $maxPayload,
           )
+        # The exit node cannot be the anchor: the library rejects a return
+        # path whose last mix hop is the exit node.
+        let replyAnchor =
+          await node.wakuMix.ensureReplyAnchor(avoid = Opt.some(peer.peerId))
         #TODO: How to handle multiple addresses?
         let conn = node.wakuMix.toConnection(
           MixDestination.exitNode(peer.peerId),
@@ -367,6 +372,7 @@ proc lightpushPublishHandler(
             expectReply: Opt.some(true),
             numSurbs: Opt.some(MixReplySurbs),
             replyTimeout: Opt.some(MixLibraryReplyTimeout),
+            replyAnchor: replyAnchor,
           ),
         ).valueOr:
           debug "Could not create mix connection"

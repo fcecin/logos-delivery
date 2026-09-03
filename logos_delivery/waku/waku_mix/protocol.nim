@@ -1,5 +1,6 @@
 {.push raises: [].}
 
+import std/sequtils
 import chronicles, chronos, results, metrics
 
 import
@@ -11,6 +12,7 @@ import
   libp2p_mix/mix_metrics,
   libp2p_mix/delay_strategy,
   libp2p/[multiaddress, peerid],
+  libp2p/crypto/rng,
   eth/common/keys
 
 import
@@ -38,6 +40,10 @@ type
     peerManager*: PeerManager
     clusterId: uint16
     pubKey*: Curve25519Key
+    anchorRng: rng.Rng ## Shuffles the pool when the node picks a reply anchor.
+    replyAnchor*: Opt[PeerId]
+      ## The pool node that delivers the replies of this node's mixed sends.
+      ## See `ensureReplyAnchor`.
 
   WakuMixResult*[T] = Result[T, string]
 
@@ -116,15 +122,16 @@ proc new*(
     peermgr.switch.peerInfo.publicKey.skkey, peermgr.switch.peerInfo.privateKey.skkey,
   )
 
-  var m = WakuMix(peerManager: peermgr, clusterId: clusterId, pubKey: mixPubKey)
+  let rng = crypto.newRng()
+  var m = WakuMix(
+    peerManager: peermgr, clusterId: clusterId, pubKey: mixPubKey, anchorRng: rng
+  )
   procCall MixProtocol(m).init(
     localMixNodeInfo,
     peermgr.switch,
     delayStrategy = Opt.some(
       DelayStrategy(
-        ExponentialDelayStrategy.new(
-          meanDelay = MixHopMeanDelayMs, rng = crypto.newRng()
-        )
+        ExponentialDelayStrategy.new(meanDelay = MixHopMeanDelayMs, rng = rng)
       )
     ),
   )
@@ -141,5 +148,45 @@ proc new*(
 
 proc poolSize*(mix: WakuMix): int =
   mix.nodePool.len
+
+proc ensureReplyAnchor*(
+    mix: WakuMix, avoid = Opt.none(PeerId)
+): Future[Opt[PeerId]] {.async.} =
+  ## Returns the reply anchor: a pool node this node holds a connection to.
+  ## The library places the anchor as the hop that delivers every reply, so
+  ## the reply arrives over that connection. A node that nothing can dial (a
+  ## device behind NAT) receives replies only this way; without an anchor the
+  ## hop before this node is a random pool node, and the reply arrives only
+  ## when that node happens to hold a connection to this node.
+  ##
+  ## Keeps the current anchor while its connection lives and it is not
+  ## `avoid`, the exit node of the send at hand, which the library does not
+  ## accept as the anchor. Otherwise picks a pool node at random, connects to
+  ## it and keeps it. Returns none when no pool node accepts a connection; the
+  ## send then goes without an anchor.
+  ##
+  ## What the anchor learns: this node's address, which its first hops learn
+  ## anyway, and the timing of replies. It does not see the forward packet of
+  ## the same message, unless the random forward path starts at it.
+  let switch = mix.peerManager.switch
+  mix.replyAnchor.withValue(anchor):
+    if avoid != Opt.some(anchor) and switch.isConnected(anchor):
+      return mix.replyAnchor
+  var candidates = mix.nodePool.peerIds().filterIt(
+      it != switch.peerInfo.peerId and avoid != Opt.some(it)
+    )
+  mix.anchorRng.shuffle(candidates)
+  for candidate in candidates:
+    let peer = switch.peerStore.getPeer(candidate)
+    if await mix.peerManager.connectPeer(peer, source = "mix reply anchor"):
+      if mix.replyAnchor != Opt.some(candidate):
+        info "Mix reply anchor set", peer = candidate
+      mix.replyAnchor = Opt.some(candidate)
+      return mix.replyAnchor
+  if mix.replyAnchor.isSome():
+    info "Mix reply anchor lost: no pool node accepts a connection",
+      previous = mix.replyAnchor.get()
+  mix.replyAnchor = Opt.none(PeerId)
+  return mix.replyAnchor
 
 # Mix Protocol

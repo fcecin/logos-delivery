@@ -306,6 +306,14 @@ suite "Mix send path - end to end over an in-process mixnet":
     check:
       propagated
       not watch.failed.finished()
+    # The send set a reply anchor: a hop the sender is connected to, not the
+    # exit node. The reply came back over that connection.
+    let anchor = sender.waku.node.wakuMix.replyAnchor
+    check:
+      anchor.isSome()
+      anchor.get() != exitNode.peerId()
+      hops.anyIt(it.peerId() == anchor.get())
+      sender.waku.node.switch.isConnected(anchor.get())
     if propagated:
       check watch.propagated.read() == requestId
 
