@@ -1,4 +1,5 @@
-## API layers: configuration, messaging, reliable channels
+## The layers above the kernel: the Messaging API, the messaging client, the
+## reliable channels. The kernel suites stay in all_tests_waku.
 
 # These suites were in all_tests_waku. The refc runtime holds 3500 global
 # markers (one per module-level global with managed memory, and each `let`

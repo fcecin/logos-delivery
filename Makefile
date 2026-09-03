@@ -117,7 +117,7 @@ test:
 ifeq ($(strip $(test_file)),)
 	$(MAKE) testcommon
 	$(MAKE) testwaku
-	$(MAKE) testapi
+	$(MAKE) testmessaging
 else
 	$(MAKE) compile-test TEST_FILE="$(test_file)" TEST_NAME="$(call test_name)"
 endif
@@ -316,7 +316,7 @@ testcommon: | build-deps build
 ##########
 ## Waku ##
 ##########
-.PHONY: testwaku testapi wakunode2 logosdeliverynode testwakunode2 example2 chat2 chat2bridge liteprotocoltester
+.PHONY: testwaku testmessaging wakunode2 logosdeliverynode testwakunode2 example2 chat2 chat2bridge liteprotocoltester
 
 testwaku: | build-deps build rln-deps librln
 	echo -e $(BUILD_MSG) "build/$@" && \
@@ -352,9 +352,9 @@ testwakunode2: | build-deps build deps librln
 	echo -e $(BUILD_MSG) "build/$@" && \
 		$(NIMBLE) testwakunode2 $(NIMBLE_TASK_FLAGS)
 
-testapi: | build-deps build rln-deps librln
+testmessaging: | build-deps build rln-deps librln
 	echo -e $(BUILD_MSG) "build/$@" && \
-		$(NIMBLE) testapi $(NIMBLE_TASK_FLAGS)
+		$(NIMBLE) testmessaging $(NIMBLE_TASK_FLAGS)
 
 example2: | build-deps build deps librln
 	echo -e $(BUILD_MSG) "build/$@" && \

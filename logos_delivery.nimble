@@ -377,8 +377,8 @@ task test, "Build & run Waku tests":
 task testwakunode2, "Build & run wakunode2 app tests":
   test "all_tests_wakunode2"
 
-task testapi, "Build & run API layer tests (configuration, messaging, channels)":
-  test "all_tests_api"
+task testmessaging, "Build & run the tests above the kernel (API, messaging, channels)":
+  test "all_tests_messaging"
 
 task example2, "Build Waku examples":
   buildBinary "api_example", "examples/api_example/"

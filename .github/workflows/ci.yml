@@ -265,10 +265,10 @@ jobs:
           export NIMFLAGS="--colors:off -d:chronicles_colors:none -d:disableMarchNative"
           export USE_LIBBACKTRACE=0
 
-          # The three test binaries by name. `make test` chains testcommon,
-          # testwaku and testapi; testapi has its own job below, because the
-          # second compile of the dependency graph does not fit this job's
-          # time limit next to testwaku.
+          # The kernel test binaries by name. `make test` chains testcommon,
+          # testwaku and testmessaging; testmessaging has its own job below,
+          # because the second compile of the dependency graph does not fit
+          # this job's time limit next to testwaku.
           make V=1 POSTGRES=$postgres_enabled testcommon
           make V=1 POSTGRES=$postgres_enabled testwaku
           make V=1 POSTGRES=$postgres_enabled testwakunode2
@@ -276,7 +276,7 @@ jobs:
       - name: Audit installed deps
         run: make audit-deps
 
-  test-api:
+  test-messaging:
     needs: changes
     if: ${{ needs.changes.outputs.v2 == 'true' || needs.changes.outputs.common == 'true' }}
     strategy:
@@ -286,7 +286,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
 
-    name: test-api-${{ matrix.os }}
+    name: test-messaging-${{ matrix.os }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -303,11 +303,11 @@ jobs:
           nimble-version: ${{ env.NIMBLE_VERSION }}
           nim-version: ${{ env.NIM_VERSION }}
 
-      - name: Run the API layer tests
+      - name: Run the tests above the kernel
         run: |
-          # The API-layer suites (api, messaging, channels) in their own
-          # binary: all_tests_waku with them exceeds the refc limit of 3500
-          # global markers. See tests/all_tests_api.nim.
+          # The suites above the kernel (api, messaging, channels) in their
+          # own binary: all_tests_waku with them exceeds the refc limit of
+          # 3500 global markers. See tests/all_tests_messaging.nim.
           postgres_enabled=0
           if [ ${{ runner.os }} == "Linux" ]; then
             sudo docker run --rm -d -e POSTGRES_PASSWORD=test123 -p 5432:5432 postgres:15.4-alpine3.18
@@ -318,7 +318,7 @@ jobs:
           export NIMFLAGS="--colors:off -d:chronicles_colors:none -d:disableMarchNative"
           export USE_LIBBACKTRACE=0
 
-          make V=1 POSTGRES=$postgres_enabled testapi
+          make V=1 POSTGRES=$postgres_enabled testmessaging
 
       - name: Audit installed deps
         run: make audit-deps

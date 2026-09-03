@@ -78,6 +78,7 @@ import ./tools/test_all
 # Persistency library tests
 import ./persistency/test_all
 
-# The API-layer suites (api, messaging, channels) are in all_tests_api.nim.
-# Each module-level global with managed memory registers one GC marker, and
-# the refc runtime holds 3500. This binary was at the limit with them.
+# The suites above the kernel (api, messaging, channels) are in
+# all_tests_messaging.nim. Each module-level global with managed memory
+# registers one GC marker, and the refc runtime holds 3500. This binary was
+# at the limit with them. The kernel suites stay here.
