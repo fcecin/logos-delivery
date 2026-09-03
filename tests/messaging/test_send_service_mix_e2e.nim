@@ -280,6 +280,12 @@ suite "Mix send path - end to end over an in-process mixnet":
     check:
       sender.waku.node.getMixNodePoolSize() == 4
       sender.waku.mixReady()
+      # The Edge sender mounts mix and no relay: a sender only, no advertised
+      # mix key. The exit node mounts relay and mix: it serves the network.
+      # The hops of this fixture are sender-only nodes too; the sender
+      # routes through them because its configured pool holds their keys.
+      not sender.waku.node.servesMix()
+      exitNode.servesMix()
       # libp2p does not remove the address of a configured mix node.
       sender.waku.node.peerManager.switch.peerStore[AddressBook]
         .entries(exitNode.peerId())

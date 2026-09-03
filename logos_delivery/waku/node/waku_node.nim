@@ -207,10 +207,17 @@ proc getCapabilitiesGetter(node: WakuNode): GetCapabilities =
       return @[]
     return node.enr.getCapabilities()
 
+proc servesMix*(node: WakuNode): bool =
+  ## The node is an intermediary and exit node of the mix network when it
+  ## mounts mix and relay (WAKU-MIX gives a relay node these roles by default).
+  ## A node with mix and no relay is a sender only: it mounts the protocol for
+  ## its own replies and advertises no mix key.
+  not node.wakuMix.isNil() and not node.wakuRelay.isNil()
+
 proc getWakuPeerRecordGetter(node: WakuNode): GetWakuPeerRecord =
   return proc(): WakuPeerRecord {.closure, gcsafe, raises: [].} =
     var mixKey: string
-    if not node.wakuMix.isNil():
+    if node.servesMix():
       mixKey = node.wakuMix.pubKey.to0xHex()
     return WakuPeerRecord.init(
       peerId = node.switch.peerInfo.peerId,

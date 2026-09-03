@@ -6,6 +6,7 @@ import logos_delivery
 import logos_delivery/api/conf/logos_delivery_conf_json
 import logos_delivery/api/conf/logos_delivery_conf
 import logos_delivery/waku/factory/[waku_conf, networks_config]
+import logos_delivery/waku/waku_enr
 import logos_delivery/waku/common/logging
 
 suite "MessagingClientConf - mode expansion (toWakuNodeConf)":
@@ -434,6 +435,31 @@ suite "MessagingClientConf - anonymity level":
     let wakuConf = kc.toWakuConf().valueOr:
       raiseAssert error
     check wakuConf.mixConf.isSome()
+
+  test "a Core node with a level serves the mix network and sets the capability bit":
+    let kc = MessagingClientConf(anonymityLevel: Opt.some(AnonymityLevel.Preferred)).toWakuNodeConf(
+      LogosDeliveryMode.Core
+    ).valueOr:
+      raiseAssert error
+    let wakuConf = kc.toWakuConf().valueOr:
+      raiseAssert error
+    check:
+      wakuConf.relay
+      wakuConf.servesMix()
+      wakuConf.wakuFlags.supportsCapability(Capabilities.Mix)
+
+  test "an Edge node with a level is a sender only: mix mounts, the capability bit stays off":
+    let kc = MessagingClientConf(anonymityLevel: Opt.some(AnonymityLevel.Preferred)).toWakuNodeConf(
+      LogosDeliveryMode.Edge
+    ).valueOr:
+      raiseAssert error
+    let wakuConf = kc.toWakuConf().valueOr:
+      raiseAssert error
+    check:
+      wakuConf.mixConf.isSome()
+      not wakuConf.relay
+      not wakuConf.servesMix()
+      not wakuConf.wakuFlags.supportsCapability(Capabilities.Mix)
 
 suite "LogosDelivery.new - raw kernel construction":
   asyncTest "a kernel-only node mounts the kernel only; start/stop tolerate the nil layers":
