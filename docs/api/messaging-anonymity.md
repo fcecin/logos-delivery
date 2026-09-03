@@ -19,7 +19,7 @@ A value other than `None` also mounts the mix protocol on the node. The send pat
 | Level | Send path | When mix cannot deliver | Time to a failure report |
 |---|---|---|---|
 | `None` (default) | Relay, then lightpush | No change from a node without the setting | 60 s |
-| `Preferred` | Mix for the first 60 s, then relay and lightpush | A message that did not propagate goes to the plain path after 60 s. Mix does not get that message again. | 120 s |
+| `Preferred` | Mix for the first 60 s, then relay and lightpush | A message that did not propagate goes to the plain path after 60 s. Mix makes no attempt for that message again. | 120 s |
 | `Required` | Mix only | The send fails at the deadline. The plain path is not built for this node. | 60 s |
 
 The send path reports delivery with the events `MessagePropagated`, `MessageSent` and `MessageError`. For a message that went through mix, `MessageSent` follows `MessagePropagated` at once, without a store confirmation: the send service does not confirm such a message with a store node, because a store query with the message hash would show the sender to the store node. Store-based reliability does not apply to a mixed send. A reliable channel cannot send through mix until the mix path divides messages: the SDS envelope of a channel message is about 19 KB whatever the payload, and a mix packet holds about 3 KB. A `Required` node fails a channel send at once, and a `Preferred` node sends it in clear text at once. The events do not name the path that delivered a message; the INFO log of the node does.

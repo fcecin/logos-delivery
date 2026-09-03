@@ -5,9 +5,10 @@
 ## Five `WakuNode` instances make the network: three mix hops, one lightpush
 ## server with mix that is the last node of the sphinx path (`exit_is_dest`),
 ## and one relay peer of that server. A path has two hops and the exit node.
-## The relay peer receives what the server publishes. The sender is a `LogosDelivery` stack made with the Messaging
-## API: an Edge node with `anonymityLevel` set, the mix nodes given as
-## `mixnode` entries, and the exit node given as its lightpush service peer.
+## The relay peer receives what the server publishes. The sender is a
+## `LogosDelivery` stack made with the Messaging API: an Edge node with
+## `anonymityLevel` set, the mix nodes given as `mixnode` entries, and the
+## exit node given as its lightpush service peer.
 ## The tests use the real configuration path, the real send-processor chain,
 ## real sphinx path construction and a real reply. There is no stub.
 

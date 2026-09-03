@@ -84,6 +84,20 @@ method sendImpl(
   task.state = DeliveryState.FailedToDeliver
   task.errorDesc = "refused by the exit node"
 
+type RetryWithoutMarkProcessor = ref object of BaseSendProcessor
+  ## A plain attempt that did not deliver: the task retries, and no mix mark
+  ## is set.
+
+method isValidProcessor(
+    self: RetryWithoutMarkProcessor, task: DeliveryTask
+): bool {.gcsafe.} =
+  return true
+
+method sendImpl(
+    self: RetryWithoutMarkProcessor, task: DeliveryTask
+): Future[void] {.async.} =
+  task.state = DeliveryState.NextRoundRetry
+
 type TimedOutMixProcessor = ref object of BaseSendProcessor
   ## A mix attempt that got no reply: the packet left the node at the start
   ## of the attempt, and the attempt ends after `delay` with no reply.
@@ -364,8 +378,12 @@ suite "SendService - anonymity level":
     let manager =
       RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
     let service = SendService
-      .new(false, waku, manager, sendProcessor = TimedOutMixProcessor())
+      .new(false, waku, manager, sendProcessor = RetryWithoutMarkProcessor())
       .expect("SendService.new")
+    # A started service: the receipt listener exists from the start on.
+    service.startSendService()
+    defer:
+      await service.stopSendService()
     var propagated: seq[RequestId]
     let listener = MessagePropagatedEvent.listen(
       waku.brokerCtx,
@@ -377,12 +395,14 @@ suite "SendService - anonymity level":
       await MessagePropagatedEvent.dropListener(waku.brokerCtx, listener)
 
     let task = buildTask("local-echo", chronos.seconds(0))
-    service.trackedSend(task) # parked: the service did not start
-    task.lastMixSendTime = Opt.none(Moment) # a plain attempt, no mix mark
+    service.trackedSend(task)
+    await sleepAsync(chronos.milliseconds(50)) # the plain attempt ran, no mark
+    check task.lastMixSendTime.isNone()
     MessageReceivedEvent.emit(waku.brokerCtx, task.msgHash.to0xHex(), task.msg)
     await sleepAsync(chronos.milliseconds(50))
     check:
       task.state == DeliveryState.NextRoundRetry
+      not task.receivedByNode
       propagated.len == 0
 
   asyncTest "a task marked propagated before its retry is not sent again":
@@ -1083,6 +1103,8 @@ suite "Mix send path - the reply budget":
     check:
       res.isErr()
       res.error.code == LightPushErrorCode.SERVICE_NOT_AVAILABLE
+      # The mix processor keys the lost-reply rules on this description.
+      res.error.desc == Opt.some(lightpush.MixReplyTimeoutDesc)
 
   asyncTest "a reply that cannot be read is reported as a failure after the write":
     ## The request was written, so the exit node may have published the
@@ -1201,11 +1223,10 @@ suite "Mix send path - the reply budget":
 
   asyncTest "a stalled first-hop dial is given up on too":
     ## The second stall. When the stall is in the send, the reply future is
-    ## pending when `defer: closeWithEOF()` of the client reads the stream for
-    ## an end-of-file that does not come. The close cancels the closure that
-    ## completes that future. Without the `reset` that makes `closeWithEOF`
-    ## return at once, the cancellation does not complete, and the
-    ## send-service loop stops.
+    ## pending when the client closes the connection after the failed send.
+    ## The close cancels the closure that completes that future. Without the
+    ## `reset` of `publishOverMix`, which makes the close return at once, the
+    ## cancellation does not complete, and the send-service loop stops.
     let res = await givesUpOn(stallInSend = true)
     check:
       res.isErr()

@@ -233,14 +233,17 @@ jobs:
     # limit. The job does not know what a binary holds; it runs its targets
     # in order. Each job installs the dependencies once (about 5 min).
     #
-    #   binary          compile   run     weight
-    #   testwaku        12 min    20 min  32 min   (the kernel)
-    #   testmessaging   11 min     7 min  18 min   (the layers above the kernel)
-    #   testcommon       5 min     0 min   5 min
-    #   testwakunode2    4 min     0 min   4 min
+    # Measured on the ubuntu-22.04 runner (2026-09-03):
     #
-    # Bag 1: testwaku (32). Bag 2: testmessaging, testcommon, testwakunode2 (27).
-    # When a binary's weight changes, re-balance the bags here.
+    #   binary          compile   run       weight
+    #   testwaku        13 min    17 min    30 min   (the kernel)
+    #   testmessaging    9 min     4.5 min  13.5 min (the layers above the kernel)
+    #   testcommon       4.5 min   0 min     4.5 min
+    #   testwakunode2    7.5 min   0 min     7.5 min
+    #
+    # Bag 1: testwaku (30, job 36 min). Bag 2: testmessaging, testcommon,
+    # testwakunode2 (25.5, job 31 min). The macOS runner is faster (31 and
+    # 24 min). When a binary's weight changes, re-balance the bags here.
     needs: changes
     if: ${{ needs.changes.outputs.v2 == 'true' || needs.changes.outputs.common == 'true' }}
     strategy:
