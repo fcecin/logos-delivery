@@ -338,17 +338,21 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# The build installs a pinned Nimble revision and puts it first on PATH. The
-# release with the same version number is a different build and reports the
-# same version, so check the revision. The case above already ran a build,
-# which installs it.
+# The build installs the pinned Nimble and puts it first on PATH. A 40-hex
+# pin names a git revision and the binary must report that hash; any other
+# pin names a release version and the binary must report that version. The
+# case above already ran a build, which installs it.
 # --------------------------------------------------------------------------
 # print-nimble-path is what the README tells a developer to use, so test that,
 # not a second way of finding the same binary.
 tooldir=$(make print-nimble-path 2>/dev/null)
-expect_eq "print-nimble-path names the pinned revision" \
-  "$(value_of REQUIRED_NIMBLE_REVISION)" \
-  "$("${tooldir}/nimble" --version 2>/dev/null | sed -n 's/^git hash: //p')"
+pin=$(value_of REQUIRED_NIMBLE_REVISION)
+case "${pin}" in
+  *[!0-9a-f]*|"") reported=$("${tooldir}/nimble" --version 2>/dev/null | head -1 \
+                    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1) ;;
+  *) reported=$("${tooldir}/nimble" --version 2>/dev/null | sed -n 's/^git hash: //p') ;;
+esac
+expect_eq "print-nimble-path names the pinned Nimble" "${pin#v}" "${reported}"
 
 # ~/.nimble/bin/nimble is a link that `nimble setup` rewrites. It must not
 # shadow the pinned binary.

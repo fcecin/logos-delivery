@@ -419,6 +419,7 @@ GIT_PRE_COMMIT_HOOK := .git/hooks/pre-commit
 install-nph: build-nph
 ifeq ("$(wildcard $(GIT_PRE_COMMIT_HOOK))","")
 	cp ./scripts/git_pre_commit_format.sh $(GIT_PRE_COMMIT_HOOK)
+	chmod +x $(GIT_PRE_COMMIT_HOOK)
 else
 	echo "$(GIT_PRE_COMMIT_HOOK) already present, will NOT override"
 	exit 1
@@ -433,6 +434,7 @@ else
 	grep -q git_pre_commit_deps.sh $(GIT_PRE_COMMIT_HOOK) || \
 		printf '\n./scripts/git_pre_commit_deps.sh || exit 1\n' >> $(GIT_PRE_COMMIT_HOOK)
 endif
+	chmod +x $(GIT_PRE_COMMIT_HOOK)
 	@echo "$(GIT_PRE_COMMIT_HOOK) runs scripts/git_pre_commit_deps.sh"
 
 nph/%: | build-nph
