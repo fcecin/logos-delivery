@@ -172,10 +172,22 @@ proc nameFromDir(dir: string): string =
       return dir
     result = result[0 ..< cut]
 
+type Installed = tuple[dir, url, rev: string]
+
+# The installed directory for a lock entry: same URL and revision first, then
+# same URL, then same package name. Several directories can share a URL when
+# a stale version was not removed; the unmatched ones are reported below.
+proc findInstalled(inst: seq[Installed], name, url, rev: string): int =
+  for i, p in inst:
+    if p.url == url and p.rev == rev: return i
+  for i, p in inst:
+    if p.url == url: return i
+  for i, p in inst:
+    if nameFromDir(p.dir) == name: return i
+  -1
+
 proc installedMismatches(lock: JsonNode, pkgs2: string, ok: var int, total: var int): seq[string] =
-  var installedByUrl = initTable[string, (string, string)]()
-  var installedByName = initTable[string, (string, string)]()
-  var dirs: seq[string]
+  var inst: seq[Installed]
   var metaless: seq[string]
   for path in listDirs(pkgs2):
     let d = path.split('/')[^1]
@@ -184,12 +196,7 @@ proc installedMismatches(lock: JsonNode, pkgs2: string, ok: var int, total: var 
       metaless.add(d)
       continue
     let meta = parseJson(readFile(metaPath))
-    let rev = metaField(meta, "vcsRevision")
-    let url = normUrl(metaField(meta, "url"))
-    dirs.add(d)
-    if url.len > 0:
-      installedByUrl[url] = (d, rev)
-    installedByName[nameFromDir(d)] = (d, rev)
+    inst.add((d, normUrl(metaField(meta, "url")), metaField(meta, "vcsRevision")))
 
   var names: seq[string]
   for name, _ in lock:
@@ -203,21 +210,20 @@ proc installedMismatches(lock: JsonNode, pkgs2: string, ok: var int, total: var 
     total += 1
     let entry = lock[name]
     let want = entry["vcsRevision"].getStr()
-    var hit: (string, string)
-    if normUrl(entry["url"].getStr()) in installedByUrl:
-      hit = installedByUrl[normUrl(entry["url"].getStr())]
-    elif name in installedByName:
-      hit = installedByName[name]
-    else:
+    let i = findInstalled(inst, name, normUrl(entry["url"].getStr()), want)
+    if i < 0:
       result.add(name & ": in nimble.lock but not installed")
       continue
-    matchedDirs.incl(hit[0])
-    if hit[1] != want:
-      result.add(name & ": lock has " & want & ", installed " & hit[0] & " has " & hit[1])
+    matchedDirs.incl(inst[i].dir)
+    if inst[i].rev != want:
+      result.add(name & ": lock has " & want & ", installed " & inst[i].dir & " has " & inst[i].rev)
     else:
       ok += 1
 
   # Installed directories that match no lock entry.
+  var dirs: seq[string]
+  for p in inst:
+    dirs.add(p.dir)
   dirs.sort()
   for d in dirs:
     if d notin matchedDirs:
@@ -314,6 +320,14 @@ proc selfTest() =
   doAssert pinMismatches(@[("https://github.com/logos-messaging/nim-sds", "b12f5ee", "")],
     lockFixture)[0].contains("nearest: sds")
   doAssert bad("https://github.com/nowhere/pkg", "x", "") == 1
+
+  # Two installed directories for one URL: the one at the locked revision matches.
+  let two: seq[Installed] = @[("chronos-4.2.4-aaaa", "https://github.com/status-im/nim-chronos", "90f5"),
+                              ("chronos-4.2.5-bbbb", "https://github.com/status-im/nim-chronos", "0ab8")]
+  doAssert two[findInstalled(two, "chronos", "https://github.com/status-im/nim-chronos", "0ab8")].dir == "chronos-4.2.5-bbbb"
+  doAssert two[findInstalled(two, "chronos", "https://github.com/status-im/nim-chronos", "90f5")].dir == "chronos-4.2.4-aaaa"
+  doAssert two[findInstalled(two, "chronos", "https://github.com/status-im/nim-chronos", "ffff")].url.len > 0
+  doAssert findInstalled(two, "stew", "https://github.com/status-im/nim-stew", "x") == -1
 
   # nix parsing and cross-check.
   let nix = nixEntriesFrom("""
