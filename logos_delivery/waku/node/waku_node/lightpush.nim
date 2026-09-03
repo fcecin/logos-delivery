@@ -22,6 +22,7 @@ import
 import
   ../waku_node,
   ../../waku_mix,
+  libp2p_mix/entry_connection,
   ../../waku_core,
   ../../waku_core/topics/sharding,
   ../../waku_lightpush_legacy/client as legacy_lightpush_client,
@@ -333,7 +334,13 @@ proc lightpushPublishHandler(
     message: WakuMessage,
     peer: RemotePeerInfo | PeerInfo,
     mixify: bool = false,
+    avoidMixHops: seq[PeerId] = @[],
+    mixPath: ref seq[PeerId] = nil,
 ): Future[lightpush_protocol.WakuLightPushResult] {.async.} =
+  ## With `mixify`, `avoidMixHops` names pool nodes to keep out of the
+  ## forward path when the pool allows, and `mixPath`, when given, receives
+  ## the forward path the packet took (the hops and the exit node last),
+  ## empty when the packet did not leave.
   let msgHash = pubsubTopic.computeMessageHash(message).to0xHex()
   if not node.wakuLightpushClient.isNil():
     debug "Publishing message with lightpush",
@@ -373,6 +380,7 @@ proc lightpushPublishHandler(
             numSurbs: Opt.some(MixReplySurbs),
             replyTimeout: Opt.some(MixLibraryReplyTimeout),
             replyAnchor: replyAnchor,
+            avoidPeers: avoidMixHops,
           ),
         ).valueOr:
           debug "Could not create mix connection"
@@ -381,7 +389,21 @@ proc lightpushPublishHandler(
             "Waku lightpush with mix not available",
           )
 
-        return await node.publishOverMix(conn, pubsubTopic, message)
+        let res = await node.publishOverMix(conn, pubsubTopic, message)
+        if not mixPath.isNil() and conn of MixEntryConnection:
+          mixPath[] = MixEntryConnection(conn).sentPath()
+        if res.isErr() and res.error.desc.isSome() and replyAnchor.isSome():
+          # The library rejected the anchor of this send: it left the pool, or
+          # its record lost the address or the key. The next publish picks
+          # another. A missing record of a random hop names that hop, not the
+          # anchor, and keeps the anchor.
+          let desc = res.error.desc.get()
+          if desc.contains("reply anchor") or (
+            desc.contains("could not get mix pub info") and
+            desc.contains($replyAnchor.get())
+          ):
+            node.wakuMix.dropReplyAnchor(desc)
+        return res
       else:
         # The caller asked for mix. Do not publish in clear text.
         return lighpushErrorResult(
@@ -414,7 +436,11 @@ proc lightpushPublish*(
     message: WakuMessage,
     peerOpt: Opt[RemotePeerInfo] = Opt.none(RemotePeerInfo),
     mixify: bool = false,
+    avoidMixHops: seq[PeerId] = @[],
+    mixPath: ref seq[PeerId] = nil,
 ): Future[lightpush_protocol.WakuLightPushResult] {.async.} =
+  ## `avoidMixHops` and `mixPath` apply to a mixed publish only; see
+  ## `lightpushPublishHandler`.
   if node.wakuLightpushClient.isNil() and node.wakuLightPush.isNil():
     debug "Failed to publish message as lightpush not available"
     return lighpushErrorResult(
@@ -466,8 +492,9 @@ proc lightpushPublish*(
   let msgWithProof = (await checkAndGenerateRLNProof(rln, message)).valueOr:
     return lighpushErrorResult(LightPushErrorCode.OUT_OF_RLN_PROOF, error)
 
-  let firstResult =
-    await lightpushPublishHandler(node, pubsubForPublish, msgWithProof, toPeer, mixify)
+  let firstResult = await lightpushPublishHandler(
+    node, pubsubForPublish, msgWithProof, toPeer, mixify, avoidMixHops, mixPath
+  )
 
   # Gate the refresh on unambiguously RLN-related failures: 504
   # (OUT_OF_RLN_PROOF) is always RLN; 420 (INVALID_MESSAGE) also covers non-RLN

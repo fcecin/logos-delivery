@@ -201,27 +201,43 @@ const MixReplyTimeoutDesc* = lightpush.MixReplyTimeoutDesc
 const MixReplyUnreadableDesc* = lightpush.MixReplyUnreadableDesc
 
 proc lightpushPublishViaMix*(
-    self: Waku, shard: PubsubTopic, message: WakuMessage, avoid = Opt.none(PeerId)
-): Future[tuple[res: WakuLightPushResult, exit: Opt[PeerId]]] {.async.} =
+    self: Waku,
+    shard: PubsubTopic,
+    message: WakuMessage,
+    avoid = Opt.none(PeerId),
+    avoidHops: seq[PeerId] = @[],
+): Future[tuple[res: WakuLightPushResult, exit: Opt[PeerId], path: seq[PeerId]]] {.
+    async
+.} =
   ## Publishes `message` through mix to an exit node for `shard`, and returns
-  ## the result with the peer id of the exit node. The caller keeps the exit
-  ## node of a failed attempt and gives it as `avoid` for the next attempt.
+  ## the result with the peer id of the exit node and the forward path the
+  ## packet took (empty when it did not leave). The caller keeps the exit node
+  ## of a failed attempt and gives it as `avoid` for the next attempt, and the
+  ## hops of an attempt that got no reply as `avoidHops`: the library keeps
+  ## them out of the next path when the pool has enough other nodes.
   let peer = self.selectMixLightpushPeer(shard, avoid).valueOr:
     return (
       lightpushResultServiceUnavailable(
         "no mix-capable lightpush peer available for shard"
       ),
       Opt.none(PeerId),
+      newSeq[PeerId](),
     )
+  let path = new seq[PeerId]
   try:
     let res = await self.node.lightpushPublish(
-      Opt.some(shard), message, Opt.some(peer), mixify = true
+      Opt.some(shard),
+      message,
+      Opt.some(peer),
+      mixify = true,
+      avoidMixHops = avoidHops,
+      mixPath = path,
     )
-    return (res, Opt.some(peer.peerId))
+    return (res, Opt.some(peer.peerId), path[])
   except CancelledError as exc:
     raise exc
   except CatchableError as e:
-    return (lightpushResultInternalError(e.msg), Opt.some(peer.peerId))
+    return (lightpushResultInternalError(e.msg), Opt.some(peer.peerId), path[])
 
 proc lightpushPublishToAny*(
     self: Waku, shard: PubsubTopic, message: WakuMessage

@@ -93,14 +93,14 @@ requires "https://github.com/vacp2p/nim-boringssl#v0.0.11"
 requires "https://github.com/vacp2p/nim-jwt.git#057ec95eb5af0eea9c49bfe9025b3312c95dc5f2"
 
 # Temporary pin to a fork branch of the mix library, until the library takes
-# the reply anchor and the pin moves to the merged commit. The mix send path
-# needs: `MixParameters.replyAnchor` (the reply anchor, see
+# the change and the pin moves to the merged commit. The mix send path needs:
+# `MixParameters.replyAnchor` and `MixParameters.avoidPeers` with
+# `MixEntryConnection.sentPath` (the reply anchor and the avoided hops, see
 # `docs/api/messaging-anonymity.md`), `MixParameters.replyTimeout`,
 # `setLocalMultiAddr` and `getMaxMessageSizeForCodec(codec, numSurbs)`. The
-# branch also accepts libp2p 2.2.1 and later, which this tree needs on 2.3.1.
-# Check the pin first at a rebase over another pull request that pins the mix
-# library.
-requires "https://github.com/fcecin/nim-libp2p-mix#557e69b9ab0120cd7bd7df909ac597c926872a5f"
+# commit pins libp2p 2.3.1, the version this tree runs. Check the pin first
+# at a rebase over another pull request that pins the mix library.
+requires "https://github.com/fcecin/nim-libp2p-mix#1f68776d5b8aa3a3a9bce157b26d810a4dafb1b6"
 
 proc getMyCPU(): string =
   ## Need to set cpu more explicit manner to avoid arch issues between dependencies

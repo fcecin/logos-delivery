@@ -164,9 +164,12 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
   # does. A failure before the write clears the mark below.
   task.lastMixSendTime = Opt.some(Moment.now())
   task.deliveryPath = DeliveryPath.Mix
-  let (publishRes, exit) = await self.waku.lightpushPublishViaMix(
-    task.pubsubTopic, task.msg, task.avoidMixExit
+  # The hops of the last attempt stay out of this path when the pool allows:
+  # an attempt without a reply does not say which hop swallowed the packet.
+  let (publishRes, exit, path) = await self.waku.lightpushPublishViaMix(
+    task.pubsubTopic, task.msg, task.avoidMixExit, task.lastMixPath
   )
+  task.lastMixPath = path
   let numLightpushServers = publishRes.valueOr:
     debug "Mix delivery attempt failed",
       requestId = task.requestId,

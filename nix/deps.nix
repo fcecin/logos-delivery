@@ -306,8 +306,8 @@
 
   libp2p_mix = pkgs.fetchgit {
     url = "https://github.com/fcecin/nim-libp2p-mix";
-    rev = "557e69b9ab0120cd7bd7df909ac597c926872a5f";
-    sha256 = "0mcrahg6sq2q0idfgy43s4bd3f9bp3p07g7hvivmpk5k1bxawpk0";
+    rev = "1f68776d5b8aa3a3a9bce157b26d810a4dafb1b6";
+    sha256 = "07czbq50dw83gmhhn5qkn1k5jmhh1zj2h6gq1jrh9mdqws5ar8hv";
     fetchSubmodules = true;
   };
 

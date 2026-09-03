@@ -46,6 +46,11 @@ type DeliveryTask* = ref object
   avoidMixExit*: Opt[PeerId]
     ## The exit node of the last failed mix attempt. The next attempt uses a
     ## different exit node when one exists.
+  lastMixPath*: seq[PeerId]
+    ## The forward path of the last mix attempt: the hops and the exit node
+    ## last; empty when the attempt failed before the packet left. The next
+    ## attempt keeps these hops out of its path when the pool has enough
+    ## other nodes: a hop that swallowed the packet leaves no other trace.
   lastMixSendTime*: Opt[Moment]
     ## Set when a mix attempt starts, kept when the attempt gets no reply,
     ## cleared when the attempt fails for a known reason or the task goes to

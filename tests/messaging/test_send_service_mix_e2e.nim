@@ -15,8 +15,9 @@
 import std/[net, sequtils, strutils]
 import chronos, chronicles, testutils/unittests, results, stew/byteutils
 import
-  libp2p/[peerid, peerstore, switch],
-  libp2p_mix/[curve25519, padding, mix_protocol],
+  libp2p/[multiaddress, peerid, peerstore, switch],
+  libp2p_mix/[curve25519, padding, mix_protocol, mix_node, pool],
+  libp2p/crypto/crypto,
   brokers/broker_context
 import
   logos_delivery,
@@ -70,16 +71,32 @@ proc fullAddress(node: WakuNode): string =
   ## these nodes listen on the loopback address only.
   $node.switch.peerInfo.listenAddrs[0] & "/p2p/" & $node.switch.peerInfo.peerId
 
-proc mixBootnode(node: WakuNode): MixNodePubInfo =
-  ## One `mixnode` entry: the full multiaddr of the peer and its mix public key.
-  MixNodePubInfo(multiAddr: node.fullAddress(), pubKey: node.wakuMix.pubKey)
+proc quicAddress(node: WakuNode): string =
+  ## The QUIC-v1 listen address of the node in the `/p2p/` form, for a
+  ## `mixnode` or `lightpushnode` entry that names the QUIC transport only.
+  for address in node.switch.peerInfo.listenAddrs:
+    if QUIC_V1.match(address):
+      return $address & "/p2p/" & $node.switch.peerInfo.peerId
+  raiseAssert "the node has no QUIC-v1 listen address"
 
-proc newNetworkNode(): WakuNode =
+proc mixBootnode(node: WakuNode, quic = false): MixNodePubInfo =
+  ## One `mixnode` entry: the full multiaddr of the peer and its mix public key.
+  ## With `quic`, the entry names the QUIC-v1 address of the peer only.
+  let address =
+    if quic:
+      node.quicAddress()
+    else:
+      node.fullAddress()
+  MixNodePubInfo(multiAddr: address, pubKey: node.wakuMix.pubKey)
+
+proc newNetworkNode(quic = false): WakuNode =
+  ## With `quic`, the node also listens on QUIC-v1 (the test helper binds the
+  ## QUIC port to the TCP port number).
   let node = newTestWakuNode(
     generateSecp256k1Key(),
     parseIpAddress("127.0.0.1"),
     freeTcpPort(),
-    quicEnabled = false,
+    quicEnabled = quic,
     clusterId = TestClusterId,
     subscribeShards = @[TestShard],
   )
@@ -95,22 +112,22 @@ proc mountMixOn(node: WakuNode) {.async.} =
   (await node.mountMix(TestClusterId, mixPrivKey, newSeq[MixNodePubInfo]())).isOkOr:
     raiseAssert "failed to mount mix: " & error
 
-proc newMixHop(): Future[WakuNode] {.async.} =
+proc newMixHop(quic = false): Future[WakuNode] {.async.} =
   ## A hop does not need a pool. The address of the next hop is in the packet.
   ## A hop must be reachable and must run the mix protocol.
   var node: WakuNode
   lockNewGlobalBrokerContext:
-    node = newNetworkNode()
+    node = newNetworkNode(quic)
     await node.mountMixOn()
     await node.start()
   return node
 
-proc newLightpushServer(withMix: bool): Future[WakuNode] {.async.} =
+proc newLightpushServer(withMix: bool, quic = false): Future[WakuNode] {.async.} =
   ## A relay node that serves lightpush. With `withMix` it is also a mix node.
   ## With `exit_is_dest`, a sender can select such a node as the exit node.
   var node: WakuNode
   lockNewGlobalBrokerContext:
-    node = newNetworkNode()
+    node = newNetworkNode(quic)
     (await node.mountRelay()).isOkOr:
       raiseAssert "failed to mount relay"
     (await node.mountLightPush()).isOkOr:
@@ -197,6 +214,7 @@ proc newAnonymousSender(
     lightpushServer: WakuNode,
     entryLayer = EntryLayer.messaging,
     colocationLimit = 0,
+    quic = false,
 ): Future[LogosDelivery] {.async.} =
   ## Made with the Messaging API: `anonymityLevel`, the mix bootnodes and the
   ## lightpush service peer are messaging overrides, as in a structured JSON
@@ -215,7 +233,15 @@ proc newAnonymousSender(
         # the bound port for its return paths.
       discv5UdpPort: Opt.some(Port(0)),
       mixnodes: Opt.some(mixnodes),
-      lightpushnode: Opt.some(lightpushServer.fullAddress()),
+      lightpushnode: Opt.some(
+        if quic:
+          lightpushServer.quicAddress()
+        else:
+          lightpushServer.fullAddress()
+      ),
+      # With `quic`, the sender dials QUIC-v1: the entries above name that
+      # transport only.
+      quicSupport: Opt.some(quic),
     ),
     channelsOverrides = ReliableChannelManagerConf(),
   ).valueOr:
@@ -727,3 +753,147 @@ suite "Mix send path - end to end over an in-process mixnet":
       # The task was in its first attempt, not in the cache. The application
       # learns that the send did not complete all the same.
       watch.failed.finished() and "stopped" in watch.failed.read()
+
+  asyncTest "a node bound to the wildcard host gives mix a real address for its return paths":
+    ## `mountMix` runs before the sockets bind, so the address it stores can
+    ## carry the wildcard host and port 0. `updateMixLocalAddress` replaces it
+    ## with the first announced address after the bind. The senders of this
+    ## suite listen on the loopback address; this node listens on 0.0.0.0.
+    var node: WakuNode
+    lockNewGlobalBrokerContext:
+      node = newTestWakuNode(
+        generateSecp256k1Key(),
+        parseIpAddress("0.0.0.0"),
+        Port(0),
+        quicEnabled = false,
+        clusterId = TestClusterId,
+        subscribeShards = @[TestShard],
+      )
+      await node.mountMixOn()
+      await node.start()
+    defer:
+      await node.stop()
+    let mixAddress = $node.wakuMix.localMixPubInfo().multiAddr
+    check:
+      node.announcedAddresses.len > 0
+      not mixAddress.contains("/ip4/0.0.0.0/")
+      not mixAddress.contains("/tcp/0")
+      node.announcedAddresses.anyIt(mixAddress == $it)
+
+  asyncTest "a mixed send runs over QUIC-v1 when the mix nodes are configured with QUIC addresses":
+    ## The configured `mixnode` and `lightpushnode` entries name the QUIC-v1
+    ## transport only, so every hop and the exit node are dialed over QUIC.
+    ## Before this change the address parser dropped the QUIC parts and
+    ## rejected the entries.
+    var quicHops: seq[WakuNode] = @[]
+    for _ in 0 ..< 3:
+      quicHops.add(await newMixHop(quic = true))
+    let quicExit = await newLightpushServer(withMix = true, quic = true)
+    let quicRelayPeer = await newRelayPeer()
+    defer:
+      await allFutures((quicHops & @[quicExit, quicRelayPeer]).mapIt(it.stop()))
+    discard quicExit.watchInbox()
+    let quicInbox = quicRelayPeer.watchInbox()
+    await quicRelayPeer.connectToNodes(@[quicExit.peerInfo.toRemotePeerInfo()])
+    let quicMixnet = (quicHops & @[quicExit]).mapIt(it.mixBootnode(quic = true))
+
+    let sender = await newAnonymousSender(
+      AnonymityLevel.Required, quicMixnet, quicExit, quic = true
+    )
+    defer:
+      (await sender.stop()).isOkOr:
+        raiseAssert "failed to stop the sender: " & error
+    let book = sender.waku.node.peerManager.switch.peerStore[AddressBook]
+    check:
+      sender.waku.node.getMixNodePoolSize() == 4
+      sender.waku.mixReady()
+      # The pool holds QUIC-v1 addresses only for every mix node.
+      (quicHops & @[quicExit]).allIt(
+        book[it.peerId()].len > 0 and book[it.peerId()].allIt(QUIC_V1.match(it))
+      )
+
+    let watch = watchSend(sender.waku.brokerCtx)
+    defer:
+      await watch.stop()
+    discard (
+      await sender.messagingClient.send(
+        MessageEnvelope.init(TestContentTopic, "over the mixnet, over QUIC")
+      )
+    ).valueOr:
+      raiseAssert error
+    let propagated = await watch.propagated.withTimeout(DeliveryTimeout)
+    check:
+      propagated
+      not watch.failed.finished()
+    let arrived = await quicInbox.withTimeout(DeliveryTimeout)
+    check arrived
+    if arrived:
+      check string.fromBytes(quicInbox.read().payload) == "over the mixnet, over QUIC"
+
+  asyncTest "a pool entry without a usable address is never the reply anchor":
+    ## A mix key from discovery arrives before identify fills the address
+    ## and key books. The pool lists the peer; the library cannot place it on
+    ## a path. The anchor pick skips it.
+    let sender = await newAnonymousSender(AnonymityLevel.Required, mixnet, exitNode)
+    defer:
+      (await sender.stop()).isOkOr:
+        raiseAssert "failed to stop the sender: " & error
+    let ghostKey = generateSecp256k1Key()
+    let ghostId =
+      PeerId.init(ghostKey.getPublicKey().expect("public key")).expect("peer id")
+    let (_, ghostMixKey) = generateKeyPair().expect("mix key pair")
+    let store = sender.waku.node.peerManager.switch.peerStore
+    store[MixPubKeyBook][ghostId] = ghostMixKey
+    check:
+      sender.waku.node.getMixNodePoolSize() == 5
+      sender.waku.node.wakuMix.nodePool.get(ghostId).isNone()
+
+    let watch = watchSend(sender.waku.brokerCtx)
+    defer:
+      await watch.stop()
+    discard (
+      await sender.messagingClient.send(
+        MessageEnvelope.init(TestContentTopic, "ghost in the pool")
+      )
+    ).valueOr:
+      raiseAssert error
+    let propagated = await watch.propagated.withTimeout(DeliveryTimeout)
+    let anchor = sender.waku.node.wakuMix.replyAnchor
+    check:
+      propagated
+      anchor.isSome()
+      anchor.get() != ghostId
+
+  asyncTest "an anchor candidate that does not answer costs one bounded dial":
+    ## The pool holds one node at an address that swallows the dial. The
+    ## anchor pick tries it once, within `MixAnchorDialTimeout`, and the next
+    ## pick skips it at once.
+    var node: WakuNode
+    lockNewGlobalBrokerContext:
+      node = newNetworkNode()
+      await node.mountMixOn()
+      await node.start()
+    defer:
+      await node.stop()
+    let deadKey = generateSecp256k1Key()
+    let deadPub = deadKey.getPublicKey().expect("public key")
+    let deadId = PeerId.init(deadPub).expect("peer id")
+    let (_, deadMixKey) = generateKeyPair().expect("mix key pair")
+    # A non-routable address: the dial waits until its limit.
+    let deadAddr = MultiAddress.init("/ip4/10.255.255.1/tcp/1").expect("multiaddr")
+    node.wakuMix.nodePool.add(
+      MixPubInfo.init(deadId, deadAddr, deadMixKey, deadPub.skkey)
+    )
+    check node.wakuMix.nodePool.get(deadId).isSome()
+
+    let started = Moment.now()
+    let first = await node.wakuMix.ensureReplyAnchor()
+    let firstTook = Moment.now() - started
+    let again = Moment.now()
+    let second = await node.wakuMix.ensureReplyAnchor()
+    let secondTook = Moment.now() - again
+    check:
+      first.isNone()
+      firstTook < MixAnchorDialTimeout + chronos.seconds(2)
+      second.isNone()
+      secondTook < chronos.milliseconds(500)

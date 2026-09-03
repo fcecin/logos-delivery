@@ -1,6 +1,6 @@
 {.used.}
 
-import results, std/[net, os]
+import results, std/[net, os, strutils]
 from std/times import epochTime
 import chronos, testutils/unittests, stew/byteutils
 import brokers/broker_context
@@ -1364,4 +1364,67 @@ suite "Reliable Channel - content topic subscription":
       (await manager.closeChannel(preStartChannelId)).expect("closeChannel pre-start")
       check not waku.waku.isSubscribed(preStartTopic).expect("isSubscribed")
 
+    (await waku.stop()).expect("stop")
+
+  asyncTest "a segment that fails at dispatch is reported after send returns, with its reason":
+    ## The application gets the channel request id first. The events that
+    ## name the id come after, from the dispatch task. The channel-level
+    ## error carries the reason, and no messaging-layer event names the
+    ## channel id.
+    const
+      channelId = ChannelId("dispatch-failure-channel")
+      contentTopic = ContentTopic("/reliable-channel/test/dispatch-failure")
+    var waku: LogosDelivery
+    var manager: ReliableChannelManager
+    var brokerCtx: BrokerContext
+    lockNewGlobalBrokerContext:
+      brokerCtx = globalBrokerContext()
+      waku = (await LogosDelivery.new(createApiNodeConf())).expect("LogosDelivery.new")
+      manager = waku.reliableChannelManager
+    setNoopEncryption()
+    MessagingSend.replaceProvider(
+      brokerCtx,
+      proc(envelope: MessageEnvelope): Future[Result[RequestId, string]] {.async.} =
+        return err("no peers"),
+    ).isOkOr:
+      raiseAssert "replaceProvider failed: " & error
+    discard manager
+      .createReliableChannel(channelId, contentTopic, SdsParticipantID("local"))
+      .expect("createReliableChannel")
+    var sendReturned = false
+    var seenAfterReturn = false
+    let erroredFut = newFuture[ChannelMessageErrorEvent]("channel-errored")
+    discard ChannelMessageErrorEvent
+      .listen(
+        brokerCtx,
+        proc(evt: ChannelMessageErrorEvent) {.async: (raises: []).} =
+          if not erroredFut.finished() and evt.channelId == channelId:
+            seenAfterReturn = sendReturned
+            erroredFut.complete(evt)
+        ,
+      )
+      .expect("listen ChannelMessageErrorEvent")
+    var messagingErrorsWithChannelId = 0
+    var channelReqId: RequestId
+    discard waku_message_events.MessageErrorEvent
+      .listen(
+        brokerCtx,
+        proc(evt: waku_message_events.MessageErrorEvent) {.async: (raises: []).} =
+          if evt.requestId == channelReqId:
+            messagingErrorsWithChannelId.inc()
+        ,
+      )
+      .expect("listen MessageErrorEvent")
+    channelReqId = (await manager.send(channelId, "doomed".toBytes())).expect("send")
+    sendReturned = true
+    let errored = await erroredFut.withTimeout(1.seconds)
+    check errored
+    if errored:
+      let evt = erroredFut.read()
+      check:
+        evt.requestId == channelReqId
+        seenAfterReturn
+        evt.error.contains("messaging send failed: no peers")
+    await sleepAsync(50.milliseconds)
+    check messagingErrorsWithChannelId == 0
     (await waku.stop()).expect("stop")

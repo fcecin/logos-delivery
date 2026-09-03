@@ -1,6 +1,6 @@
 {.push raises: [].}
 
-import std/sequtils
+import std/[sequtils, sets]
 import chronicles, chronos, results, metrics
 
 import
@@ -41,6 +41,9 @@ type
     clusterId: uint16
     pubKey*: Curve25519Key
     anchorRng: rng.Rng ## Shuffles the pool when the node picks a reply anchor.
+    anchorFailed: HashSet[PeerId]
+      ## Pool nodes whose anchor dial failed since the last anchor was set.
+      ## Skipped until every usable candidate has failed, then cleared.
     replyAnchor*: Opt[PeerId]
       ## The pool node that delivers the replies of this node's mixed sends.
       ## See `ensureReplyAnchor`.
@@ -149,6 +152,24 @@ proc new*(
 proc poolSize*(mix: WakuMix): int =
   mix.nodePool.len
 
+const MixAnchorDialTimeout* = chronos.seconds(3)
+  ## The time one dial of a reply anchor candidate may take inside a mixed
+  ## publish. One candidate per publish, with this limit, keeps the cost of a
+  ## lost anchor below the reply limit of the attempt.
+
+proc usableAsAnchor(mix: WakuMix, peerId: PeerId): bool =
+  ## A pool node the library can place on a path: a mix key next to a usable
+  ## address and a libp2p key. A key from discovery before identify, or an
+  ## entry that path construction evicted, has no such record.
+  mix.nodePool.get(peerId).isSome()
+
+proc dropReplyAnchor*(mix: WakuMix, reason: string) =
+  ## Forgets the anchor; the next publish picks another. Called when the
+  ## library rejects the anchor of a send.
+  mix.replyAnchor.withValue(anchor):
+    info "Mix reply anchor dropped", peer = anchor, reason = reason
+  mix.replyAnchor = Opt.none(PeerId)
+
 proc ensureReplyAnchor*(
     mix: WakuMix, avoid = Opt.none(PeerId)
 ): Future[Opt[PeerId]] {.async.} =
@@ -159,33 +180,52 @@ proc ensureReplyAnchor*(
   ## hop before this node is a random pool node, and the reply arrives only
   ## when that node happens to hold a connection to this node.
   ##
-  ## Keeps the current anchor while its connection lives and it is not
-  ## `avoid`, the exit node of the send at hand, which the library does not
-  ## accept as the anchor. Otherwise picks a pool node at random, connects to
-  ## it and keeps it. Returns none when no pool node accepts a connection; the
-  ## send then goes without an anchor.
+  ## Keeps the current anchor while its connection lives, the pool still has
+  ## a usable record for it, and it is not `avoid`, the exit node of the send
+  ## at hand, which the library does not accept as the anchor. Otherwise
+  ## tries one usable pool node, at random, with `MixAnchorDialTimeout`: one
+  ## dial per publish, so a lost anchor costs an attempt at most that much.
+  ## A node whose dial failed is skipped until every usable candidate has
+  ## failed. Returns none when no anchor is at hand; the send then goes
+  ## without one.
   ##
   ## What the anchor learns: this node's address, which its first hops learn
   ## anyway, and the timing of replies. It does not see the forward packet of
   ## the same message, unless the random forward path starts at it.
   let switch = mix.peerManager.switch
   mix.replyAnchor.withValue(anchor):
-    if avoid != Opt.some(anchor) and switch.isConnected(anchor):
+    if avoid != Opt.some(anchor) and switch.isConnected(anchor) and
+        mix.usableAsAnchor(anchor):
       return mix.replyAnchor
   var candidates = mix.nodePool.peerIds().filterIt(
-      it != switch.peerInfo.peerId and avoid != Opt.some(it)
+      it != switch.peerInfo.peerId and avoid != Opt.some(it) and
+        it notin mix.anchorFailed and mix.usableAsAnchor(it)
     )
+  if candidates.len == 0:
+    # Every usable candidate failed a dial since the last anchor: start over
+    # at the next publish.
+    mix.anchorFailed.clear()
+    if mix.replyAnchor.isSome():
+      info "Mix reply anchor lost: no usable pool node accepts a connection",
+        previous = mix.replyAnchor.get()
+    mix.replyAnchor = Opt.none(PeerId)
+    return mix.replyAnchor
   mix.anchorRng.shuffle(candidates)
-  for candidate in candidates:
-    let peer = switch.peerStore.getPeer(candidate)
-    if await mix.peerManager.connectPeer(peer, source = "mix reply anchor"):
-      if mix.replyAnchor != Opt.some(candidate):
-        info "Mix reply anchor set", peer = candidate
-      mix.replyAnchor = Opt.some(candidate)
-      return mix.replyAnchor
+  let candidate = candidates[0]
+  let peer = switch.peerStore.getPeer(candidate)
+  let connected = await mix.peerManager.connectPeer(
+    peer, dialTimeout = MixAnchorDialTimeout, source = "mix reply anchor"
+  )
+  if connected:
+    mix.anchorFailed.clear()
+    if mix.replyAnchor != Opt.some(candidate):
+      info "Mix reply anchor set", peer = candidate
+    mix.replyAnchor = Opt.some(candidate)
+    return mix.replyAnchor
+  mix.anchorFailed.incl(candidate)
   if mix.replyAnchor.isSome():
-    info "Mix reply anchor lost: no pool node accepts a connection",
-      previous = mix.replyAnchor.get()
+    info "Mix reply anchor lost: the candidate did not answer",
+      previous = mix.replyAnchor.get(), candidate = candidate
   mix.replyAnchor = Opt.none(PeerId)
   return mix.replyAnchor
 

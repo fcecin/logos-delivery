@@ -27,6 +27,24 @@ suite "Waku Core - Peers":
       $(remotePeerInfo.addrs[0][0].tryGet()) == "/ip4/127.0.0.1"
       $(remotePeerInfo.addrs[0][1].tryGet()) == "/tcp/65002"
 
+  test "Peer info parses a QUIC-v1 address":
+    ## The node dials QUIC-v1 when its QUIC transport is enabled, and the mix
+    ## pool routes QUIC-v1 addresses, so a configured peer may be QUIC-only.
+    let address =
+      "/ip4/127.0.0.1/udp/65003/quic-v1/p2p/16Uuu2HBmAcHvhLqQKwSSbX6BG5JLWUDRcaLVrehUVqpw7fz1hbYc"
+
+    let remotePeerInfo = parsePeerInfo(address).expect("QUIC-v1 peer info")
+
+    check:
+      $(remotePeerInfo.peerId) == "16Uuu2HBmAcHvhLqQKwSSbX6BG5JLWUDRcaLVrehUVqpw7fz1hbYc"
+      $remotePeerInfo.addrs[0] == "/ip4/127.0.0.1/udp/65003/quic-v1"
+      QUIC_V1.match(remotePeerInfo.addrs[0])
+
+  test "Multiaddr parsing fails for a UDP address without QUIC":
+    let address =
+      "/ip4/127.0.0.1/udp/65003/p2p/16Uuu2HBmAcHvhLqQKwSSbX6BG5JLWUDRcaLVrehUVqpw7fz1hbYc"
+    check parsePeerInfo(address).isErr()
+
   test "DNS multiaddrs parsing - dns peer":
     ## Given
     let address =
