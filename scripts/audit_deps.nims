@@ -55,40 +55,70 @@ proc isUrl(name: string): bool =
   name.startsWith("http://") or name.startsWith("https://")
 
 #---------------------------------------------------------------------
-# Version comparison, after Nimble's cmpSemVer: dotted numeric segments,
-# missing segments are zero, a "-prerelease" suffix sorts before the release.
+# Version comparison, a port of Nimble's parseSemVer and cmpSemVer:
+# release fields compare numerically with missing fields as zero; build
+# metadata after '+' is ignored; a release outranks its pre-releases;
+# pre-release identifiers split on '.', numeric ones compare numerically
+# and rank below alphanumeric ones, which compare lexically; when one
+# identifier list is a prefix of the other, the longer wins.
 #---------------------------------------------------------------------
 
-proc splitVer(v: string): (seq[int], string) =
+type PreIdent = tuple[isNum: bool, num: int, str: string]
+
+proc leadingInt(s: string): int =
+  for c in s:
+    if c in Digits:
+      result = result * 10 + (ord(c) - ord('0'))
+    else:
+      break
+
+proc parseSemVer(v: string): (seq[int], seq[PreIdent]) =
   var core = v
-  var pre = ""
-  let dash = v.find('-')
-  if dash >= 0:
-    core = v[0 ..< dash]
-    pre = v[dash + 1 .. ^1]
-  var nums: seq[int]
-  for part in core.split('.'):
-    var n = 0
-    for c in part:
-      if c in Digits:
-        n = n * 10 + (ord(c) - ord('0'))
+  let plus = core.find('+')
+  if plus >= 0:
+    core = core[0 ..< plus]
+  let dash = core.find('-')
+  let releaseStr = if dash >= 0: core[0 ..< dash] else: core
+  let preStr = if dash >= 0: core[dash + 1 .. ^1] else: ""
+  var release: seq[int]
+  for part in releaseStr.split('.'):
+    release.add(leadingInt(part))
+  var pre: seq[PreIdent]
+  if preStr.len > 0:
+    for ident in preStr.split('.'):
+      var allDigits = ident.len > 0
+      for c in ident:
+        if c notin Digits:
+          allDigits = false
+          break
+      if allDigits:
+        pre.add((true, leadingInt(ident), ""))
       else:
-        break
-    nums.add(n)
-  (nums, pre)
+        pre.add((false, 0, ident))
+  (release, pre)
+
+proc cmpIdent(a, b: PreIdent): int =
+  if a.isNum and b.isNum: cmp(a.num, b.num)
+  elif a.isNum: -1
+  elif b.isNum: 1
+  else: cmp(a.str, b.str)
 
 proc cmpVer(a, b: string): int =
-  let (an, ap) = splitVer(a)
-  let (bn, bp) = splitVer(b)
-  for i in 0 ..< max(an.len, bn.len):
-    let x = if i < an.len: an[i] else: 0
-    let y = if i < bn.len: bn[i] else: 0
+  let (ar, ap) = parseSemVer(a)
+  let (br, bp) = parseSemVer(b)
+  for i in 0 ..< max(ar.len, br.len):
+    let x = if i < ar.len: ar[i] else: 0
+    let y = if i < br.len: br[i] else: 0
     if x != y:
       return cmp(x, y)
-  if ap.len == 0 and bp.len == 0: 0
-  elif ap.len == 0: 1
-  elif bp.len == 0: -1
-  else: cmp(ap, bp)
+  if ap.len == 0 and bp.len == 0: return 0
+  if ap.len == 0: return 1
+  if bp.len == 0: return -1
+  for i in 0 ..< min(ap.len, bp.len):
+    let c = cmpIdent(ap[i], bp[i])
+    if c != 0:
+      return c
+  cmp(ap.len, bp.len)
 
 # Is plain version `v` within the range node `ran` from `nimble dump --json`?
 # Returns "" when it is, or a reason when it is not or cannot be decided.
@@ -384,6 +414,14 @@ proc selfTest() =
   doAssert cmpVer("0.6.0.3.2", "0.6.0.3.2") == 0
   doAssert cmpVer("4.10.0", "4.9.0") > 0
   doAssert cmpVer("1.0.0-rc1", "1.0.0") < 0
+  doAssert cmpVer("1.0.0-rc.2", "1.0.0-rc.10") < 0      # numeric identifiers compare numerically
+  doAssert cmpVer("1.0.0-rc.10", "1.0.0-rc.2") > 0
+  doAssert cmpVer("1.0.0-1", "1.0.0-alpha") < 0         # numeric ranks below alphanumeric
+  doAssert cmpVer("1.0.0-alpha", "1.0.0-alpha.1") < 0   # prefix: the longer wins
+  doAssert cmpVer("1.0.0-alpha.beta", "1.0.0-beta") < 0
+  doAssert cmpVer("1.0.0+build.7", "1.0.0") == 0         # build metadata ignored
+  doAssert cmpVer("1.0.0-rc.1+sha.abc", "1.0.0-rc.1") == 0
+  doAssert outsideRange("1.0.0-rc.2", %*{"kind": "verEqLater", "ver": "1.0.0-rc.10"}).len > 0
 
   # Range evaluation on nimble dump's structure.
   let ranges = parseJson("""{

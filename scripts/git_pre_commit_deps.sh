@@ -4,7 +4,8 @@
 # snapshot of the index, so the check sees exactly what is being committed.
 # Offline; about a second once the pinned Nimble is built.
 
-files=$(git diff --cached --name-only --diff-filter=ACMRD \
+# --no-renames: a monitored file renamed away must show as its own deletion.
+files=$(git diff --cached --name-only --no-renames --diff-filter=ACMD \
   | grep -E '^(logos_delivery\.nimble|nimble\.lock|nix/deps\.nix|scripts/audit_deps\.nims)$')
 [ -z "$files" ] && exit 0
 

@@ -426,13 +426,21 @@ else
 endif
 
 # Run the dependency preflight before a commit that touches the dependency
-# files. Installs the hook, or appends to a hook that is already present.
+# files. Installs the hook; appends to the hook that `install-nph` installs;
+# refuses any other hook, which must call the script itself.
 install-deps-hook:
 ifeq ("$(wildcard $(GIT_PRE_COMMIT_HOOK))","")
 	cp ./scripts/git_pre_commit_deps.sh $(GIT_PRE_COMMIT_HOOK)
 else
-	grep -q git_pre_commit_deps.sh $(GIT_PRE_COMMIT_HOOK) || \
-		printf '\n./scripts/git_pre_commit_deps.sh || exit 1\n' >> $(GIT_PRE_COMMIT_HOOK)
+	@if grep -q git_pre_commit_deps.sh $(GIT_PRE_COMMIT_HOOK); then \
+		echo "$(GIT_PRE_COMMIT_HOOK) already runs scripts/git_pre_commit_deps.sh"; \
+	elif cmp -s ./scripts/git_pre_commit_format.sh $(GIT_PRE_COMMIT_HOOK); then \
+		printf '\n./scripts/git_pre_commit_deps.sh || exit 1\n' >> $(GIT_PRE_COMMIT_HOOK); \
+	else \
+		echo "$(GIT_PRE_COMMIT_HOOK) exists and is not the nph hook; add this line to it yourself:"; \
+		echo "  ./scripts/git_pre_commit_deps.sh || exit 1"; \
+		exit 1; \
+	fi
 endif
 	chmod +x $(GIT_PRE_COMMIT_HOOK)
 	@echo "$(GIT_PRE_COMMIT_HOOK) runs scripts/git_pre_commit_deps.sh"
