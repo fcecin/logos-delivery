@@ -146,9 +146,11 @@ proc outsideRange(v: string, ran: JsonNode): string =
 # Requirements from `nimble dump --json`
 #---------------------------------------------------------------------
 
+# The repository path is passed explicitly: no `cd`, no shell operators, so
+# the command runs the same way on POSIX shells and on Windows.
 proc dumpRequires(): JsonNode =
   let (output, code) = gorgeEx(
-    "cd '" & root & "' && nimble dump --json --localdeps --useSystemNim")
+    "nimble dump --json --localdeps --useSystemNim \"" & root & "\"")
   let s = output.find('{')
   let e = output.rfind('}')
   if code != 0 or s < 0 or e < s:
