@@ -89,5 +89,11 @@ jobs:
       - name: make diag-nimble (git bash, as the composite action runs it)
         shell: bash
         run: make diag-nimble
+      - name: make diag-nimble (msys2 shell, as the later build steps run it)
+        if: always()
+        run: |
+          export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+          make diag-nimble
       - name: PATH lookup of a program a prerequisite creates (msys2 shell)
+        if: always()
         run: bash scripts/diag_make_path.sh
