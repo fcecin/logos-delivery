@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the pinned Nimble from source into <dir>/nimble, by default
 # ~/.local/nimble-<pin>/bin. <pin> is a git revision (40 hex digits) or a
-# release version such as 0.25.0, built from tag v<version>. The directory is
+# release version, built from tag v<version>. The directory is
 # outside ~/.nimble/bin, which `nimble setup` can rewrite. An executable that
 # reports the pin is reused.
 #

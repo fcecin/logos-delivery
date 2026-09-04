@@ -63,6 +63,17 @@ jobs:
           nim-version: ${{ env.NIM_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Same key as .github/actions/nimble-deps, so this restores the package
+      # cache the ci workflow saved: `nimble setup` then downloads nothing that
+      # the cache already holds.
+      - name: Cache the Nimble package cache
+        uses: actions/cache@v3
+        with:
+          path: ~/.nimble/pkgcache
+          key: ${{ runner.os }}-nimble-pkgcache-v1-${{ hashFiles('nimble.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-nimble-pkgcache-v1-
+
       - name: prep variables
         id: vars
         run: |

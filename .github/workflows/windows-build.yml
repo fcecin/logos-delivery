@@ -91,11 +91,13 @@ jobs:
         nim-version: ${{ env.NIM_VERSION }}
         repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+    # The caches were dropped here in April with a CRLF checksum workaround,
+    # and stayed off after the June fix (autocrlf=false in both gits,
+    # --useSystemNim) removed the cause. They are on again.
     - name: Install nimble deps
       uses: ./.github/actions/nimble-deps
       with:
         nim-version: ${{ env.NIM_VERSION }}
-        cache: 'false'
         make-args: CC=gcc
 
     - name: Creating tmp directory

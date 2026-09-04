@@ -1,8 +1,8 @@
 name: 'Install nimble deps'
 description: >
-  Restores the nimbledeps cache unless disabled and runs `make build-deps`,
-  which installs the pinned Nimble, installs the dependencies recorded in
-  nimble.lock with it, and audits the result.
+  Restores the nimbledeps cache and the Nimble package cache unless disabled,
+  and runs `make build-deps`, which installs the pinned Nimble, installs the
+  dependencies recorded in nimble.lock with it, and audits the result.
 
 inputs:
   nim-version:
@@ -27,6 +27,22 @@ runs:
           nimbledeps/
           nimble.paths
         key: ${{ runner.os }}-${{ runner.arch }}-nimbledeps-v6-nim${{ inputs.nim-version }}-${{ hashFiles('nimble.lock', 'logos_delivery.nimble', 'BearSSL.mk', 'Nat.mk') }}
+
+    # `nimble setup` clones every URL requirement into ~/.nimble/pkgcache to
+    # read its manifest, even when the package is already installed: 13 git
+    # downloads per job on a nimbledeps cache hit, 47 on a miss. With the
+    # package cache restored, setup downloads nothing on a hit and only the
+    # packages a lock change added on a miss (restore-keys). Nimble never
+    # prunes the cache, so it grows a little with each lock change; bump v1
+    # to start it afresh.
+    - name: Cache the Nimble package cache
+      if: ${{ inputs.cache != 'false' }}
+      uses: actions/cache@v3
+      with:
+        path: ~/.nimble/pkgcache
+        key: ${{ runner.os }}-nimble-pkgcache-v1-${{ hashFiles('nimble.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-nimble-pkgcache-v1-
 
     - name: Install nimble deps
       shell: bash
