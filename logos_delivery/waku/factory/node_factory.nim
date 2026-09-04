@@ -185,8 +185,10 @@ proc setupProtocols(
     if conf.mixConf.isSome():
       let mixService =
         ServiceInfo(id: MixProtocolID, data: Opt.some(@(conf.mixConf.get().mixPubKey)))
-      kadConf.servicesToAdvertise.incl(mixService)
       kadConf.servicesToDiscover.incl(mixService.id)
+      if conf.servesMix():
+        # A sender-only node (mix without relay) finds mix nodes and is not one.
+        kadConf.servicesToAdvertise.incl(mixService)
 
     node.mountKademlia(kadConf).isOkOr:
       return err("failed to setup service discovery: " & error)

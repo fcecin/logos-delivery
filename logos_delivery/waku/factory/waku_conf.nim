@@ -161,6 +161,14 @@ type WakuConf* {.requiresInit.} = ref object
 
   localStoragePath*: string
 
+func servesMix*(conf: WakuConf): bool =
+  ## The node is an intermediary and exit node of the mix network when it
+  ## mounts mix and relay. WAKU-MIX gives a relay node these roles by default
+  ## and lets an Edge node act as a sender only. A sender-only node mounts the
+  ## protocol, because the reply of the exit node arrives over it, and
+  ## advertises no mix key, so no path goes through it.
+  conf.mixConf.isSome() and conf.relay
+
 proc logConf*(conf: WakuConf) =
   info "Configuration: Enabled protocols",
     relay = conf.relay,

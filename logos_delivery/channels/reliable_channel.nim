@@ -13,7 +13,7 @@
 ##
 ## See: https://lip.logos.co/messaging/raw/reliable-channel-api.html
 
-import std/tables
+import std/[sequtils, tables]
 import results, chronos
 import bearssl/rand
 import stew/byteutils
@@ -60,6 +60,10 @@ type
       ## yet produced a final event. Removed on `MessageSentEvent` / `MessageErrorEvent`.
     confirmedCount: int
     failedCount: int
+    lastError: string
+      ## The reason of the last segment that failed before it left this
+      ## layer (encryption, or the messaging send refused it). Reported in
+      ## the channel-level error event.
 
   ChannelReqs = Table[RequestId, ChannelReqState]
     ## Key: channelReqId (the parent id returned by channel `send`). Value:
@@ -82,6 +86,12 @@ type
     sentListener: MessageSentEventListener
     errorListener: MessageErrorEventListener
     closed: bool
+    dispatches: seq[Future[void]]
+      ## The dispatch task of each `send` still running. `send` returns the
+      ## channel request id before its segments leave, so the events that
+      ## name the id come after the id. `stop` ends these after the segment
+      ## in progress: the broker requests do not take a cancellation, and
+      ## the `closed` gate stops the loop at the next segment.
 
 func init(
     T: type ChannelReqState,
@@ -109,6 +119,10 @@ proc stop*(self: ReliableChannel) {.async: (raises: []).} =
   ## Drops the event listeners and stops the SDS loops. Persisted SDS state survives.
   ## `closed` gates any in-flight receive handler that survives the listener drop.
   self.closed = true
+  for dispatch in self.dispatches:
+    if not dispatch.finished():
+      await dispatch.cancelAndWait()
+  self.dispatches = @[]
   await MessageReceivedEvent.dropListener(self.brokerCtx, self.receivedListener)
   await MessageSentEvent.dropListener(self.brokerCtx, self.sentListener)
   await MessageErrorEvent.dropListener(self.brokerCtx, self.errorListener)
@@ -133,12 +147,15 @@ proc tryFinalizeChannelReq(self: ReliableChannel, channelReqId: RequestId) =
   self.channelReqs.del(channelReqId)
 
   if state.failedCount > 0:
+    let reason =
+      if state.lastError.len > 0:
+        "one or more segments failed: " & state.lastError
+      else:
+        "one or more segments failed"
     ChannelMessageErrorEvent.emit(
       self.brokerCtx,
       ChannelMessageErrorEvent(
-        channelId: self.channelId,
-        requestId: channelReqId,
-        error: "one or more segments failed",
+        channelId: self.channelId, requestId: channelReqId, error: reason
       ),
     )
   else:
@@ -167,9 +184,13 @@ proc onMessageFinal(
     self.tryFinalizeChannelReq(channelReqId)
     return
 
-proc markSegmentFailed(self: ReliableChannel, channelReqId: RequestId) =
+proc markSegmentFailed(
+    self: ReliableChannel, channelReqId: RequestId, reason: string = ""
+) =
   try:
     self.channelReqs[channelReqId].failedCount.inc()
+    if reason.len > 0:
+      self.channelReqs[channelReqId].lastError = reason
   except KeyError as e:
     error "unreachable: channelReqId not found in markSegmentFailed",
       channelReqId = $channelReqId, error = e.msg
@@ -184,6 +205,48 @@ proc markSegmentInflight(
   except KeyError as e:
     error "unreachable: channelReqId not found in markSegmentInflight",
       channelReqId = $channelReqId, error = e.msg
+
+proc dispatchSegments(
+    self: ReliableChannel,
+    channelReqId: RequestId,
+    sdsSegments: seq[seq[byte]],
+    ephemeral: bool,
+) {.async: (raises: []).} =
+  ## Encrypts and hands each segment to the messaging layer. Runs after
+  ## `send` has returned the channel request id. A segment that fails here
+  ## counts as failed with its reason; the channel-level error event carries
+  ## the reason, so no messaging-layer event names a channel id.
+  try:
+    await sleepAsync(ZeroDuration)
+  except CancelledError:
+    return
+  for sdsBytes in sdsSegments:
+    if self.closed:
+      return
+    ## TODO: revisit which fields of the SDS message must be encrypted.
+    ## Encrypting the whole encoded blob forces every receiver to attempt
+    ## decryption before it can route, which breaks selective dispatch.
+    ## Leave routing metadata (channelId, causal-history references) in
+    ## clear and encrypt only the application payload.
+    let encrypted = (await Encrypt.request(sdsBytes)).valueOr:
+      self.markSegmentFailed(channelReqId, "encryption failed: " & error)
+      continue
+
+    ## The `meta` field carries the Reliable Channel wire-format spec
+    ## marker so the ingress side of any peer can route this WakuMessage
+    ## to its Reliable Channel layer.
+    let envelope = MessageEnvelope(
+      contentTopic: self.contentTopic,
+      payload: seq[byte](encrypted),
+      ephemeral: ephemeral,
+      meta: LipWireReliableChannelVersion.toBytes(),
+    )
+
+    let messagingReqId = (await MessagingSend.request(self.brokerCtx, envelope)).valueOr:
+      self.markSegmentFailed(channelReqId, "messaging send failed: " & error)
+      continue
+
+    self.markSegmentInflight(channelReqId, messagingReqId)
 
 proc send*(
     self: ReliableChannel, payload: seq[byte], ephemeral: bool = false
@@ -213,46 +276,11 @@ proc send*(
   self.channelReqs[channelReqId] =
     ChannelReqState.init(persistenceReqType, sdsSegments.len)
 
-  for sdsBytes in sdsSegments:
-    ## TODO: revisit which fields of the SDS message must be encrypted.
-    ## Encrypting the whole encoded blob forces every receiver to attempt
-    ## decryption before it can route, which breaks selective dispatch.
-    ## Leave routing metadata (channelId, causal-history references) in
-    ## clear and encrypt only the application payload.
-    let encrypted = (await Encrypt.request(sdsBytes)).valueOr:
-      MessageErrorEvent.emit(
-        self.brokerCtx,
-        MessageErrorEvent(
-          requestId: channelReqId, messageHash: "", error: "encryption failed: " & error
-        ),
-      )
-      self.markSegmentFailed(channelReqId)
-      continue
-
-    ## The `meta` field carries the Reliable Channel wire-format spec
-    ## marker so the ingress side of any peer can route this WakuMessage
-    ## to its Reliable Channel layer.
-    let envelope = MessageEnvelope(
-      contentTopic: self.contentTopic,
-      payload: seq[byte](encrypted),
-      ephemeral: ephemeral,
-      meta: LipWireReliableChannelVersion.toBytes(),
-    )
-
-    let messagingReqId = (await MessagingSend.request(self.brokerCtx, envelope)).valueOr:
-      MessageErrorEvent.emit(
-        self.brokerCtx,
-        MessageErrorEvent(
-          requestId: channelReqId,
-          messageHash: "",
-          error: "messaging send failed: " & error,
-        ),
-      )
-      self.markSegmentFailed(channelReqId)
-      continue
-
-    self.markSegmentInflight(channelReqId, messagingReqId)
-
+  ## The segments leave in a task of their own, after this call has
+  ## returned the id: a segment that fails at once must not produce the
+  ## events that name the id before the application has the id.
+  self.dispatches.keepItIf(not it.finished())
+  self.dispatches.add(self.dispatchSegments(channelReqId, sdsSegments, ephemeral))
   return ok(channelReqId)
 
 proc reportReceived(self: ReliableChannel, deliverable: SdsDeliverable) =

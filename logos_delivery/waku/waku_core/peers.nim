@@ -124,8 +124,10 @@ proc init*(
 ## Parse
 
 proc validWireAddr(ma: MultiAddress): bool =
-  ## Check if wire Address is supported
-  const ValidTransports = mapOr(TCP, WebSockets)
+  ## Check if wire Address is supported: TCP, WebSocket, or QUIC-v1 (the
+  ## node dials QUIC-v1 when its QUIC transport is enabled; the mix pool
+  ## routes QUIC-v1 addresses).
+  const ValidTransports = mapOr(TCP, WebSockets, QUIC_V1)
   return ValidTransports.match(ma)
 
 proc parsePeerInfo*(peer: RemotePeerInfo): Result[RemotePeerInfo, string] =
@@ -181,7 +183,8 @@ proc parsePeerInfoFromRegularAddr(peer: MultiAddress): Result[RemotePeerInfo, st
         proc(err: string): string =
           "Error getting p2pPart [" & err & "]"
       )
-    of "ip4", "ip6", "dns", "dnsaddr", "dns4", "dns6", "tcp", "ws", "wss":
+    of "ip4", "ip6", "dns", "dnsaddr", "dns4", "dns6", "tcp", "ws", "wss", "udp",
+        "quic-v1":
       let val = ?addrPart.mapErr(
         proc(err: string): string =
           "Error getting addrPart [" & err & "]"
