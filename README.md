@@ -19,9 +19,9 @@ These instructions are generic. For more detailed instructions, see the source c
 
 Recommended and tested toolchain versions (these are installed when you follow the build instructions below):
 - Nim 2.2.6
-- Nimble: `make nimble` installs the pinned revision. Do not install it by version: the release with the same number is a different build, and only the `git hash:` line of `nimble --version` tells them apart.
+- Nimble: `make nimble` installs the pin that `RequiredNimblePin` in `logos_delivery.nimble` names, a git revision or a release version. The pinned build reports a release number too, so compare the `git hash:` line of `nimble --version` with the pin, not the version line.
 
-`make` puts the pinned Nimble first on its own PATH, so building needs no setup. To use that same Nimble directly in a shell:
+`make` runs the pinned Nimble by path, so building needs no setup. To use that same Nimble directly in a shell:
 
 ```bash
 export PATH="$(make print-nimble-path):$PATH"
