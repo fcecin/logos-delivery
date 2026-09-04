@@ -713,3 +713,14 @@ release-notes:
 		docker.io/wakuorg/sv4git:latest \
 			release-notes |\
 			sed -E 's@#([0-9]+)@[#\1](https://github.com/logos-messaging/logos-delivery/issues/\1)@g'
+
+.PHONY: diag-nimble
+diag-nimble: | install-nimble
+	@echo "MAKE_VERSION=$(MAKE_VERSION) MAKEFLAGS=$(MAKEFLAGS) HOME=$(HOME)"
+	@echo "NIMBLE_TOOLDIR=$(NIMBLE_TOOLDIR)"
+	@ls -la "$(NIMBLE_TOOLDIR)"
+	@echo "recipe PATH=$$PATH"
+	@echo "shell command -v nimble: $$(command -v nimble)"
+	nimble --version
+	sh -c 'nimble --version'
+	$(NIMBLE_TOOLDIR)/nimble --version

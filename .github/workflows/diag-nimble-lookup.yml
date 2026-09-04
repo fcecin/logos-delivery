@@ -1,0 +1,93 @@
+name: diag nimble lookup
+
+on:
+  push:
+    branches:
+      - 'diag/**'
+
+env:
+  NPROC: 2
+  MAKEFLAGS: "-j${NPROC}"
+  NIM_VERSION: '2.2.6'
+
+jobs:
+  make-path:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: PATH lookup of a program a prerequisite creates
+        run: bash scripts/diag_make_path.sh
+
+  real-nimble-macos:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Nim ${{ env.NIM_VERSION }}
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ env.NIM_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Nimble on the step PATH
+        run: |
+          make --version | head -1
+          echo "HOME=$HOME"
+          echo "PATH=$PATH"
+          command -v nimble && nimble --version
+      - name: make diag-nimble
+        run: make diag-nimble
+
+  real-nimble-windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: msys2 {0}
+    env:
+      MSYSTEM: MINGW64
+      NPROC: 4
+    steps:
+      - name: Configure Git to keep LF line endings
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - uses: actions/checkout@v4
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          install: >-
+            git
+            base-devel
+            mingw-w64-x86_64-toolchain
+            make
+            mingw-w64-x86_64-gcc
+      - name: Add MSYS2 to PATH
+        run: |
+          echo "/usr/bin:$PATH" >> $GITHUB_PATH
+          echo "/mingw64/bin:$PATH" >> $GITHUB_PATH
+          echo "/usr/lib:$PATH" >> $GITHUB_PATH
+          echo "/mingw64/lib:$PATH" >> $GITHUB_PATH
+      - name: Install Nim ${{ env.NIM_VERSION }}
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ env.NIM_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Nimble on the step PATH (git bash)
+        shell: bash
+        run: |
+          make --version | head -1
+          echo "HOME=$HOME"
+          echo "PATH=$PATH"
+          command -v nimble && nimble --version
+      - name: make diag-nimble (git bash, as the composite action runs it)
+        shell: bash
+        run: make diag-nimble
+      - name: PATH lookup of a program a prerequisite creates (msys2 shell)
+        run: bash scripts/diag_make_path.sh
