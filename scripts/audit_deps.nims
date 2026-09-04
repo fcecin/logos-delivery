@@ -1,16 +1,15 @@
-# Audit the installed packages against nimble.lock. Reads files, writes
-# nothing, exits 1 on any problem. Runs after setup and after builds:
+# Check the installed packages against nimble.lock: every lock entry at its
+# vcsRevision, nothing else. `nim` is skipped (--useSystemNim). Reads files,
+# writes nothing, exits 1 on any problem.
 #
 #   nim e scripts/audit_deps.nims
 #
-# Whether logos_delivery.nimble matches nimble.lock is Nimble's decision;
-# `make audit-deps` asks Nimble for it (`nimble deps --offline --refresh`)
-# after this script. Nothing here reproduces Nimble's matching rules.
+# Whether logos_delivery.nimble matches nimble.lock is Nimble's decision, and
+# `make audit-deps` asks Nimble for it after this script. Nothing here
+# reproduces Nimble's matching rules.
 #
-# Installed packages must be the lock entries at their vcsRevision and
-# nothing else; `nim` is skipped (--useSystemNim). After removing a package,
-# delete nimbledeps/ before setup; `nimble setup` does not remove stale
-# directories.
+# `nimble setup` does not remove stale directories: after dropping a package,
+# delete nimbledeps/ before setup.
 
 import std/[json, strutils, algorithm, sets, os]
 
@@ -21,38 +20,22 @@ proc normUrl(url: string): string =
   result.removeSuffix("/")
   result.removeSuffix(".git")
 
-#---------------------------------------------------------------------
-# Installed packages
-#---------------------------------------------------------------------
-
 # nimblemeta.json field, top-level or under metaData.
 proc metaField(meta: JsonNode, field: string): string =
   if meta.hasKey(field):
     return meta[field].getStr()
   return meta{"metaData", field}.getStr()
 
-# Package name from a pkgs2 directory name (name-version-checksum).
-# Assumes no hyphen in the version.
-proc nameFromDir(dir: string): string =
-  result = dir
-  for _ in 1 .. 2:
-    let cut = result.rfind('-')
-    if cut < 0:
-      return dir
-    result = result[0 ..< cut]
-
 type Installed = tuple[dir, url, rev: string]
 
-# The installed directory for a lock entry: same URL and revision first, then
-# same URL, then same package name. Several directories can share a URL when
-# a stale version was not removed; the unmatched ones are reported below.
-proc findInstalled(inst: seq[Installed], name, url, rev: string): int =
+# The installed directory for a lock entry: the one at the locked revision,
+# else any at the same URL. Directories can share a URL when a stale version
+# was not removed; the unmatched ones are reported below.
+proc findInstalled(inst: seq[Installed], url, rev: string): int =
   for i, p in inst:
     if p.url == url and p.rev == rev: return i
   for i, p in inst:
     if p.url == url: return i
-  for i, p in inst:
-    if nameFromDir(p.dir) == name: return i
   -1
 
 proc installedMismatches(lock: JsonNode, pkgs2: string, ok: var int, total: var int): seq[string] =
@@ -79,7 +62,7 @@ proc installedMismatches(lock: JsonNode, pkgs2: string, ok: var int, total: var 
     total += 1
     let entry = lock[name]
     let want = entry["vcsRevision"].getStr()
-    let i = findInstalled(inst, name, normUrl(entry["url"].getStr()), want)
+    let i = findInstalled(inst, normUrl(entry["url"].getStr()), want)
     if i < 0:
       result.add(name & ": in nimble.lock but not installed")
       continue
@@ -101,8 +84,6 @@ proc installedMismatches(lock: JsonNode, pkgs2: string, ok: var int, total: var 
   for d in metaless:
     result.add(d & ": installed without nimblemeta.json")
 
-#---------------------------------------------------------------------
-
 proc main() =
   let lock = parseJson(readFile(root & "/nimble.lock"))["packages"]
   let pkgs2 = root & "/nimbledeps/pkgs2"
@@ -122,16 +103,10 @@ proc main() =
     quit(1)
   echo "audit: " & $ok & "/" & $total & " installed packages match nimble.lock"
 
-#---------------------------------------------------------------------
 # Self-tests, run before main().
-#---------------------------------------------------------------------
 proc selfTest() =
   doAssert normUrl("https://github.com/NagyZoltanPeter/nim-brokers.git") ==
     "https://github.com/nagyzoltanpeter/nim-brokers"
-  doAssert nameFromDir("nim-2.2.10-17ec440fdb89") == "nim"
-  doAssert nameFromDir("secp256k1-0.6.0.3.2-abfc2c1a") == "secp256k1"
-  doAssert nameFromDir("bearssl_pkey_decoder-0.1.0-8666edbc") == "bearssl_pkey_decoder"
-  doAssert nameFromDir("nodash") == "nodash"
   doAssert metaField(parseJson(
     """{"vcsRevision": "d34aa46bf9d0a3ffff810fbd3c4d2fa024eb9368"}"""),
     "vcsRevision") == "d34aa46bf9d0a3ffff810fbd3c4d2fa024eb9368"
@@ -143,10 +118,10 @@ proc selfTest() =
   # Two installed directories for one URL: the one at the locked revision matches.
   let two: seq[Installed] = @[("chronos-4.2.4-aaaa", "https://github.com/status-im/nim-chronos", "90f5"),
                               ("chronos-4.2.5-bbbb", "https://github.com/status-im/nim-chronos", "0ab8")]
-  doAssert two[findInstalled(two, "chronos", "https://github.com/status-im/nim-chronos", "0ab8")].dir == "chronos-4.2.5-bbbb"
-  doAssert two[findInstalled(two, "chronos", "https://github.com/status-im/nim-chronos", "90f5")].dir == "chronos-4.2.4-aaaa"
-  doAssert two[findInstalled(two, "chronos", "https://github.com/status-im/nim-chronos", "ffff")].url.len > 0
-  doAssert findInstalled(two, "stew", "https://github.com/status-im/nim-stew", "x") == -1
+  doAssert two[findInstalled(two, "https://github.com/status-im/nim-chronos", "0ab8")].dir == "chronos-4.2.5-bbbb"
+  doAssert two[findInstalled(two, "https://github.com/status-im/nim-chronos", "90f5")].dir == "chronos-4.2.4-aaaa"
+  doAssert two[findInstalled(two, "https://github.com/status-im/nim-chronos", "ffff")].url.len > 0
+  doAssert findInstalled(two, "https://github.com/status-im/nim-stew", "x") == -1
 
 selfTest()
 main()

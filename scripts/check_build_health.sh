@@ -9,7 +9,6 @@
 #
 #   the Nim flags a make variable produces
 #   the commands make would run for a target
-#   Nimble's own verdict on the lock
 #   the command a Nimble task emits
 #
 # A failed case prints the expected and the actual value.
@@ -51,18 +50,6 @@ no() {
     printf '          %s\n' "${line}"
   done
   fail=$((fail + 1))
-}
-
-# name, command... The command must exit 0.
-expect_ok() {
-  local name=$1
-  shift
-  local got
-  if got=$("$@" 2>&1); then
-    ok "${name}"
-  else
-    no "${name}" "${got}"
-  fi
 }
 
 # Return the commands make would run for a target. -B ignores timestamps.

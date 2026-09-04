@@ -32,9 +32,9 @@ NIM_BINARY := $(shell which nim 2>/dev/null)
 
 NIMBLE := nimble
 
-# Options go after the command; Nimble treats pre-command options on custom
-# tasks as compiler options. --useSystemNim uses the Nim on PATH and does not
-# install Nim under nimbledeps.
+# Options go after the command: Nimble reads pre-command options on custom
+# tasks as compiler options. --useSystemNim builds with the Nim on PATH and
+# keeps Nim out of nimbledeps.
 NIMBLE_TASK_FLAGS = --useSystemNim
 
 NIMBLEDEPS_STAMP := nimbledeps/.nimble-setup
@@ -132,9 +132,9 @@ endif
 logos_delivery.nims:
 	ln -s logos_delivery.nimble $@
 
-# `nimble setup` installs the packages in nimble.lock from the locked URL and
-# revision. A requirement that does not match its lock entry makes Nimble
-# re-solve the graph online; the audit afterwards rejects that outcome.
+# `nimble setup` installs the nimble.lock packages from the locked URL and
+# revision. A requirement that does not match its lock entry sends Nimble
+# online for a fresh solve; audit-deps rejects that result.
 $(NIMBLEDEPS_STAMP): nimble.lock logos_delivery.nimble | install-nimble logos_delivery.nims
 	$(MAKE) preflight-deps
 
@@ -149,12 +149,11 @@ $(NIMBLEDEPS_STAMP): nimble.lock logos_delivery.nimble | install-nimble logos_de
 preflight-deps: | install-nimble
 	$(NIMBLE) check --localdeps $(NIMBLE_TASK_FLAGS)
 
-# The installed set (every lock entry at its
-# vcsRevision, nothing else) plus Nimble's own verdict that the nimble file
-# matches the lock: `nimble deps` exits 0 offline only on the lock path,
-# and --refresh makes Nimble skip its installed-packages solve, so any
-# mismatch has to go online, which --offline refuses. CI runs this again
-# after builds, because tasks also solve and can install.
+# Two checks: the installed set is the lock entries at their vcsRevision and
+# nothing else, and Nimble accepts the lock for the nimble file. `nimble deps`
+# exits 0 offline only on the lock path; --refresh makes Nimble skip its
+# installed-packages solve, so a mismatch has to go online and --offline
+# refuses it. CI runs this again after builds, because tasks solve too.
 .PHONY: audit-deps
 audit-deps:
 	nim e --hints:off scripts/audit_deps.nims
