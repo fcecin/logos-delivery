@@ -414,44 +414,45 @@ else
 	echo "Skipping nph build on Windows (nph is only used on Unix-like systems)"
 endif
 
-# Git's own location for the hook: honours core.hooksPath and linked worktrees.
-GIT_PRE_COMMIT_HOOK := $(shell git rev-parse --git-path hooks/pre-commit 2>/dev/null || echo .git/hooks/pre-commit)
+# The hook lives where git says (core.hooksPath, linked worktrees). The path
+# may contain spaces, so each recipe resolves it into one quoted variable.
+GIT_HOOK_PATH = hook=$$(git rev-parse --git-path hooks/pre-commit 2>/dev/null || echo .git/hooks/pre-commit)
 
 install-nph: build-nph
-ifeq ("$(wildcard $(GIT_PRE_COMMIT_HOOK))","")
-	mkdir -p $(dir $(GIT_PRE_COMMIT_HOOK))
-	cp ./scripts/git_pre_commit_format.sh $(GIT_PRE_COMMIT_HOOK)
-	chmod +x $(GIT_PRE_COMMIT_HOOK)
-else
-	echo "$(GIT_PRE_COMMIT_HOOK) already present, will NOT override"
-	exit 1
-endif
+	@$(GIT_HOOK_PATH); \
+	if [ -e "$$hook" ]; then \
+		echo "$$hook already present, will NOT override"; exit 1; \
+	fi; \
+	mkdir -p "$$(dirname "$$hook")" && \
+	cp ./scripts/git_pre_commit_format.sh "$$hook" && chmod +x "$$hook" && \
+	echo "$$hook installed"
 
 # Run the dependency preflight before a commit that touches the dependency
 # files. Installs the hook; appends to the hook that `install-nph` installs;
-# refuses any other hook, which must call the script itself. The combined
-# hook is written to a temporary file and moved into place, so a hook that
-# is a link to a tracked script never gets edited through the link.
-DEPS_HOOK_LINE := ./scripts/git_pre_commit_deps.sh || exit 1
+# refuses any other hook, which must call the script itself. The call line
+# skips branches that do not carry the script, because linked worktrees
+# share the hook. The combined hook is assembled in a mktemp file in the
+# hook directory and renamed into place, so nothing is written through a
+# link.
+DEPS_HOOK_LINE := if [ -x ./scripts/git_pre_commit_deps.sh ]; then ./scripts/git_pre_commit_deps.sh || exit 1; fi
 install-deps-hook:
-ifeq ("$(wildcard $(GIT_PRE_COMMIT_HOOK))","")
-	mkdir -p $(dir $(GIT_PRE_COMMIT_HOOK))
-	cp ./scripts/git_pre_commit_deps.sh $(GIT_PRE_COMMIT_HOOK)
-else
-	@if cmp -s ./scripts/git_pre_commit_deps.sh $(GIT_PRE_COMMIT_HOOK) || \
-	    grep -qxF '$(DEPS_HOOK_LINE)' $(GIT_PRE_COMMIT_HOOK); then \
-		echo "$(GIT_PRE_COMMIT_HOOK) already runs scripts/git_pre_commit_deps.sh"; \
-	elif cmp -s ./scripts/git_pre_commit_format.sh $(GIT_PRE_COMMIT_HOOK); then \
-		{ cat ./scripts/git_pre_commit_format.sh; printf '\n%s\n' '$(DEPS_HOOK_LINE)'; } \
-			> $(GIT_PRE_COMMIT_HOOK).tmp && mv -f $(GIT_PRE_COMMIT_HOOK).tmp $(GIT_PRE_COMMIT_HOOK); \
+	@$(GIT_HOOK_PATH); \
+	if [ ! -e "$$hook" ]; then \
+		mkdir -p "$$(dirname "$$hook")" && \
+		cp ./scripts/git_pre_commit_deps.sh "$$hook" && chmod +x "$$hook"; \
+	elif cmp -s ./scripts/git_pre_commit_deps.sh "$$hook" || \
+	     grep -qxF '$(DEPS_HOOK_LINE)' "$$hook"; then \
+		echo "$$hook already runs scripts/git_pre_commit_deps.sh"; chmod +x "$$hook"; \
+	elif cmp -s ./scripts/git_pre_commit_format.sh "$$hook"; then \
+		tmp=$$(mktemp "$$(dirname "$$hook")/pre-commit.XXXXXX") && \
+		trap 'rm -f "$$tmp"' EXIT && \
+		{ cat ./scripts/git_pre_commit_format.sh; printf '\n%s\n' '$(DEPS_HOOK_LINE)'; } > "$$tmp" && \
+		chmod +x "$$tmp" && mv -f "$$tmp" "$$hook"; \
 	else \
-		echo "$(GIT_PRE_COMMIT_HOOK) exists and is not the nph hook; add this line to it yourself:"; \
+		echo "$$hook exists and is not the nph hook; add this line to it yourself:"; \
 		echo "  $(DEPS_HOOK_LINE)"; \
 		exit 1; \
-	fi
-endif
-	chmod +x $(GIT_PRE_COMMIT_HOOK)
-	@echo "$(GIT_PRE_COMMIT_HOOK) runs scripts/git_pre_commit_deps.sh"
+	fi && echo "$$hook runs scripts/git_pre_commit_deps.sh"
 
 nph/%: | build-nph
 	echo -e $(FORMAT_MSG) "nph/$*" && \

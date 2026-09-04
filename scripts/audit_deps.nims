@@ -65,20 +65,25 @@ proc isUrl(name: string): bool =
 
 type PreIdent = tuple[isNum: bool, num: int, str: string]
 
-# Leading digits as an int, saturating at high(int) like Nimble's
-# parseSaturatedNatural.
-proc leadingInt(s: string): int =
+# Leading digits as an int. Release fields use the checked form, like
+# Nimble's parseInt (an overflow is an invalid version); numeric pre-release
+# identifiers use the saturating form, like Nimble's parseSaturatedNatural.
+proc leadingInt(s: string, saturate: bool, ok: var bool): int =
   for c in s:
     if c in Digits:
       let d = ord(c) - ord('0')
       if result > (high(int) - d) div 10:
-        result = high(int)
+        if saturate:
+          result = high(int)
+        else:
+          ok = false
+          return
       else:
         result = result * 10 + d
     else:
       break
 
-proc parseSemVer(v: string): (seq[int], seq[PreIdent]) =
+proc parseSemVer(v: string, ok: var bool): (seq[int], seq[PreIdent]) =
   var core = v
   let plus = core.find('+')
   if plus >= 0:
@@ -88,7 +93,7 @@ proc parseSemVer(v: string): (seq[int], seq[PreIdent]) =
   let preStr = if dash >= 0: core[dash + 1 .. ^1] else: ""
   var release: seq[int]
   for part in releaseStr.split('.'):
-    release.add(leadingInt(part))
+    release.add(leadingInt(part, false, ok))
   var pre: seq[PreIdent]
   if preStr.len > 0:
     for ident in preStr.split('.'):
@@ -98,10 +103,16 @@ proc parseSemVer(v: string): (seq[int], seq[PreIdent]) =
           allDigits = false
           break
       if allDigits:
-        pre.add((true, leadingInt(ident), ""))
+        pre.add((true, leadingInt(ident, true, ok), ""))
       else:
         pre.add((false, 0, ident))
   (release, pre)
+
+# A version whose release field overflows is invalid to Nimble.
+proc validVersion(v: string): bool =
+  var ok = true
+  discard parseSemVer(v, ok)
+  ok
 
 proc cmpIdent(a, b: PreIdent): int =
   if a.isNum and b.isNum: cmp(a.num, b.num)
@@ -110,8 +121,9 @@ proc cmpIdent(a, b: PreIdent): int =
   else: cmp(a.str, b.str)
 
 proc cmpVer(a, b: string): int =
-  let (ar, ap) = parseSemVer(a)
-  let (br, bp) = parseSemVer(b)
+  var ok = true
+  let (ar, ap) = parseSemVer(a, ok)
+  let (br, bp) = parseSemVer(b, ok)
   for i in 0 ..< max(ar.len, br.len):
     let x = if i < ar.len: ar[i] else: 0
     let y = if i < br.len: br[i] else: 0
@@ -129,7 +141,11 @@ proc cmpVer(a, b: string): int =
 # Is plain version `v` within the range node `ran` from `nimble dump --json`?
 # Returns "" when it is, or a reason when it is not or cannot be decided.
 proc outsideRange(v: string, ran: JsonNode): string =
+  if not validVersion(v):
+    return "has a release field out of range"
   let kind = ran["kind"].getStr()
+  if ran.hasKey("ver") and not validVersion(ran["ver"].getStr()):
+    return "is compared with an invalid requirement version " & ran["ver"].getStr()
   case kind
   of "verAny": ""
   of "verEq":
@@ -430,8 +446,10 @@ proc selfTest() =
   doAssert cmpVer("1.0.0-alpha.beta", "1.0.0-beta") < 0
   doAssert cmpVer("1.0.0+build.7", "1.0.0") == 0         # build metadata ignored
   doAssert cmpVer("1.0.0-rc.1+sha.abc", "1.0.0-rc.1") == 0
-  doAssert cmpVer("1.0.0-9999999999999999999999999", "1.0.0-1") > 0   # saturates, no overflow
-  doAssert leadingInt("99999999999999999999999999") == high(int)
+  doAssert cmpVer("1.0.0-9999999999999999999999999", "1.0.0-1") > 0   # pre-release: saturates
+  doAssert validVersion("1.0.0-9999999999999999999999999")
+  doAssert not validVersion("99999999999999999999999999.0")           # release field: invalid
+  doAssert outsideRange("99999999999999999999999999.0", %*{"kind": "verAny"}).contains("out of range")
   doAssert outsideRange("1.0.0-rc.2", %*{"kind": "verEqLater", "ver": "1.0.0-rc.10"}).len > 0
 
   # Range evaluation on nimble dump's structure.
