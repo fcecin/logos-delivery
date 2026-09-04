@@ -134,8 +134,7 @@ logos_delivery.nims:
 
 # `nimble setup` installs the packages in nimble.lock from the locked URL and
 # revision. A requirement that does not match its lock entry makes Nimble
-# re-solve the graph online. The preflight rejects the mismatch first; the
-# audit rejects a drifted install afterwards.
+# re-solve the graph online; the audit afterwards rejects that outcome.
 $(NIMBLEDEPS_STAMP): nimble.lock logos_delivery.nimble nix/deps.nix | install-nimble logos_delivery.nims
 	$(MAKE) preflight-deps
 
@@ -145,19 +144,27 @@ $(NIMBLEDEPS_STAMP): nimble.lock logos_delivery.nimble nix/deps.nix | install-ni
 
 	touch $@
 
-# Check the URL requirements and nix/deps.nix against nimble.lock, then let
-# Nimble lint the nimble file. Needs no installed packages.
+# Check nix/deps.nix against nimble.lock and let Nimble lint the nimble
+# file. Needs no installed packages.
 .PHONY: preflight-deps
 preflight-deps: | install-nimble
-	nim e --hints:off scripts/audit_deps.nims pins
+	nim e --hints:off scripts/audit_deps.nims preflight
 	$(NIMBLE) check --localdeps $(NIMBLE_TASK_FLAGS)
 
-# The preflight checks plus the installed set: every lock entry at its
-# vcsRevision, nothing else. CI runs it again after builds, because tasks
-# also solve and can install.
+# The preflight check plus the installed set (every lock entry at its
+# vcsRevision, nothing else) plus Nimble's own verdict that the nimble file
+# matches the lock: `nimble deps` exits 0 offline only on the lock path,
+# and --refresh makes Nimble skip its installed-packages solve, so any
+# mismatch has to go online, which --offline refuses. CI runs this again
+# after builds, because tasks also solve and can install.
 .PHONY: audit-deps
 audit-deps:
 	nim e --hints:off scripts/audit_deps.nims
+	@$(NIMBLE) deps --offline --refresh --localdeps $(NIMBLE_TASK_FLAGS) > /dev/null || { \
+		echo "audit: Nimble does not accept nimble.lock for logos_delivery.nimble:" \
+		     "a root requirement does not match its lock entry, or a locked package is not installed." \
+		     "Regenerate with 'nimble lock' and tools/gen-nix-deps.sh, or run 'make build-deps'."; exit 1; }
+	@echo "audit: Nimble accepts nimble.lock offline"
 
 # Must be phony so the recipe always runs and the sub-make re-evaluates
 # BEARSSL_NIMBLEDEPS_DIR / NAT_TRAVERSAL_NIMBLEDEPS_DIR (parse-time variables)
@@ -399,7 +406,7 @@ networkmonitor: | build-deps build deps librln
 ############
 ## Format ##
 ############
-.PHONY: build-nph install-nph install-deps-hook print-nph-path
+.PHONY: build-nph install-nph print-nph-path
 
 build-nph: | build deps
 ifneq ($(detected_OS),Windows)
@@ -420,39 +427,12 @@ GIT_HOOK_PATH = hook=$$(git rev-parse --git-path hooks/pre-commit 2>/dev/null ||
 
 install-nph: build-nph
 	@$(GIT_HOOK_PATH); \
-	if [ -e "$$hook" ]; then \
+	if [ -e "$$hook" ] || [ -L "$$hook" ]; then \
 		echo "$$hook already present, will NOT override"; exit 1; \
 	fi; \
 	mkdir -p "$$(dirname "$$hook")" && \
 	cp ./scripts/git_pre_commit_format.sh "$$hook" && chmod +x "$$hook" && \
 	echo "$$hook installed"
-
-# Run the dependency preflight before a commit that touches the dependency
-# files. Installs the hook; appends to the hook that `install-nph` installs;
-# refuses any other hook, which must call the script itself. The call line
-# skips branches that do not carry the script, because linked worktrees
-# share the hook. The combined hook is assembled in a mktemp file in the
-# hook directory and renamed into place, so nothing is written through a
-# link.
-DEPS_HOOK_LINE := if [ -x ./scripts/git_pre_commit_deps.sh ]; then ./scripts/git_pre_commit_deps.sh || exit 1; fi
-install-deps-hook:
-	@$(GIT_HOOK_PATH); \
-	if [ ! -e "$$hook" ]; then \
-		mkdir -p "$$(dirname "$$hook")" && \
-		cp ./scripts/git_pre_commit_deps.sh "$$hook" && chmod +x "$$hook"; \
-	elif cmp -s ./scripts/git_pre_commit_deps.sh "$$hook" || \
-	     grep -qxF '$(DEPS_HOOK_LINE)' "$$hook"; then \
-		echo "$$hook already runs scripts/git_pre_commit_deps.sh"; chmod +x "$$hook"; \
-	elif cmp -s ./scripts/git_pre_commit_format.sh "$$hook"; then \
-		tmp=$$(mktemp "$$(dirname "$$hook")/pre-commit.XXXXXX") && \
-		trap 'rm -f "$$tmp"' EXIT && \
-		{ cat ./scripts/git_pre_commit_format.sh; printf '\n%s\n' '$(DEPS_HOOK_LINE)'; } > "$$tmp" && \
-		chmod +x "$$tmp" && mv -f "$$tmp" "$$hook"; \
-	else \
-		echo "$$hook exists and is not the nph hook; add this line to it yourself:"; \
-		echo "  $(DEPS_HOOK_LINE)"; \
-		exit 1; \
-	fi && echo "$$hook runs scripts/git_pre_commit_deps.sh"
 
 nph/%: | build-nph
 	echo -e $(FORMAT_MSG) "nph/$*" && \

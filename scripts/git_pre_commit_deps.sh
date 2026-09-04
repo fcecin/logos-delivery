@@ -1,22 +1,19 @@
 #!/bin/sh
-# Pre-commit hook. When the commit touches a dependency file, run the same
-# preflight CI runs before `nimble setup` (`make preflight-deps`) on a
-# snapshot of the index, so the check sees exactly what is being committed.
-# Offline; about a second once the pinned Nimble is built.
+# Pre-commit hook, a convenience only; CI is the enforcement. When the commit
+# touches a dependency file and the dependencies are installed, run
+# `make audit-deps` on the working tree: Nimble's own offline verdict on the
+# lock, nix/deps.nix against the lock, installed packages against the lock.
+# Install by copying this file to "$(git rev-parse --git-path hooks/pre-commit)".
 
-# --no-renames: a monitored file renamed away must show as its own deletion.
-# T: a type change (file to symlink) counts too.
 files=$(git diff --cached --name-only --no-renames --diff-filter=ACMDT \
   | grep -E '^(logos_delivery\.nimble|nimble\.lock|nix/deps\.nix|scripts/audit_deps\.nims)$')
 [ -z "$files" ] && exit 0
-
-echo "Dependency files staged; running make preflight-deps on the index"
-snap=$(mktemp -d) || exit 1
-trap 'rm -rf "$snap"' EXIT
-git checkout-index --prefix="$snap/" -a || exit 1
-# Linked worktrees share the hook; a branch without the target is not checked.
-grep -q '^preflight-deps:' "$snap/Makefile" 2>/dev/null || exit 0
-if ! (cd "$snap" && make -s preflight-deps); then
-  1>&2 echo "preflight failed; commit refused. Regenerate nimble.lock with 'nimble lock' and nix/deps.nix with tools/gen-nix-deps.sh, or fix the requirement."
-  exit 1
+if [ ! -d nimbledeps/pkgs2 ]; then
+  echo "dependency files staged, but nimbledeps is not built; skipping the audit (run make build-deps)"
+  exit 0
 fi
+echo "Dependency files staged; running make audit-deps"
+make -s audit-deps || {
+  1>&2 echo "audit failed; commit refused. Regenerate nimble.lock with 'nimble lock' and nix/deps.nix with tools/gen-nix-deps.sh, or fix the requirement."
+  exit 1
+}

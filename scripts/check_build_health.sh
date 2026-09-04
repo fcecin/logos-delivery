@@ -9,7 +9,7 @@
 #
 #   the Nim flags a make variable produces
 #   the commands make would run for a target
-#   the URL requirements and nix/deps.nix against nimble.lock
+#   nix/deps.nix against nimble.lock, and Nimble's own verdict on the lock
 #   the command a Nimble task emits
 #
 # A failed case prints the expected and the actual value.
@@ -304,19 +304,21 @@ expect_recipe "setup uses the system Nim" \
   '--useSystemNim' nimbledeps/.nimble-setup
 expect_recipe "custom tasks use the system Nim" \
   '--useSystemNim' wakunode2
-expect_recipe "setup preflights the pins and nix before solving" \
-  "audit_deps.nims pins" nimbledeps/.nimble-setup
+expect_recipe "setup preflights nix against the lock before solving" \
+  "audit_deps.nims preflight" nimbledeps/.nimble-setup
 expect_recipe "setup audits the result" \
   "audit-deps" nimbledeps/.nimble-setup
 expect_recipe "the preflight runs nimble check" \
   "nimble check" preflight-deps
 
 # --------------------------------------------------------------------------
-# The preflight: URL requirements and nix/deps.nix agree with nimble.lock.
-# Rules in scripts/audit_deps.nims.
+# The preflight: nix/deps.nix agrees with nimble.lock. The audit asks Nimble
+# itself, offline, whether the nimble file matches the lock.
 # --------------------------------------------------------------------------
-expect_ok "the URL requirements and nix/deps.nix agree with nimble.lock" \
-  nim e --hints:off scripts/audit_deps.nims pins
+expect_ok "nix/deps.nix agrees with nimble.lock" \
+  nim e --hints:off scripts/audit_deps.nims preflight
+expect_recipe "the audit asks Nimble for the lock verdict offline" \
+  "nimble deps --offline --refresh" audit-deps
 
 # --------------------------------------------------------------------------
 # The Nimble tasks concatenate their own defaults with NIM_PARAMS. The

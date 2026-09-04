@@ -1,44 +1,20 @@
-# Audit nimble.lock against the requirements in logos_delivery.nimble,
-# nix/deps.nix, and the packages installed under nimbledeps/pkgs2. Reads
-# files, runs `nimble dump --json` (offline), writes nothing, exits 1 on any
-# mismatch.
+# Audit the generated dependency artifacts against nimble.lock. Reads files,
+# writes nothing, exits 1 on any problem.
 #
-#   nim e scripts/audit_deps.nims pins   # requirements and nix only;
-#                                        # no nimbledeps needed; runs before
-#                                        # `nimble setup`
-#   nim e scripts/audit_deps.nims        # the preflight plus the installed
-#                                        # packages; runs after setup and
-#                                        # after builds
+#   nim e scripts/audit_deps.nims preflight   # nix/deps.nix against the lock;
+#                                             # no installed packages needed
+#   nim e scripts/audit_deps.nims             # the above plus the installed
+#                                             # packages; runs after setup
+#                                             # and after builds
 #
-# Nimble installs from nimble.lock only when every root requirement matches
-# a lock entry; otherwise it re-solves the graph online. The requirements
-# come from `nimble dump --json`, the same parse Nimble uses. Match rules:
-#
-#   requirement          lock version   accepted when
-#   ------------------   ------------   -----------------------------------
-#   url                  any            always (Nimble: verAny matches)
-#   url#frag             #special       frag == special
-#   url#frag             plain          frag == vcsRevision (stricter than
-#                                       Nimble, which installs the locked
-#                                       revision under any pin)
-#   url == x             plain          x == version
-#   url == x             #special       never
-#   url <range>          any            never; use "== x", "#tag", "#commit"
-#   name                 any            always
-#   name <range>         plain          version within range (==, >=, >,
-#                                       <=, <, &, ~=, ^=)
-#   name <range>         #special       never; pin the URL instead
-#
-# A URL is matched to a lock entry by exact case-insensitive string, as
-# Nimble does; a URL that matches only after normalisation (case, trailing
-# "/", ".git") is reported with the nearest entry. A name is matched by
-# case-insensitive package name; registry aliases are not resolved here.
+# Whether logos_delivery.nimble matches nimble.lock is Nimble's decision;
+# `make audit-deps` asks Nimble for it (`nimble deps --offline --refresh`)
+# after this script. Nothing here reproduces Nimble's matching rules.
 #
 # nix/deps.nix must list every git lock entry at the locked revision and
-# nothing else (URLs compared normalised). Installed packages must be the
-# lock entries at their vcsRevision and nothing else; `nim` is skipped
-# (--useSystemNim). To re-pin a package at the same revision, set the lock
-# entry's "version" to the same string with `nimble lock`. After removing a
+# nothing else (URLs compared normalised, as tools/gen-nix-deps.sh writes
+# them). Installed packages must be the lock entries at their vcsRevision
+# and nothing else; `nim` is skipped (--useSystemNim). After removing a
 # package, delete nimbledeps/ before setup; `nimble setup` does not remove
 # stale directories.
 
@@ -50,216 +26,6 @@ proc normUrl(url: string): string =
   result = url.toLowerAscii()
   result.removeSuffix("/")
   result.removeSuffix(".git")
-
-proc isUrl(name: string): bool =
-  name.startsWith("http://") or name.startsWith("https://")
-
-#---------------------------------------------------------------------
-# Version comparison, a port of Nimble's parseSemVer and cmpSemVer:
-# release fields compare numerically with missing fields as zero; build
-# metadata after '+' is ignored; a release outranks its pre-releases;
-# pre-release identifiers split on '.', numeric ones compare numerically
-# and rank below alphanumeric ones, which compare lexically; when one
-# identifier list is a prefix of the other, the longer wins.
-#---------------------------------------------------------------------
-
-type PreIdent = tuple[isNum: bool, num: int, str: string]
-
-# Leading digits as an int. Release fields use the checked form, like
-# Nimble's parseInt (an overflow is an invalid version); numeric pre-release
-# identifiers use the saturating form, like Nimble's parseSaturatedNatural.
-proc leadingInt(s: string, saturate: bool, ok: var bool): int =
-  for c in s:
-    if c in Digits:
-      let d = ord(c) - ord('0')
-      if result > (high(int) - d) div 10:
-        if saturate:
-          result = high(int)
-        else:
-          ok = false
-          return
-      else:
-        result = result * 10 + d
-    else:
-      break
-
-proc parseSemVer(v: string, ok: var bool): (seq[int], seq[PreIdent]) =
-  var core = v
-  let plus = core.find('+')
-  if plus >= 0:
-    core = core[0 ..< plus]
-  let dash = core.find('-')
-  let releaseStr = if dash >= 0: core[0 ..< dash] else: core
-  let preStr = if dash >= 0: core[dash + 1 .. ^1] else: ""
-  var release: seq[int]
-  for part in releaseStr.split('.'):
-    release.add(leadingInt(part, false, ok))
-  var pre: seq[PreIdent]
-  if preStr.len > 0:
-    for ident in preStr.split('.'):
-      var allDigits = ident.len > 0
-      for c in ident:
-        if c notin Digits:
-          allDigits = false
-          break
-      if allDigits:
-        pre.add((true, leadingInt(ident, true, ok), ""))
-      else:
-        pre.add((false, 0, ident))
-  (release, pre)
-
-# A version whose release field overflows is invalid to Nimble.
-proc validVersion(v: string): bool =
-  var ok = true
-  discard parseSemVer(v, ok)
-  ok
-
-proc cmpIdent(a, b: PreIdent): int =
-  if a.isNum and b.isNum: cmp(a.num, b.num)
-  elif a.isNum: -1
-  elif b.isNum: 1
-  else: cmp(a.str, b.str)
-
-proc cmpVer(a, b: string): int =
-  var ok = true
-  let (ar, ap) = parseSemVer(a, ok)
-  let (br, bp) = parseSemVer(b, ok)
-  for i in 0 ..< max(ar.len, br.len):
-    let x = if i < ar.len: ar[i] else: 0
-    let y = if i < br.len: br[i] else: 0
-    if x != y:
-      return cmp(x, y)
-  if ap.len == 0 and bp.len == 0: return 0
-  if ap.len == 0: return 1
-  if bp.len == 0: return -1
-  for i in 0 ..< min(ap.len, bp.len):
-    let c = cmpIdent(ap[i], bp[i])
-    if c != 0:
-      return c
-  cmp(ap.len, bp.len)
-
-# Is plain version `v` within the range node `ran` from `nimble dump --json`?
-# Returns "" when it is, or a reason when it is not or cannot be decided.
-proc outsideRange(v: string, ran: JsonNode): string =
-  if not validVersion(v):
-    return "has a release field out of range"
-  let kind = ran["kind"].getStr()
-  if ran.hasKey("ver") and not validVersion(ran["ver"].getStr()):
-    return "is compared with an invalid requirement version " & ran["ver"].getStr()
-  case kind
-  of "verAny": ""
-  of "verEq":
-    if cmpVer(v, ran["ver"].getStr()) == 0: "" else: "is not " & ran["ver"].getStr()
-  of "verEqLater":
-    if cmpVer(v, ran["ver"].getStr()) >= 0: "" else: "is below " & ran["ver"].getStr()
-  of "verLater":
-    if cmpVer(v, ran["ver"].getStr()) > 0: "" else: "is not above " & ran["ver"].getStr()
-  of "verEqEarlier":
-    if cmpVer(v, ran["ver"].getStr()) <= 0: "" else: "is above " & ran["ver"].getStr()
-  of "verEarlier":
-    if cmpVer(v, ran["ver"].getStr()) < 0: "" else: "is not below " & ran["ver"].getStr()
-  of "verIntersect", "verTilde", "verCaret":
-    let l = outsideRange(v, ran["verILeft"])
-    if l.len > 0: l else: outsideRange(v, ran["verIRight"])
-  else:
-    "has an unsupported range kind " & kind
-
-#---------------------------------------------------------------------
-# Requirements from `nimble dump --json`
-#---------------------------------------------------------------------
-
-# The repository path is passed explicitly with platform-aware quoting: no
-# `cd`, no shell operators, so the command runs the same way on POSIX shells
-# and on Windows.
-proc dumpRequires(): JsonNode =
-  let (output, code) = gorgeEx(
-    "nimble dump --json --localdeps --useSystemNim " & quoteShell(root))
-  let s = output.find('{')
-  let e = output.rfind('}')
-  if code != 0 or s < 0 or e < s:
-    echo "audit: `nimble dump --json` failed (is the pinned nimble on PATH? " &
-      "use `make preflight-deps`)"
-    echo output
-    quit(1)
-  parseJson(output[s .. e])["requires"]
-
-# Diagnostics for requirements that miss or contradict their lock entry.
-proc reqMismatches(reqs: JsonNode, lock: JsonNode): seq[string] =
-  for r in reqs:
-    let name = r["name"].getStr()
-    let ran = r["ver"]
-    let kind = ran["kind"].getStr()
-    let str = r["str"].getStr()
-    if name == "nim":
-      continue
-    var lockName = ""
-    var entry: JsonNode = nil
-    if name.isUrl:
-      var near = ""
-      for n, e in lock:
-        if not e.hasKey("url"):
-          continue
-        let u = e["url"].getStr()
-        if cmpIgnoreCase(u, name) == 0:
-          lockName = n
-          entry = e
-          break
-        if normUrl(u) == normUrl(name):
-          near = n & " (" & u & ")"
-      if entry.isNil:
-        if near.len > 0:
-          result.add(name & ": no lock entry with this exact URL (nearest: " & near &
-                     "); Nimble compares URLs as exact case-insensitive strings")
-        else:
-          result.add(name & ": required but not in nimble.lock")
-        continue
-    else:
-      for n, e in lock:
-        if cmpIgnoreCase(n, name) == 0:
-          lockName = n
-          entry = e
-          break
-      if entry.isNil:
-        result.add(name & ": required but not in nimble.lock (registry aliases are " &
-                   "not resolved here; use the lock's package name)")
-        continue
-    let lockVer = entry["version"].getStr()
-    let lockRev = entry["vcsRevision"].getStr()
-    let special = lockVer.startsWith("#")
-    if kind == "verSpecial":
-      let frag = ran["spe"].getStr()[1 .. ^1]
-      if not name.isUrl:
-        result.add(lockName & ": special version \"" & str & "\" on a name requirement; " &
-                   "pin the URL instead")
-      elif special:
-        if frag != lockVer[1 .. ^1]:
-          result.add(lockName & ": pin #" & frag & " but nimble.lock records version " &
-                     lockVer & " (set both to the same tag or commit)")
-      elif frag != lockRev:
-        result.add(lockName & ": pin #" & frag & " but nimble.lock revision is " & lockRev)
-    elif kind == "verAny":
-      discard
-    elif name.isUrl:
-      if kind == "verEq":
-        let want = ran["ver"].getStr()
-        if special:
-          result.add(lockName & ": requirement \"== " & want & "\" cannot match the special " &
-                     "lock version " & lockVer & "; pin \"#" & lockVer[1 .. ^1] & "\" instead")
-        elif cmpVer(want, lockVer) != 0:
-          result.add(lockName & ": requirement \"== " & want & "\" but nimble.lock records " &
-                     "version " & lockVer)
-      else:
-        result.add(lockName & ": ranged URL requirement \"" & str & "\" is not supported " &
-                   "by this audit; use \"== <version>\", \"#<tag>\" or \"#<commit>\"")
-    else:
-      if special:
-        result.add(lockName & ": requirement \"" & str & "\" cannot match the special " &
-                   "lock version " & lockVer & "; pin the URL with that string instead")
-      else:
-        let why = outsideRange(lockVer, ran)
-        if why.len > 0:
-          result.add(lockName & ": requirement \"" & str & "\" but nimble.lock records " &
-                     "version " & lockVer & ", which " & why)
 
 #---------------------------------------------------------------------
 # nix/deps.nix
@@ -387,17 +153,15 @@ proc installedMismatches(lock: JsonNode, pkgs2: string, ok: var int, total: var 
 #---------------------------------------------------------------------
 
 proc main() =
-  let pinsOnly = "pins" in commandLineParams()
+  let preflight = "preflight" in commandLineParams()
   let lock = parseJson(readFile(root & "/nimble.lock"))["packages"]
 
   var bad: seq[string]
-  let reqs = dumpRequires()
-  bad.add reqMismatches(reqs, lock)
   bad.add nixMismatches(lock, nixEntriesFrom(readFile(root & "/nix/deps.nix")))
 
   var ok = 0
   var total = 0
-  if not pinsOnly:
+  if not preflight:
     let pkgs2 = root & "/nimbledeps/pkgs2"
     if not dirExists(pkgs2):
       bad.add("no nimbledeps/pkgs2 directory; run setup first")
@@ -409,11 +173,10 @@ proc main() =
   if bad.len > 0:
     echo "audit: " & $bad.len & " problem(s) found"
     quit(1)
-  if pinsOnly:
-    echo "audit: " & $(reqs.len - 1) & " requirements and nix/deps.nix agree with nimble.lock"
+  if preflight:
+    echo "audit: nix/deps.nix agrees with nimble.lock"
   else:
-    echo "audit: " & $ok & "/" & $total & " installed packages match nimble.lock, " &
-      $(reqs.len - 1) & " requirements checked, nix/deps.nix checked"
+    echo "audit: " & $ok & "/" & $total & " installed packages match nimble.lock, nix/deps.nix agrees"
 
 #---------------------------------------------------------------------
 # Self-tests, run before main().
@@ -432,87 +195,6 @@ proc selfTest() =
     """{"metaData": {"vcsRevision": "d34aa46bf9d0a3ffff810fbd3c4d2fa024eb9368"}}"""),
     "vcsRevision") == "d34aa46bf9d0a3ffff810fbd3c4d2fa024eb9368"
   doAssert metaField(parseJson("""{}"""), "vcsRevision") == ""
-
-  # Version comparison.
-  doAssert cmpVer("4.2.5", "4.2.4") > 0
-  doAssert cmpVer("4.2", "4.2.0") == 0
-  doAssert cmpVer("0.6.0.3.2", "0.6.0.3.2") == 0
-  doAssert cmpVer("4.10.0", "4.9.0") > 0
-  doAssert cmpVer("1.0.0-rc1", "1.0.0") < 0
-  doAssert cmpVer("1.0.0-rc.2", "1.0.0-rc.10") < 0      # numeric identifiers compare numerically
-  doAssert cmpVer("1.0.0-rc.10", "1.0.0-rc.2") > 0
-  doAssert cmpVer("1.0.0-1", "1.0.0-alpha") < 0         # numeric ranks below alphanumeric
-  doAssert cmpVer("1.0.0-alpha", "1.0.0-alpha.1") < 0   # prefix: the longer wins
-  doAssert cmpVer("1.0.0-alpha.beta", "1.0.0-beta") < 0
-  doAssert cmpVer("1.0.0+build.7", "1.0.0") == 0         # build metadata ignored
-  doAssert cmpVer("1.0.0-rc.1+sha.abc", "1.0.0-rc.1") == 0
-  doAssert cmpVer("1.0.0-9999999999999999999999999", "1.0.0-1") > 0   # pre-release: saturates
-  doAssert validVersion("1.0.0-9999999999999999999999999")
-  doAssert not validVersion("99999999999999999999999999.0")           # release field: invalid
-  doAssert outsideRange("99999999999999999999999999.0", %*{"kind": "verAny"}).contains("out of range")
-  doAssert outsideRange("1.0.0-rc.2", %*{"kind": "verEqLater", "ver": "1.0.0-rc.10"}).len > 0
-
-  # Range evaluation on nimble dump's structure.
-  let ranges = parseJson("""{
-    "any": {"kind": "verAny"},
-    "eq": {"kind": "verEq", "ver": "2.3.1"},
-    "ge": {"kind": "verEqLater", "ver": "0.4.1"},
-    "band": {"kind": "verIntersect", "verILeft": {"kind": "verEqLater", "ver": "4.2.0"},
-             "verIRight": {"kind": "verEarlier", "ver": "4.4.0"}},
-    "odd": {"kind": "verMystery"}
-  }""")
-  doAssert outsideRange("2.3.1", ranges["eq"]) == ""
-  doAssert outsideRange("2.4.0", ranges["eq"]).len > 0
-  doAssert outsideRange("0.5.1", ranges["ge"]) == ""
-  doAssert outsideRange("0.4.0", ranges["ge"]).len > 0
-  doAssert outsideRange("4.2.5", ranges["band"]) == ""
-  doAssert outsideRange("4.4.0", ranges["band"]).len > 0
-  doAssert outsideRange("1.0", ranges["any"]) == ""
-  doAssert outsideRange("1.0", ranges["odd"]).contains("unsupported")
-
-  # Matching rules against a lock fixture.
-  let lockFixture = parseJson("""{
-    "websock": {"version": "#v0.4.0", "vcsRevision": "387a8eb", "url": "https://github.com/status-im/nim-websock"},
-    "metrics": {"version": "0.2.2", "vcsRevision": "9f2e1d4a", "url": "https://github.com/status-im/nim-metrics"},
-    "sds": {"version": "#b12f5ee", "vcsRevision": "b12f5ee", "url": "https://github.com/logos-messaging/nim-sds.git"},
-    "libp2p": {"version": "2.3.1", "vcsRevision": "391e403", "url": "https://github.com/vacp2p/nim-libp2p"},
-    "chronos": {"version": "4.2.5", "vcsRevision": "0ab802b", "url": "https://github.com/status-im/nim-chronos"},
-    "libplum": {"version": "#v0.6.3", "vcsRevision": "189a498", "url": "https://github.com/logos-storage/nim-libplum"}
-  }""")
-  proc bad(name, str: string, ver: JsonNode): int =
-    var r = %*[{"name": name, "str": str, "ver": ver}]
-    reqMismatches(r, lockFixture).len
-  proc spe(s: string): JsonNode = %*{"kind": "verSpecial", "spe": s}
-  proc eq(s: string): JsonNode = %*{"kind": "verEq", "ver": s}
-  let anyv = %*{"kind": "verAny"}
-  # URL pins
-  doAssert bad("https://github.com/status-im/nim-websock", "#v0.4.0", spe("#v0.4.0")) == 0
-  doAssert bad("https://github.com/status-im/nim-websock", "#387a8eb", spe("#387a8eb")) == 1
-  doAssert bad("https://github.com/status-im/nim-websock", "any version", anyv) == 0
-  doAssert bad("https://github.com/status-im/nim-websock", "== 0.4.0", eq("0.4.0")) == 1
-  doAssert bad("https://github.com/status-im/nim-metrics", "#9f2e1d4a", spe("#9f2e1d4a")) == 0
-  doAssert bad("https://github.com/status-im/nim-metrics", "#deadbeef", spe("#deadbeef")) == 1
-  doAssert bad("https://github.com/status-im/nim-metrics", "== 0.2.2", eq("0.2.2")) == 0
-  doAssert bad("https://github.com/status-im/nim-metrics", "== 0.2.3", eq("0.2.3")) == 1
-  doAssert bad("https://github.com/status-im/nim-metrics", ">= 0.2.0", ranges["ge"]) == 1
-  doAssert bad("https://github.com/Status-IM/nim-metrics", "any version", anyv) == 0
-  doAssert bad("https://github.com/logos-messaging/nim-sds.git", "#b12f5ee", spe("#b12f5ee")) == 0
-  doAssert bad("https://github.com/logos-messaging/nim-sds", "#b12f5ee", spe("#b12f5ee")) == 1
-  doAssert reqMismatches(%*[{"name": "https://github.com/logos-messaging/nim-sds", "str": "#b12f5ee",
-    "ver": spe("#b12f5ee")}], lockFixture)[0].contains("nearest: sds")
-  doAssert bad("https://github.com/nowhere/pkg", "#x", spe("#x")) == 1
-  # name requirements
-  doAssert bad("libp2p", "== 2.3.1", eq("2.3.1")) == 0
-  doAssert bad("libp2p", "== 2.4.0", eq("2.4.0")) == 1
-  doAssert bad("LibP2P", "== 2.3.1", eq("2.3.1")) == 0
-  doAssert bad("chronos", ">= 4.2.0 & < 4.4.0", ranges["band"]) == 0
-  doAssert bad("chronos", ">= 4.3.0", %*{"kind": "verEqLater", "ver": "4.3.0"}) == 1
-  doAssert bad("chronos", "any version", anyv) == 0
-  doAssert bad("stew", "any version", anyv) == 1          # not in the fixture lock
-  doAssert bad("libplum", "any version", anyv) == 0
-  doAssert bad("libplum", ">= 0.6.0", %*{"kind": "verEqLater", "ver": "0.6.0"}) == 1  # special lock version
-  doAssert bad("libplum", "#v0.6.3", spe("#v0.6.3")) == 1   # special on a name requirement
-  doAssert bad("nim", "== 2.2.6", eq("2.2.6")) == 0          # skipped
 
   # nix parsing and cross-check.
   let nix = nixEntriesFrom("""
