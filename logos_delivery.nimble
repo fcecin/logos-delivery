@@ -15,11 +15,12 @@ installDirs = @["library", "migrations", "tools"]
 
 const RequiredNimVersion = "2.2.6"
   ## This is the nim compiler version that we are working on. Other versions may behave differently.
-const RequiredNimbleRevision = "07caee397d628c9e93d81048268365c4c2414a80"
-  ## A git revision (40 hex digits) or a release version such as "0.25.0", built from
-  ## tag v0.25.0. This revision matches URL requirements to nimble.lock by URL and
-  ## installs from the locked URL and revision. Releases up to 0.24.1 match the lock by
-  ## package name only and re-solve URL requirements online.
+const RequiredNimblePin = "07caee397d628c9e93d81048268365c4c2414a80"
+  ## The Nimble the build installs and runs: a git revision (40 hex digits) or a
+  ## release version such as "0.25.0", built from tag v0.25.0. This revision matches
+  ## URL requirements to nimble.lock by URL and installs from the locked URL and
+  ## revision. Releases up to 0.24.1 match the lock by package name only and re-solve
+  ## URL requirements online.
 
 ### Dependencies
 requires "nim == 2.2.6",
