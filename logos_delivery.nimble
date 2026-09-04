@@ -92,8 +92,15 @@ requires "https://github.com/vacp2p/nim-boringssl#v0.0.11"
 # No tag at pinning time; revision was one commit after v0.2.0.
 requires "https://github.com/vacp2p/nim-jwt.git#057ec95eb5af0eea9c49bfe9025b3312c95dc5f2"
 
-# Temporary pin to the mix commit that widens its libp2p requirement.
-requires "https://github.com/logos-co/nim-libp2p-mix#39d2ac78da7b7f33562eb7cd95d6280ca9fa0e94"
+# Temporary pin to a fork commit of the mix library, until a release of the
+# library that accepts libp2p 2.3.1, the version this tree runs. The mix send
+# path uses `MixParameters.replyTimeout`, `setLocalMultiAddr` and
+# `getMaxMessageSizeForCodec(codec, numSurbs)`, which the library's master
+# has. The pinned commit adds nothing that the send path calls; the pin moves
+# to the integration branch of the fork (the libp2p pin, the pool and dial
+# hardening, the sender-only mode), then to a release. Check the pin first at
+# a rebase over another pull request that pins the mix library.
+requires "https://github.com/fcecin/nim-libp2p-mix#1f68776d5b8aa3a3a9bce157b26d810a4dafb1b6"
 
 proc getMyCPU(): string =
   ## Need to set cpu more explicit manner to avoid arch issues between dependencies
@@ -373,6 +380,9 @@ task test, "Build & run Waku tests":
 
 task testwakunode2, "Build & run wakunode2 app tests":
   test "all_tests_wakunode2"
+
+task testmessaging, "Build & run the tests above the kernel (API, messaging, channels)":
+  test "all_tests_messaging"
 
 task example2, "Build Waku examples":
   buildBinary "api_example", "examples/api_example/"

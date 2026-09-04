@@ -51,8 +51,9 @@ const
     # historical confbuilder default; wakunode2 CLI deviates (true)
   DefaultStoreSyncMount: bool = false
   DefaultRendezvous: bool = false
-    # historical confbuilder default; wakunode2 CLI deviates (true)
   DefaultMix*: bool = false
+    # the CLI default of --mix; the capability bit does not read it
+    # historical confbuilder default; wakunode2 CLI deviates (true)
   DefaultRelayPeerExchange: bool = false
   DefaultLogLevel: logging.LogLevel = logging.LogLevel.INFO
   DefaultLogFormat: logging.LogFormat = logging.LogFormat.TEXT
@@ -235,6 +236,9 @@ proc withRendezvous*(b: var WakuConfBuilder, rendezvous: bool) =
   b.rendezvous = Opt.some(rendezvous)
 
 proc withMix*(builder: var WakuConfBuilder, mix: bool) =
+  ## Mirrors the mount flag of the mix configuration. The capability bit does
+  ## not come from here: it follows the mount and relay (`servesMix`). The
+  ## value takes part in the preset conflict check only.
   builder.mix = Opt.some(mix)
 
 proc withRemoteStoreNode*(b: var WakuConfBuilder, remoteStoreNode: string) =
@@ -593,13 +597,6 @@ proc build*(
       debug "Whether to mount rendezvous is not specified, defaulting to not mounting"
       DefaultRendezvous
 
-  let mix =
-    if builder.mix.isSome():
-      builder.mix.get()
-    else:
-      debug "Whether to mount mix is not specified, defaulting to not mounting"
-      DefaultMix
-
   let relayPeerExchange = builder.relayPeerExchange.get(DefaultRelayPeerExchange)
 
   let nodeKey = ?nodeKey(builder, rng)
@@ -785,7 +782,10 @@ proc build*(
     store = storeServiceConf.isSome,
     relay = relay,
     sync = storeServiceConf.isSome() and storeServiceConf.get().storeSyncConf.isSome,
-    mix = mix,
+    # The mix bit says "intermediary or exit role" (WAKU-MIX). A node with mix
+    # and relay serves; a node with mix and no relay is a sender only. A preset
+    # or a flag that mounts nothing sets no bit.
+    mix = mixConf.isSome() and relay,
   )
 
   # portsShift is consumed here, WakuConf carries final bind ports.

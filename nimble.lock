@@ -26,7 +26,7 @@
       }
     },
     "nat_traversal": {
-      "version": "0.0.1",
+      "version": "#860e18c37667b5dd005b94c63264560c35d88004",
       "vcsRevision": "860e18c37667b5dd005b94c63264560c35d88004",
       "url": "https://github.com/status-im/nim-nat-traversal",
       "downloadMethod": "git",
@@ -214,7 +214,7 @@
       }
     },
     "libplum": {
-      "version": "#v0.6.3",
+      "version": "#189a4984d15f0c60780d6ea5a2ab46bbf6a350f8",
       "vcsRevision": "189a4984d15f0c60780d6ea5a2ab46bbf6a350f8",
       "url": "https://github.com/logos-storage/nim-libplum",
       "downloadMethod": "git",
@@ -229,7 +229,7 @@
       }
     },
     "metrics": {
-      "version": "0.2.2",
+      "version": "#9f2e1d4a4164deb37603b16cedd1707408ee5955",
       "vcsRevision": "9f2e1d4a4164deb37603b16cedd1707408ee5955",
       "url": "https://github.com/status-im/nim-metrics",
       "downloadMethod": "git",
@@ -258,7 +258,7 @@
       }
     },
     "snappy": {
-      "version": "0.1.0",
+      "version": "#da2f0c7b6ce9053106e9bb098204fe5319038387",
       "vcsRevision": "da2f0c7b6ce9053106e9bb098204fe5319038387",
       "url": "https://github.com/status-im/nim-snappy",
       "downloadMethod": "git",
@@ -462,7 +462,7 @@
       }
     },
     "minilru": {
-      "version": "0.1.1",
+      "version": "#6a6929edaf365bf032f00e5cd197d0eeb7a0467e",
       "vcsRevision": "6a6929edaf365bf032f00e5cd197d0eeb7a0467e",
       "url": "https://github.com/status-im/nim-minilru",
       "downloadMethod": "git",
@@ -476,7 +476,7 @@
       }
     },
     "db_connector": {
-      "version": "0.1.0",
+      "version": "#29450a2063970712422e1ab857695c12d80112a6",
       "vcsRevision": "29450a2063970712422e1ab857695c12d80112a6",
       "url": "https://github.com/nim-lang/db_connector",
       "downloadMethod": "git",
@@ -543,7 +543,7 @@
       }
     },
     "websock": {
-      "version": "#v0.4.0",
+      "version": "#387a8eb7e961e8fdd3b1a717d36bc53b55e4dc5d",
       "vcsRevision": "387a8eb7e961e8fdd3b1a717d36bc53b55e4dc5d",
       "url": "https://github.com/status-im/nim-websock",
       "downloadMethod": "git",
@@ -585,7 +585,7 @@
       }
     },
     "secp256k1": {
-      "version": "0.6.0.3.2",
+      "version": "#d8f1288b7c72f00be5fc2c5ea72bf5cae1eafb15",
       "vcsRevision": "d8f1288b7c72f00be5fc2c5ea72bf5cae1eafb15",
       "url": "https://github.com/status-im/nim-secp256k1",
       "downloadMethod": "git",
@@ -623,7 +623,7 @@
         "libplum"
       ],
       "checksums": {
-        "sha1": "b2b3d114f529613911880098b303f38ce9fff15f"
+        "sha1": "62b44f7fdcdb170f83cc8e03e6da2f675b4deaf7"
       }
     },
     "sds": {
@@ -647,9 +647,9 @@
       }
     },
     "libp2p_mix": {
-      "version": "#39d2ac78da7b7f33562eb7cd95d6280ca9fa0e94",
-      "vcsRevision": "39d2ac78da7b7f33562eb7cd95d6280ca9fa0e94",
-      "url": "https://github.com/logos-co/nim-libp2p-mix",
+      "version": "#1f68776d5b8aa3a3a9bce157b26d810a4dafb1b6",
+      "vcsRevision": "1f68776d5b8aa3a3a9bce157b26d810a4dafb1b6",
+      "url": "https://github.com/fcecin/nim-libp2p-mix",
       "downloadMethod": "git",
       "dependencies": [
         "nim",
@@ -663,7 +663,7 @@
         "unittest2"
       ],
       "checksums": {
-        "sha1": "053909f0933b725018f7d87b27403a4b06d7f23a"
+        "sha1": "677adb4a0929d168e5813185e4232028168012ea"
       }
     },
     "eth": {
@@ -718,7 +718,7 @@
       }
     },
     "dnsdisc": {
-      "version": "0.1.1",
+      "version": "#6cb1b7e3922645275043c68e476cac1501a45e55",
       "vcsRevision": "6cb1b7e3922645275043c68e476cac1501a45e55",
       "url": "https://github.com/status-im/nim-dnsdisc",
       "downloadMethod": "git",

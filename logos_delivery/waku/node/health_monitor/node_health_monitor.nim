@@ -13,6 +13,7 @@ import
   # EventConnectionStatusChange
   logos_delivery/waku/[
     waku_relay,
+    waku_mix,
     api/events/health_events,
     api/events/peer_events,
     rln,
@@ -272,6 +273,12 @@ proc getMixHealth(hm: NodeHealthMonitor): ProtocolHealth =
 
   if isNil(hm.node.wakuMix):
     return p.notMounted()
+
+  # The send path needs `MinMixPoolSize` nodes in the pool to build a path.
+  # Mounted with a smaller pool, mix does not deliver.
+  let poolSize = hm.node.getMixNodePoolSize()
+  if poolSize < MinMixPoolSize:
+    return p.notReady("mix pool has " & $poolSize & " of " & $MinMixPoolSize & " nodes")
 
   return p.ready()
 

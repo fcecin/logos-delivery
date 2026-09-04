@@ -8,7 +8,12 @@ const MaxTime = chronos.minutes(1)
 
 proc taskWith(admitted, propagated: Opt[Moment]): DeliveryTask =
   ## Builds a DeliveryTask directly (bypassing `new`, which needs a broker).
-  return DeliveryTask(firstAdmittedTime: admitted, firstPropagatedTime: propagated)
+  ## Admission sets `firstAdmittedTime` and `deadlineStart` at the same time.
+  return DeliveryTask(
+    firstAdmittedTime: admitted,
+    deadlineStart: admitted,
+    firstPropagatedTime: propagated,
+  )
 
 suite "DeliveryTask - delivery-timeout reaping":
   test "a task parked for budget (never admitted) is exempt, however old":
@@ -28,6 +33,13 @@ suite "DeliveryTask - delivery-timeout reaping":
     let task =
       taskWith(Opt.some(Moment.now() - chronos.minutes(2)), Opt.some(Moment.now()))
     check not task.isDeliveryTimedOut(MaxTime)
+
+  test "an RLN proof refresh does not restart the delivery deadline":
+    ## `parkForRlnProofRefresh` clears `firstAdmittedTime`. The deadline runs
+    ## from `deadlineStart`, which nothing clears.
+    let task = taskWith(Opt.some(Moment.now() - chronos.minutes(2)), Opt.none(Moment))
+    task.firstAdmittedTime = Opt.none(Moment)
+    check task.isDeliveryTimedOut(MaxTime)
 
   test "the timeout clock runs from admission, not message creation":
     ## A just-admitted task has a fresh clock, even after a long budget wait.

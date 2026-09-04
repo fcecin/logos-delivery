@@ -24,6 +24,8 @@ method sendImpl*(
     self: LightpushSendProcessor, task: DeliveryTask
 ): Future[void] {.async.} =
   task.tryCount.inc()
+  # A copy received during this attempt names the path that carried it.
+  task.deliveryPath = DeliveryPath.Lightpush
   debug "Trying message delivery via Lightpush",
     requestId = task.requestId,
     msgHash = task.msgHash.to0xHex(),

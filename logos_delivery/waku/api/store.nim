@@ -28,6 +28,12 @@ proc storeQueryToAny*(
       return err($error)
 
     return ok(queryResponse)
+  except CancelledError as exc:
+    # A cancellation from the caller goes up as a cancellation. The send
+    # service stops with `cancelAndWait` on its loop and waits for it.
+    # Reported as an error result, the loop continues and the stop does not
+    # complete.
+    raise exc
   except CatchableError as e:
     return err(e.msg)
 
@@ -49,5 +55,7 @@ proc storeQuery*(
       return err("storeQuery failed: " & $error)
 
     return ok(queryResponse)
+  except CancelledError as exc:
+    raise exc # see `storeQueryToAny`
   except CatchableError as e:
     return err(e.msg)

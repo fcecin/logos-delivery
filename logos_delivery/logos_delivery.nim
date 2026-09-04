@@ -78,8 +78,15 @@ proc new*(
 ): Future[Result[LogosDelivery, string]] {.async.} =
   ## Builds the stack bottom-up from a resolved per-layer config; each layer is
   ## mounted iff its config is present.
-  let wakuConf = WakuNodeConf(conf.kernelConf).toWakuConf().valueOr:
-      return err("failed to handle the configuration: " & error)
+  var kernelConf = WakuNodeConf(conf.kernelConf)
+  if conf.messagingConf.isSome():
+    # The anonymity level is a messaging setting with a kernel side. Each
+    # constructor goes through here, so a kernel record made by hand gets the
+    # same rule as a parsed one.
+    conf.messagingConf.get().applyAnonymityLevel(kernelConf).isOkOr:
+      return err(error)
+  let wakuConf = kernelConf.toWakuConf().valueOr:
+    return err("failed to handle the configuration: " & error)
   let waku = (await Waku.new(wakuConf, appCallbacks)).valueOr:
     return err("failed to create Waku: " & error)
 
