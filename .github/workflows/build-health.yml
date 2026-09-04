@@ -26,3 +26,8 @@ jobs:
           nim-version: ${{ env.NIM_VERSION }}
 
       - uses: ./.github/actions/check-build-health
+
+      # One case runs a Nimble task, which can install. The cache saves at the
+      # end of a successful job, so audit before it does.
+      - name: Audit installed deps
+        run: make audit-deps

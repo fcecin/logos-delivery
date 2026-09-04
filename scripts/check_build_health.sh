@@ -294,6 +294,10 @@ expect_recipe "custom tasks use the system Nim" \
   '--useSystemNim' wakunode2
 expect_recipe "setup audits the result" \
   "audit-deps" nimbledeps/.nimble-setup
+expect_recipe "build-deps audits after the native rebuilds" \
+  "audit-deps" build-deps
+expect_recipe "build-deps installs the pinned Nimble" \
+  "install_nimble.sh" build-deps
 
 # --------------------------------------------------------------------------
 # nix/deps.nix mirrors nimble.lock: one fetchgit block per git lock entry, at

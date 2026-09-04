@@ -334,6 +334,3 @@ jobs:
           echo "using nph at ${NPH}"
           "${NPH}" examples logos_delivery tests tools apps *.@(nim|nims|nimble)
           git diff --exit-code
-
-      - name: Audit installed deps
-        run: make audit-deps

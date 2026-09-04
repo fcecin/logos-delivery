@@ -157,6 +157,8 @@ audit-deps:
 build-deps: | $(NIMBLEDEPS_STAMP)
 	$(MAKE) rebuild-bearssl-nimbledeps rebuild-nat-libs-nimbledeps
 
+	$(MAKE) audit-deps
+
 clean:
 	rm -rf build 2> /dev/null || true
 	rm -rf nimbledeps 2> /dev/null || true
