@@ -4,9 +4,9 @@
 #
 #   nim e scripts/audit_deps.nims
 #
-# Whether logos_delivery.nimble matches nimble.lock is Nimble's decision, and
-# `make audit-deps` asks Nimble for it after this script. Nothing here
-# reproduces Nimble's matching rules.
+# A requirement that does not match its lock entry makes `nimble setup` solve
+# afresh and install packages the lock does not name, which this rejects.
+# Nothing here reproduces Nimble's matching rules.
 #
 # `nimble setup` does not remove stale directories: after dropping a package,
 # delete nimbledeps/ before setup.

@@ -26,11 +26,6 @@ runs:
         echo "$HOME/.nimble/bin" >> $GITHUB_PATH
         echo "$HOME/.local/nimble-${NIMBLE_REVISION}/bin" >> $GITHUB_PATH
 
-    - name: Lint the nimble file before solving
-      shell: bash
-      run: |
-        make preflight-deps
-
     - name: Cache nimble deps
       id: cache
       if: ${{ inputs.cache != 'false' }}

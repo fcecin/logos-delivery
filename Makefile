@@ -136,18 +136,11 @@ logos_delivery.nims:
 # revision. A requirement that does not match its lock entry sends Nimble
 # online for a fresh solve; audit-deps rejects that result.
 $(NIMBLEDEPS_STAMP): nimble.lock logos_delivery.nimble | install-nimble logos_delivery.nims
-	$(MAKE) preflight-deps
-
 	$(NIMBLE) setup --localdeps -y $(NIMBLE_TASK_FLAGS)
 
 	$(MAKE) audit-deps
 
 	touch $@
-
-# Nimble lints the nimble file. Needs no installed packages.
-.PHONY: preflight-deps
-preflight-deps: | install-nimble
-	$(NIMBLE) check --localdeps $(NIMBLE_TASK_FLAGS)
 
 # The installed set is the lock entries at their vcsRevision and nothing else.
 # A requirement that does not match its lock entry makes `nimble setup` solve

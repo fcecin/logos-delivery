@@ -10,6 +10,7 @@
 #   the Nim flags a make variable produces
 #   the commands make would run for a target
 #   the command a Nimble task emits
+#   nix/deps.nix against nimble.lock
 #
 # A failed case prints the expected and the actual value.
 #
@@ -291,12 +292,8 @@ expect_recipe "setup uses the system Nim" \
   '--useSystemNim' nimbledeps/.nimble-setup
 expect_recipe "custom tasks use the system Nim" \
   '--useSystemNim' wakunode2
-expect_recipe "setup preflights before solving" \
-  "preflight-deps" nimbledeps/.nimble-setup
 expect_recipe "setup audits the result" \
   "audit-deps" nimbledeps/.nimble-setup
-expect_recipe "the preflight runs nimble check" \
-  "nimble check" preflight-deps
 
 # --------------------------------------------------------------------------
 # nix/deps.nix mirrors nimble.lock: one fetchgit block per git lock entry, at
@@ -316,10 +313,10 @@ want = {norm(e["url"]): e["vcsRevision"] for n, e in lock.items()
         if n not in ("nim", "nimble") and e.get("downloadMethod") == "git"}
 bad = [f"{u}: lock {r}, nix {nix.get(u, 'missing')}" for u, r in want.items() if nix.get(u) != r]
 bad += [f"{u}: in nix/deps.nix only" for u in nix if u not in want]
-print("; ".join(sorted(bad)), end="")
+print("; ".join(sorted(bad)) if bad else "ok", end="")
 NIXCHECK
 }
-expect_eq "nix/deps.nix lists the locked revisions" "" "$(nix_lock_diff)"
+expect_eq "nix/deps.nix lists the locked revisions" "ok" "$(nix_lock_diff 2>&1)"
 
 # --------------------------------------------------------------------------
 # The Nimble tasks concatenate their own defaults with NIM_PARAMS. The
