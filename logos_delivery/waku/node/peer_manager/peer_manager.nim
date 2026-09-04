@@ -453,13 +453,19 @@ proc dialPeer(
   # Dial Peer
   let dialFut = pm.switch.dial(peerId, addrs, proto)
 
-  let res = catch:
+  var reasonFailed = "timed out"
+  try:
     if await dialFut.withTimeout(dialTimeout):
       return Opt.some(dialFut.read())
-    else:
-      await cancelAndWait(dialFut)
-
-  let reasonFailed = if res.isOk: "timed out" else: res.error.msg
+    await cancelAndWait(dialFut)
+  except CancelledError as exc:
+    # A cancellation from the caller goes up as a cancellation. A caller that
+    # stops with `cancelAndWait` waits for it. Reported as a failed dial, the
+    # caller tries the next peer or continues its loop, and the stop does not
+    # complete.
+    raise exc
+  except CatchableError as exc:
+    reasonFailed = exc.msg
 
   trace "Dialing peer failed", peerId = peerId, reason = reasonFailed, proto = proto
 
@@ -827,6 +833,10 @@ proc onPeerEvent(pm: PeerManager, peerId: PeerId, event: PeerEvent) {.async.} =
       # pm.colocationLimit == 0 disables the ip colocation limit
       if pm.colocationLimit != 0 and peersBehindIp.len > pm.colocationLimit:
         for peerId in peersBehindIp[0 ..< (peersBehindIp.len - pm.colocationLimit)]:
+          if peerStore.isPinned(peerId):
+            # A configured peer stays: the operator chose it, and a deleted
+            # mix bootnode leaves the pool for the life of the process.
+            continue
           debug "Pruning connection due to ip colocation", peerId = peerId, ip = ip
           asyncSpawn(pm.evictPeer(peerId))
           peerStore.delete(peerId)
@@ -1038,7 +1048,7 @@ proc prunePeerStore*(pm: PeerManager) =
 
   # prune failed connections
   for peerId, count in peerStore[NumberFailedConnBook].book.pairs:
-    if count < pm.maxFailedAttempts:
+    if count < pm.maxFailedAttempts or peerStore.isPinned(peerId):
       continue
 
     if peersToPrune.len >= pruningCount:
@@ -1046,7 +1056,12 @@ proc prunePeerStore*(pm: PeerManager) =
 
     peersToPrune.incl(peerId)
 
-  var notConnected = peerStore.getDisconnectedPeers().mapIt(it.peerId)
+  # A configured peer (see `isPinned`) is not connected, has no ENR and no
+  # shards until the node dials it, which is the shape this procedure prunes
+  # first. It stays.
+  var notConnected = peerStore.getDisconnectedPeers().mapIt(it.peerId).filterIt(
+      not peerStore.isPinned(it)
+    )
 
   # Always pick random non-connected peers
   shuffle(notConnected)

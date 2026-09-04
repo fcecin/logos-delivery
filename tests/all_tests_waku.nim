@@ -72,17 +72,13 @@ import ./waku_rln_relay/test_all
 # Node Factory
 import ./factory/test_all
 
-# Waku API tests
-import ./api/test_all
-
 # Waku tools tests
 import ./tools/test_all
 
 # Persistency library tests
 import ./persistency/test_all
 
-# Messaging API tests
-import ./messaging/test_all
-
-# Reliable Channel API tests
-import ./channels/test_all
+# The suites above the kernel (api, messaging, channels) are in
+# all_tests_messaging.nim. Each module-level global with managed memory
+# registers one GC marker, and the refc runtime holds 3500. This binary was
+# at the limit with them. The kernel suites stay here.

@@ -1,10 +1,12 @@
 {.used.}
 
-import std/net, results, chronos, testutils/unittests
+import std/[net, strutils], results, chronos, testutils/unittests
 import brokers/broker_context
 import logos_delivery
 import logos_delivery/api/conf/logos_delivery_conf_json
+import logos_delivery/api/conf/logos_delivery_conf
 import logos_delivery/waku/factory/[waku_conf, networks_config]
+import logos_delivery/waku/waku_enr
 import logos_delivery/waku/common/logging
 
 suite "MessagingClientConf - mode expansion (toWakuNodeConf)":
@@ -176,6 +178,62 @@ suite "parseLogosDeliveryConf - JSON parsing":
     # the user set no reliability override, but the preset supplies one
     require lc.messagingConf.isSome()
     check lc.messagingConf.get().reliabilityEnabled.isSome()
+
+  test "an anonymity override reaches the messaging record and mounts mix":
+    let lc = parseLogosDeliveryConf(
+      """{"messagingOverrides": {"anonymityLevel": "Required"}}"""
+    ).valueOr:
+      raiseAssert error
+    require lc.messagingConf.isSome()
+    check:
+      lc.messagingConf.get().anonymityLevel == Opt.some(AnonymityLevel.Required)
+      WakuNodeConf(lc.kernelConf).mix == Opt.some(true)
+
+  test "a flat blob's anonymity level is lifted to the messaging record":
+    let lc = parseLogosDeliveryConf("""{"anonymityLevel": "Preferred"}""").valueOr:
+      raiseAssert error
+    require lc.messagingConf.isSome()
+    check:
+      lc.messagingConf.get().anonymityLevel == Opt.some(AnonymityLevel.Preferred)
+      WakuNodeConf(lc.kernelConf).mix == Opt.some(true)
+
+  test "mix nodes and the lightpush node reach the kernel from the messaging record":
+    ## A static mix pool and a static exit node are reachable on the
+    ## structured route, as `storenode` is. Without them, a sender needs
+    ## discovery to fill the pool.
+    const
+      mixKey = "0000000000000000000000000000000000000000000000000000000000000000"
+      exit =
+        "/ip4/127.0.0.1/tcp/60001/p2p/16Uiu2HAm1kfJEu5BBnXgiThLusVdJHkVQtCS983bvA9g1xTE9FDf"
+    let lc = parseLogosDeliveryConf(
+      """{"messagingOverrides": {"anonymityLevel": "Required", "mixnode": ["/ip4/127.0.0.1/tcp/60000:""" &
+        mixKey & """"], "lightpushnode": """" & exit & """"}}"""
+    ).valueOr:
+      raiseAssert error
+    let kc = WakuNodeConf(lc.kernelConf)
+    check:
+      kc.mixnodes.len == 1
+      kc.mixnodes[0].multiaddr == "/ip4/127.0.0.1/tcp/60000"
+      kc.lightpushnode == exit
+
+  test "the kernel entry layer rejects an anonymity level above None":
+    ## The kernel entry layer has no send path that reads the level. Mix
+    ## would mount for nothing.
+    let res = LogosDeliveryConf.init(
+      entryLayer = EntryLayer.kernel,
+      mode = LogosDeliveryMode.Edge,
+      preset = "",
+      messagingOverrides =
+        MessagingClientConf(anonymityLevel: Opt.some(AnonymityLevel.Required)),
+      channelsOverrides = ReliableChannelManagerConf(),
+    )
+    check:
+      res.isErr()
+      "kernel entry layer" in res.error
+
+  test "a flat blob asking for anonymity while disabling mix is rejected":
+    check parseLogosDeliveryConf("""{"anonymity-level": "Required", "mix": false}""")
+      .isErr()
 
   test "channelsOverrides fold into the channel conf":
     let lc = parseLogosDeliveryConf(
@@ -349,6 +407,60 @@ suite "MessagingClientConf - store override":
       kc.store == true # Edge defaults store off; the explicit opt-in wins
       kc.relay == false # protocols are owned by the mode, not overridable
 
+suite "MessagingClientConf - anonymity level":
+  test "an anonymity level above None asks the kernel to mount mix":
+    let kc = MessagingClientConf(anonymityLevel: Opt.some(AnonymityLevel.Required)).toWakuNodeConf(
+      LogosDeliveryMode.Core
+    ).valueOr:
+      raiseAssert error
+    check kc.mix == Opt.some(true)
+
+  test "None leaves mix alone":
+    let kc = MessagingClientConf(anonymityLevel: Opt.some(AnonymityLevel.None)).toWakuNodeConf(
+      LogosDeliveryMode.Core
+    ).valueOr:
+      raiseAssert error
+    check kc.mix.isNone()
+
+  test "an unset anonymity level leaves mix alone":
+    let kc = MessagingClientConf().toWakuNodeConf(LogosDeliveryMode.Core).valueOr:
+        raiseAssert error
+    check kc.mix.isNone()
+
+  test "the mix protocol config is built, not just the ENR capability bit":
+    let kc = MessagingClientConf(anonymityLevel: Opt.some(AnonymityLevel.Preferred)).toWakuNodeConf(
+      LogosDeliveryMode.Core
+    ).valueOr:
+      raiseAssert error
+    let wakuConf = kc.toWakuConf().valueOr:
+      raiseAssert error
+    check wakuConf.mixConf.isSome()
+
+  test "a Core node with a level serves the mix network and sets the capability bit":
+    let kc = MessagingClientConf(anonymityLevel: Opt.some(AnonymityLevel.Preferred)).toWakuNodeConf(
+      LogosDeliveryMode.Core
+    ).valueOr:
+      raiseAssert error
+    let wakuConf = kc.toWakuConf().valueOr:
+      raiseAssert error
+    check:
+      wakuConf.relay
+      wakuConf.servesMix()
+      wakuConf.wakuFlags.supportsCapability(Capabilities.Mix)
+
+  test "an Edge node with a level is a sender only: mix mounts, the capability bit stays off":
+    let kc = MessagingClientConf(anonymityLevel: Opt.some(AnonymityLevel.Preferred)).toWakuNodeConf(
+      LogosDeliveryMode.Edge
+    ).valueOr:
+      raiseAssert error
+    let wakuConf = kc.toWakuConf().valueOr:
+      raiseAssert error
+    check:
+      wakuConf.mixConf.isSome()
+      not wakuConf.relay
+      not wakuConf.servesMix()
+      not wakuConf.wakuFlags.supportsCapability(Capabilities.Mix)
+
 suite "LogosDelivery.new - raw kernel construction":
   asyncTest "a kernel-only node mounts the kernel only; start/stop tolerate the nil layers":
     let kernel = MessagingClientConf(listenIpv4: Opt.some(parseIpAddress("0.0.0.0"))).toWakuNodeConf(
@@ -366,6 +478,60 @@ suite "LogosDelivery.new - raw kernel construction":
     # start()/stop() must skip the nil messaging + channel layers, not deref them
     (await node.start()).expect("start")
     (await node.stop()).expect("stop")
+
+  asyncTest "the kernel-plus-overrides constructor mounts mix for a level above None":
+    ## This constructor does not call `toWakuNodeConf`. The deepest
+    ## constructor applies the kernel side of the anonymity level.
+    var kernel = MessagingClientConf(listenIpv4: Opt.some(parseIpAddress("127.0.0.1"))).toWakuNodeConf(
+      LogosDeliveryMode.Edge
+    ).valueOr:
+      raiseAssert error
+    kernel.rest = false
+    kernel.discv5UdpPort = Port(0)
+    var node: LogosDelivery
+    lockNewGlobalBrokerContext:
+      node = (
+        await LogosDelivery.new(
+          KernelConf(kernel),
+          MessagingClientConf(anonymityLevel: Opt.some(AnonymityLevel.Required)),
+          ReliableChannelManagerConf(),
+        )
+      ).valueOr:
+        raiseAssert error
+    check not node.waku.node.wakuMix.isNil()
+    (await node.stop()).expect("stop")
+
+  asyncTest "the deepest constructor rejects a level above None with an IPv6 listen address":
+    ## The mix pool and the return paths take IPv4 addresses only. With an
+    ## IPv6 bind, mix mounts and each mixed attempt fails until the deadline.
+    var kernel = MessagingClientConf(listenIpv4: Opt.some(parseIpAddress("::1"))).toWakuNodeConf(
+      LogosDeliveryMode.Edge
+    ).valueOr:
+      raiseAssert error
+    lockNewGlobalBrokerContext:
+      let res = await LogosDelivery.new(
+        KernelConf(kernel),
+        MessagingClientConf(anonymityLevel: Opt.some(AnonymityLevel.Required)),
+        ReliableChannelManagerConf(),
+      )
+      check:
+        res.isErr()
+        "IPv4" in res.error
+
+  asyncTest "the kernel-plus-overrides constructor rejects mix=false with a level above None":
+    var kernel = MessagingClientConf(listenIpv4: Opt.some(parseIpAddress("127.0.0.1"))).toWakuNodeConf(
+      LogosDeliveryMode.Edge
+    ).valueOr:
+      raiseAssert error
+    kernel.mix = Opt.some(false)
+    lockNewGlobalBrokerContext:
+      check (
+        await LogosDelivery.new(
+          KernelConf(kernel),
+          MessagingClientConf(anonymityLevel: Opt.some(AnonymityLevel.Required)),
+          ReliableChannelManagerConf(),
+        )
+      ).isErr()
 
 # [Legacy flat JSON config] These suites cover the legacy flat shape; delete them
 # together with parseFlatConf when flat-shape support is dropped.

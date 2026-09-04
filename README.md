@@ -133,8 +133,14 @@ If everything went well, you should see your prompt suffixed with `[SuccessX]`. 
 ### Test Suite
 
 ```bash
-# Run all the Waku tests
+# Run all the Waku tests (three binaries: testcommon, testwaku, testmessaging)
 make test
+
+# Run the kernel suites only (relay, store, filter, lightpush, mix, node, ...)
+make testwaku
+
+# Run the suites above the kernel only (tests/api, tests/messaging, tests/channels)
+make testmessaging
 
 # Run a specific test file
 make test <test_file_path>
