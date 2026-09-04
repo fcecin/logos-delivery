@@ -66,6 +66,13 @@ jobs:
           nim-version: ${{ env.NIM_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install the pinned Nimble
+        run: |
+          NIMBLE_REVISION=$(sed -n 's/^const RequiredNimbleRevision = "\([^"]*\)"/\1/p' logos_delivery.nimble)
+          scripts/install_nimble.sh "${NIMBLE_REVISION}"
+          echo "$HOME/.nimble/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/nimble-${NIMBLE_REVISION}/bin" >> $GITHUB_PATH
+
       - name: Get submodules hash
         id: submodules
         run: |
