@@ -5,8 +5,8 @@
 #   nim e scripts/audit_deps.nims
 #
 # A requirement that does not match its lock entry makes `nimble setup` solve
-# afresh and install packages the lock does not name, which this rejects.
-# Nothing here reproduces Nimble's matching rules.
+# that requirement afresh and install a revision the lock does not hold, which
+# this rejects. Nothing here reproduces Nimble's matching rules.
 #
 # `nimble setup` does not remove stale directories: after dropping a package,
 # delete nimbledeps/ before setup.

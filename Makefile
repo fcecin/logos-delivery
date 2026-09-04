@@ -18,19 +18,20 @@ ifneq (,$(findstring MINGW,$(detected_OS)))
   detected_OS := Windows
 endif
 
-REQUIRED_NIMBLE_REVISION := $(shell grep -E '^const RequiredNimbleRevision\s*=' logos_delivery.nimble | grep -oE '"[^"]+"' | tr -d '"')
+REQUIRED_NIMBLE_PIN := $(shell grep -E '^const RequiredNimblePin\s*=' logos_delivery.nimble | grep -oE '"[^"]+"' | tr -d '"')
 
-# Put the revision-specific Nimble directory before ~/.nimble/bin.
-# `nimble setup` may update package links under ~/.nimble/bin, including
-# the `nimble` link. The revision-specific directory is outside that update
-# path. Keep ~/.nimble/bin later on PATH for tools such as nph.
-NIMBLE_TOOLDIR := $(HOME)/.local/nimble-$(REQUIRED_NIMBLE_REVISION)/bin
+# The pinned Nimble has its own directory, outside ~/.nimble/bin, which
+# `nimble setup` rewrites. Recipes invoke it by path. A bare `nimble` is
+# resolved against PATH, and on the macOS and Windows CI runners that found
+# the runner image's Nimble when make had installed the pin during the same
+# run. The PATH export serves whatever a recipe runs by name, nph included,
+# and print-nimble-path.
+NIMBLE_TOOLDIR := $(HOME)/.local/nimble-$(REQUIRED_NIMBLE_PIN)/bin
+NIMBLE := $(NIMBLE_TOOLDIR)/nimble
 export PATH := $(NIMBLE_TOOLDIR):$(HOME)/.nimble/bin:$(PATH)
 
 # NIM binary location
 NIM_BINARY := $(shell which nim 2>/dev/null)
-
-NIMBLE := nimble
 
 # Options go after the command: Nimble reads pre-command options on custom
 # tasks as compiler options. --useSystemNim builds with the Nim on PATH and
@@ -133,8 +134,9 @@ logos_delivery.nims:
 	ln -s logos_delivery.nimble $@
 
 # `nimble setup` installs the nimble.lock packages from the locked URL and
-# revision. A requirement that does not match its lock entry sends Nimble
-# online for a fresh solve; audit-deps rejects that result.
+# revision. A requirement that does not match its lock entry makes Nimble
+# solve that requirement afresh; audit-deps rejects an installed set that
+# differs from the lock.
 $(NIMBLEDEPS_STAMP): nimble.lock logos_delivery.nimble | install-nimble logos_delivery.nims
 	$(NIMBLE) setup --localdeps -y $(NIMBLE_TASK_FLAGS)
 
@@ -144,8 +146,8 @@ $(NIMBLEDEPS_STAMP): nimble.lock logos_delivery.nimble | install-nimble logos_de
 
 # The installed set is the lock entries at their vcsRevision and nothing else.
 # A requirement that does not match its lock entry makes `nimble setup` solve
-# afresh and install something else, which this rejects. Reads only. CI runs
-# it again after builds, because tasks solve too.
+# afresh and install a revision the lock does not hold, which this rejects.
+# Reads only. CI runs it again after builds, because tasks solve too.
 .PHONY: audit-deps
 audit-deps:
 	nim e --hints:off scripts/audit_deps.nims
@@ -164,7 +166,7 @@ clean:
 	rm -rf nimbledeps 2> /dev/null || true
 	rm -fr nimcache 2> /dev/null || true
 	rm nimble.paths 2> /dev/null || true
-	nimble clean
+	if [ -x "$(NIMBLE)" ]; then "$(NIMBLE)" clean; fi
 
 REQUIRED_NIM_VERSION    := $(shell grep -E '^const RequiredNimVersion\s*=' logos_delivery.nimble | grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"')
 
@@ -173,16 +175,19 @@ ifneq ($(detected_OS),Windows)
 	scripts/install_nim.sh $(REQUIRED_NIM_VERSION)
 endif
 
+# The directory is passed so the binary lands where $(NIMBLE) points, whatever
+# HOME the recipe shell has (see the script).
 install-nimble: install-nim
-	scripts/install_nimble.sh $(REQUIRED_NIMBLE_REVISION)
+	scripts/install_nimble.sh $(REQUIRED_NIMBLE_PIN) $(NIMBLE_TOOLDIR)
 
 build:
 	mkdir -p build
 
+# `make nimble` installs the pin. CI and the README use it.
 nimble: install-nimble
 
-# The build system puts NIMBLE_TOOLDIR first on PATH for its own invocations.
-# Print it so a shell can use the same Nimble.
+# Recipes run $(NIMBLE_TOOLDIR)/nimble. Print the directory so a shell can use
+# the same Nimble.
 print-nimble-path:
 	@echo "$(NIMBLE_TOOLDIR)"
 
@@ -400,7 +405,7 @@ ifneq ($(detected_OS),Windows)
 		echo "nph already installed, skipping"; \
 	else \
 		echo "Installing nph globally"; \
-		(cd /tmp && nimble install nph@0.7.0 --accept -g); \
+		(cd /tmp && $(NIMBLE) install nph@0.7.0 --accept -g); \
 	fi
 	command -v nph
 else

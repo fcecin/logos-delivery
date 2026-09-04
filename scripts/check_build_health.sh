@@ -281,8 +281,8 @@ expect_make_fails  "an arbitrary unknown target fails"  definitely-not-a-target
 expect_make_parses "make test <file> still parses"      test tests/all_tests_waku.nim
 
 # --------------------------------------------------------------------------
-# Setup and the custom tasks pass no --requires. nimble.lock is the only
-# constraint.
+# Setup and the custom tasks pass no --requires: the manifest and nimble.lock
+# are the only inputs to resolution.
 # --------------------------------------------------------------------------
 reject_recipe "setup passes no --requires" \
   '--requires' nimbledeps/.nimble-setup
@@ -298,6 +298,24 @@ expect_recipe "build-deps audits after the native rebuilds" \
   "audit-deps" build-deps
 expect_recipe "build-deps installs the pinned Nimble" \
   "install_nimble.sh" build-deps
+
+# --------------------------------------------------------------------------
+# Recipes invoke the pinned Nimble by path, never by name. A bare `nimble` is
+# resolved against PATH, and on the macOS and Windows CI runners that found the
+# runner image's Nimble when make had installed the pin during the same run.
+# --------------------------------------------------------------------------
+nimble_dir=$(value_of NIMBLE_TOOLDIR)
+if [ -z "${nimble_dir}" ]; then
+  no "NIMBLE_TOOLDIR resolves" "make -pn shows no NIMBLE_TOOLDIR"
+else
+  ok "NIMBLE_TOOLDIR resolves"
+fi
+expect_recipe "setup invokes the pinned Nimble by path" \
+  "${nimble_dir}/nimble setup" nimbledeps/.nimble-setup
+expect_recipe "custom tasks invoke the pinned Nimble by path" \
+  "${nimble_dir}/nimble wakunode2" wakunode2
+reject_recipe "setup never runs a bare nimble" \
+  $'\nnimble ' nimbledeps/.nimble-setup
 
 # --------------------------------------------------------------------------
 # nix/deps.nix mirrors nimble.lock: one fetchgit block per git lock entry, at
@@ -342,15 +360,15 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# The build installs the pinned Nimble and puts it first on PATH. A 40-hex
-# pin names a git revision and the binary must report that hash; any other
-# pin names a release version and the binary must report that version. The
-# case above already ran a build, which installs it.
+# The build installs the pinned Nimble. A 40-hex pin names a git revision and
+# the binary must report that hash; any other pin names a release version and
+# the binary must report that version. The case above already ran a build,
+# which installs it.
 # --------------------------------------------------------------------------
 # print-nimble-path is what the README tells a developer to use, so test that,
 # not a second way of finding the same binary.
 tooldir=$(make print-nimble-path 2>/dev/null)
-pin=$(value_of REQUIRED_NIMBLE_REVISION)
+pin=$(value_of REQUIRED_NIMBLE_PIN)
 case "${pin}" in
   *[!0-9a-f]*|"") reported=$("${tooldir}/nimble" --version 2>/dev/null | head -1 \
                     | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1) ;;
@@ -358,9 +376,10 @@ case "${pin}" in
 esac
 expect_eq "print-nimble-path names the pinned Nimble" "${pin#v}" "${reported}"
 
-# ~/.nimble/bin/nimble is a link that `nimble setup` rewrites. It must not
-# shadow the pinned binary.
-expect_eq "the pinned Nimble is the one make runs" \
+# Recipes run the pin by path, but whatever a recipe runs by name resolves
+# against make's PATH, where the pinned directory must come before
+# ~/.nimble/bin, whose nimble link `nimble setup` rewrites.
+expect_eq "the pinned Nimble is first on make's PATH" \
   "${tooldir}/nimble" \
   "$(printf 'include Makefile\n_p:\n\t@command -v nimble\n' | make -s -f - _p 2>/dev/null)"
 

@@ -1,19 +1,29 @@
 #!/usr/bin/env bash
-# Build the pinned Nimble from source into ~/.local/nimble-<pin>/bin/nimble.
-# <pin> is a git revision (40 hex digits) or a release version such as
-# 0.24.1, built from tag v<version>. The directory is outside ~/.nimble/bin,
-# which `nimble setup` can rewrite. An executable that reports the pin is
-# reused.
+# Build the pinned Nimble from source into <dir>/nimble, by default
+# ~/.local/nimble-<pin>/bin. <pin> is a git revision (40 hex digits) or a
+# release version such as 0.25.0, built from tag v<version>. The directory is
+# outside ~/.nimble/bin, which `nimble setup` can rewrite. An executable that
+# reports the pin is reused.
+#
+# make passes $(NIMBLE_TOOLDIR) as <dir>, so the binary lands where make
+# invokes it. On the Windows CI runners make is a native build whose HOME is
+# the Windows profile, while this script runs in an MSYS2 shell whose HOME
+# is the MSYS2 home; a default derived here would miss make's directory.
 
 set -e
 
 PIN="${1:-}"
 if [ -z "${PIN}" ]; then
-  echo "Usage: $0 <nimble-revision-or-version>" >&2
+  echo "Usage: $0 <nimble-revision-or-version> [install-dir]" >&2
   exit 1
 fi
 
-NIMBLE_DIR="${HOME}/.local/nimble-${PIN}/bin"
+NIMBLE_DIR="${2:-${HOME}/.local/nimble-${PIN}/bin}"
+# A Windows path from a native make, such as C:\Users\me/.local/..., becomes
+# a path this shell can create and test.
+if command -v cygpath >/dev/null 2>&1; then
+  NIMBLE_DIR="$(cygpath -u "${NIMBLE_DIR}")"
+fi
 NIMBLE_BIN="${NIMBLE_DIR}/nimble"
 
 if [[ "${PIN}" =~ ^[0-9a-f]{40}$ ]]; then
