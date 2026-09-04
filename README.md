@@ -182,17 +182,6 @@ Run the following command to install it:
 make install-nph
 ```
 
-A second hook runs the dependency audit (`make audit-deps`: Nimble's own offline
-verdict that `logos_delivery.nimble` matches `nimble.lock`, `nix/deps.nix` against the
-lock, installed packages against the lock) when a commit touches
-`logos_delivery.nimble`, `nimble.lock`, `nix/deps.nix` or the audit script. It checks
-the working tree, needs the dependencies built, and takes about a second; CI runs the
-same audit on every push. Install it by copying it into git's hook path:
-
-```shell
-cp scripts/git_pre_commit_deps.sh "$(git rev-parse --git-path hooks/pre-commit)"
-```
-
 ### Examples
 
 Examples can be found in the examples folder.

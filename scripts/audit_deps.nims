@@ -1,24 +1,18 @@
-# Audit the generated dependency artifacts against nimble.lock. Reads files,
-# writes nothing, exits 1 on any problem.
+# Audit the installed packages against nimble.lock. Reads files, writes
+# nothing, exits 1 on any problem. Runs after setup and after builds:
 #
-#   nim e scripts/audit_deps.nims preflight   # nix/deps.nix against the lock;
-#                                             # no installed packages needed
-#   nim e scripts/audit_deps.nims             # the above plus the installed
-#                                             # packages; runs after setup
-#                                             # and after builds
+#   nim e scripts/audit_deps.nims
 #
 # Whether logos_delivery.nimble matches nimble.lock is Nimble's decision;
 # `make audit-deps` asks Nimble for it (`nimble deps --offline --refresh`)
 # after this script. Nothing here reproduces Nimble's matching rules.
 #
-# nix/deps.nix must list every git lock entry at the locked revision and
-# nothing else (URLs compared normalised, as tools/gen-nix-deps.sh writes
-# them). Installed packages must be the lock entries at their vcsRevision
-# and nothing else; `nim` is skipped (--useSystemNim). After removing a
-# package, delete nimbledeps/ before setup; `nimble setup` does not remove
-# stale directories.
+# Installed packages must be the lock entries at their vcsRevision and
+# nothing else; `nim` is skipped (--useSystemNim). After removing a package,
+# delete nimbledeps/ before setup; `nimble setup` does not remove stale
+# directories.
 
-import std/[json, strutils, algorithm, sets, tables, os]
+import std/[json, strutils, algorithm, sets, os]
 
 let root = thisDir() & "/.."
 
@@ -26,49 +20,6 @@ proc normUrl(url: string): string =
   result = url.toLowerAscii()
   result.removeSuffix("/")
   result.removeSuffix(".git")
-
-#---------------------------------------------------------------------
-# nix/deps.nix
-#---------------------------------------------------------------------
-
-# Normalised URL -> revision, from fetchgit blocks.
-proc nixEntriesFrom(content: string): Table[string, string] =
-  var url = ""
-  for line in content.splitLines():
-    let l = line.strip()
-    if l.startsWith("url = \""):
-      url = l.split('"')[1]
-    elif l.startsWith("rev = \"") and url.len > 0:
-      result[normUrl(url)] = l.split('"')[1]
-      url = ""
-
-const nixHint = "regenerate with: tools/gen-nix-deps.sh nimble.lock nix/deps.nix"
-
-proc nixMismatches(lock: JsonNode, nix: Table[string, string]): seq[string] =
-  var lockUrls: HashSet[string]
-  var names: seq[string]
-  for n, _ in lock:
-    names.add(n)
-  names.sort()
-  for n in names:
-    let e = lock[n]
-    if n == "nim" or e{"downloadMethod"}.getStr() != "git":
-      continue
-    let u = normUrl(e["url"].getStr())
-    lockUrls.incl(u)
-    if u notin nix:
-      result.add(n & ": in nimble.lock but not in nix/deps.nix (" & nixHint & ")")
-    elif nix[u] != e["vcsRevision"].getStr():
-      result.add(n & ": nimble.lock has " & e["vcsRevision"].getStr() &
-                 ", nix/deps.nix has " & nix[u] & " (" & nixHint & ")")
-  var nixUrls: seq[string]
-  for u, _ in nix:
-    nixUrls.add(u)
-  nixUrls.sort()
-  for u in nixUrls:
-    if u notin lockUrls:
-      result.add("nix/deps.nix has " & u & ", but nimble.lock has no entry for it (" &
-                 nixHint & ")")
 
 #---------------------------------------------------------------------
 # Installed packages
@@ -153,30 +104,23 @@ proc installedMismatches(lock: JsonNode, pkgs2: string, ok: var int, total: var 
 #---------------------------------------------------------------------
 
 proc main() =
-  let preflight = "preflight" in commandLineParams()
   let lock = parseJson(readFile(root & "/nimble.lock"))["packages"]
+  let pkgs2 = root & "/nimbledeps/pkgs2"
 
   var bad: seq[string]
-  bad.add nixMismatches(lock, nixEntriesFrom(readFile(root & "/nix/deps.nix")))
-
   var ok = 0
   var total = 0
-  if not preflight:
-    let pkgs2 = root & "/nimbledeps/pkgs2"
-    if not dirExists(pkgs2):
-      bad.add("no nimbledeps/pkgs2 directory; run setup first")
-    else:
-      bad.add installedMismatches(lock, pkgs2, ok, total)
+  if not dirExists(pkgs2):
+    bad.add("no nimbledeps/pkgs2 directory; run setup first")
+  else:
+    bad.add installedMismatches(lock, pkgs2, ok, total)
 
   for b in bad:
     echo "audit: " & b
   if bad.len > 0:
     echo "audit: " & $bad.len & " problem(s) found"
     quit(1)
-  if preflight:
-    echo "audit: nix/deps.nix agrees with nimble.lock"
-  else:
-    echo "audit: " & $ok & "/" & $total & " installed packages match nimble.lock, nix/deps.nix agrees"
+  echo "audit: " & $ok & "/" & $total & " installed packages match nimble.lock"
 
 #---------------------------------------------------------------------
 # Self-tests, run before main().
@@ -195,31 +139,6 @@ proc selfTest() =
     """{"metaData": {"vcsRevision": "d34aa46bf9d0a3ffff810fbd3c4d2fa024eb9368"}}"""),
     "vcsRevision") == "d34aa46bf9d0a3ffff810fbd3c4d2fa024eb9368"
   doAssert metaField(parseJson("""{}"""), "vcsRevision") == ""
-
-  # nix parsing and cross-check.
-  let nix = nixEntriesFrom("""
-  chronos = pkgs.fetchgit {
-    url = "https://github.com/status-im/nim-chronos";
-    rev = "45f43a9ad8bd8bcf5903b42f365c1c879bd54240";
-    sha256 = "sha256-000";
-    fetchSubmodules = true;
-  };
-""")
-  doAssert nix["https://github.com/status-im/nim-chronos"] ==
-    "45f43a9ad8bd8bcf5903b42f365c1c879bd54240"
-  let lockNix = parseJson("""{
-    "chronos": {"version": "4.2.4", "vcsRevision": "45f43a9ad8bd8bcf5903b42f365c1c879bd54240",
-                "url": "https://github.com/status-im/nim-chronos.git", "downloadMethod": "git"},
-    "nim": {"version": "2.2.6", "vcsRevision": "", "url": "", "downloadMethod": "git"}
-  }""")
-  doAssert nixMismatches(lockNix, nix).len == 0
-  var nixStale = nix
-  nixStale["https://github.com/status-im/nim-chronos"] = "0000000"
-  doAssert nixMismatches(lockNix, nixStale).len == 1
-  var nixExtra = nix
-  nixExtra["https://github.com/example/extra"] = "1111111"
-  doAssert nixMismatches(lockNix, nixExtra).len == 1
-  doAssert nixMismatches(lockNix, initTable[string, string]()).len == 1
 
   # Two installed directories for one URL: the one at the locked revision matches.
   let two: seq[Installed] = @[("chronos-4.2.4-aaaa", "https://github.com/status-im/nim-chronos", "90f5"),

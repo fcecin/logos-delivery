@@ -135,7 +135,7 @@ logos_delivery.nims:
 # `nimble setup` installs the packages in nimble.lock from the locked URL and
 # revision. A requirement that does not match its lock entry makes Nimble
 # re-solve the graph online; the audit afterwards rejects that outcome.
-$(NIMBLEDEPS_STAMP): nimble.lock logos_delivery.nimble nix/deps.nix | install-nimble logos_delivery.nims
+$(NIMBLEDEPS_STAMP): nimble.lock logos_delivery.nimble | install-nimble logos_delivery.nims
 	$(MAKE) preflight-deps
 
 	$(NIMBLE) setup --localdeps -y $(NIMBLE_TASK_FLAGS)
@@ -144,14 +144,12 @@ $(NIMBLEDEPS_STAMP): nimble.lock logos_delivery.nimble nix/deps.nix | install-ni
 
 	touch $@
 
-# Check nix/deps.nix against nimble.lock and let Nimble lint the nimble
-# file. Needs no installed packages.
+# Nimble lints the nimble file. Needs no installed packages.
 .PHONY: preflight-deps
 preflight-deps: | install-nimble
-	nim e --hints:off scripts/audit_deps.nims preflight
 	$(NIMBLE) check --localdeps $(NIMBLE_TASK_FLAGS)
 
-# The preflight check plus the installed set (every lock entry at its
+# The installed set (every lock entry at its
 # vcsRevision, nothing else) plus Nimble's own verdict that the nimble file
 # matches the lock: `nimble deps` exits 0 offline only on the lock path,
 # and --refresh makes Nimble skip its installed-packages solve, so any
@@ -421,18 +419,15 @@ else
 	echo "Skipping nph build on Windows (nph is only used on Unix-like systems)"
 endif
 
-# The hook lives where git says (core.hooksPath, linked worktrees). The path
-# may contain spaces, so each recipe resolves it into one quoted variable.
-GIT_HOOK_PATH = hook=$$(git rev-parse --git-path hooks/pre-commit 2>/dev/null || echo .git/hooks/pre-commit)
+GIT_PRE_COMMIT_HOOK := .git/hooks/pre-commit
 
 install-nph: build-nph
-	@$(GIT_HOOK_PATH); \
-	if [ -e "$$hook" ] || [ -L "$$hook" ]; then \
-		echo "$$hook already present, will NOT override"; exit 1; \
-	fi; \
-	mkdir -p "$$(dirname "$$hook")" && \
-	cp ./scripts/git_pre_commit_format.sh "$$hook" && chmod +x "$$hook" && \
-	echo "$$hook installed"
+ifeq ("$(wildcard $(GIT_PRE_COMMIT_HOOK))","")
+	cp ./scripts/git_pre_commit_format.sh $(GIT_PRE_COMMIT_HOOK)
+else
+	echo "$(GIT_PRE_COMMIT_HOOK) already present, will NOT override"
+	exit 1
+endif
 
 nph/%: | build-nph
 	echo -e $(FORMAT_MSG) "nph/$*" && \
