@@ -62,7 +62,7 @@ type
     desc: string
 
 proc attachRlnProofAndValidate(
-    rln: Rln, wakuRelay: WakuRelay, pubsubTopic: PubsubTopic, message: WakuMessage
+    rln: RlnEvm, wakuRelay: WakuRelay, pubsubTopic: PubsubTopic, message: WakuMessage
 ): Future[Result[WakuMessage, RlnPublishError]] {.async.} =
   ## Attaches an RLN proof to `message` and validates it via `wakuRelay`.
   ## If the validator rejects it as RLN-invalid (error contains

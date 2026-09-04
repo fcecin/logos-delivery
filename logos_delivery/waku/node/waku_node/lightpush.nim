@@ -124,7 +124,7 @@ proc legacyLightpushPublish*(
 
   let rln =
     if node.rln.isNil():
-      Opt.none(Rln)
+      Opt.none(RlnEvm)
     else:
       Opt.some(node.rln)
   let msgWithProof = (await checkAndGenerateRLNProof(rln, message)).valueOr:
@@ -310,7 +310,7 @@ proc lightpushPublish*(
 
   let rln =
     if node.rln.isNil():
-      Opt.none(Rln)
+      Opt.none(RlnEvm)
     else:
       Opt.some(node.rln)
   let msgWithProof = (await checkAndGenerateRLNProof(rln, message)).valueOr:
