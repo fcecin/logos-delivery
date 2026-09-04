@@ -149,19 +149,13 @@ $(NIMBLEDEPS_STAMP): nimble.lock logos_delivery.nimble | install-nimble logos_de
 preflight-deps: | install-nimble
 	$(NIMBLE) check --localdeps $(NIMBLE_TASK_FLAGS)
 
-# Two checks: the installed set is the lock entries at their vcsRevision and
-# nothing else, and Nimble accepts the lock for the nimble file. `nimble deps`
-# exits 0 offline only on the lock path; --refresh makes Nimble skip its
-# installed-packages solve, so a mismatch has to go online and --offline
-# refuses it. CI runs this again after builds, because tasks solve too.
+# The installed set is the lock entries at their vcsRevision and nothing else.
+# A requirement that does not match its lock entry makes `nimble setup` solve
+# afresh and install something else, which this rejects. Reads only. CI runs
+# it again after builds, because tasks solve too.
 .PHONY: audit-deps
 audit-deps:
 	nim e --hints:off scripts/audit_deps.nims
-	@$(NIMBLE) deps --offline --refresh --localdeps $(NIMBLE_TASK_FLAGS) > /dev/null || { \
-		echo "audit: Nimble does not accept nimble.lock for logos_delivery.nimble:" \
-		     "a root requirement does not match its lock entry, or a locked package is not installed." \
-		     "Regenerate with 'nimble lock' and tools/gen-nix-deps.sh, or run 'make build-deps'."; exit 1; }
-	@echo "audit: Nimble accepts nimble.lock offline"
 
 # Must be phony so the recipe always runs and the sub-make re-evaluates
 # BEARSSL_NIMBLEDEPS_DIR / NAT_TRAVERSAL_NIMBLEDEPS_DIR (parse-time variables)

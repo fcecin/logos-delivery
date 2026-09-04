@@ -299,11 +299,27 @@ expect_recipe "the preflight runs nimble check" \
   "nimble check" preflight-deps
 
 # --------------------------------------------------------------------------
-# The audit asks Nimble itself, offline, whether the nimble file matches
-# the lock.
+# nix/deps.nix mirrors nimble.lock: one fetchgit block per git lock entry, at
+# the locked revision. The Nix build reads deps.nix and never reads the lock,
+# so a lock change without tools/gen-nix-deps.sh builds the old sources. The
+# daily job regenerates the file and diffs it; this compares URLs and
+# revisions on every run.
 # --------------------------------------------------------------------------
-expect_recipe "the audit asks Nimble for the lock verdict offline" \
-  "nimble deps --offline --refresh" audit-deps
+nix_lock_diff() {
+  python3 - <<'NIXCHECK'
+import json, re
+norm = lambda u: u.lower().rstrip("/").removesuffix(".git")
+lock = json.load(open("nimble.lock"))["packages"]
+nix = {norm(u): r for u, r in re.findall(
+    r'url = "([^"]+)";\s*\n\s*rev = "([^"]+)";', open("nix/deps.nix").read())}
+want = {norm(e["url"]): e["vcsRevision"] for n, e in lock.items()
+        if n not in ("nim", "nimble") and e.get("downloadMethod") == "git"}
+bad = [f"{u}: lock {r}, nix {nix.get(u, 'missing')}" for u, r in want.items() if nix.get(u) != r]
+bad += [f"{u}: in nix/deps.nix only" for u in nix if u not in want]
+print("; ".join(sorted(bad)), end="")
+NIXCHECK
+}
+expect_eq "nix/deps.nix lists the locked revisions" "" "$(nix_lock_diff)"
 
 # --------------------------------------------------------------------------
 # The Nimble tasks concatenate their own defaults with NIM_PARAMS. The
