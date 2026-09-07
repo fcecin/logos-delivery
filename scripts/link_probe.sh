@@ -44,7 +44,10 @@ if [ -z "$os" ]; then
 fi
 
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+# Keep the real exit status across the cleanup: bash 3.2 (macOS) otherwise
+# reports the status of the last command in the trap, and a script that dies
+# under set -u would count as a pass.
+trap 'rc=$?; rm -rf "$work"; exit $rc' EXIT
 printf 'int main(void) { return 0; }\n' > "$work/probe.c"
 out="$work/probe"
 [ "$os" = windows ] && out="$work/probe.exe"
@@ -78,8 +81,10 @@ case "$mode" in
           done < <(nm -u "$artifact" 2>/dev/null | awk '{print $NF}' | sort -u | grep -E "$PROBE_ALLOW" || true)
           echo "link_probe: allowing ${#allow[@]} unresolved symbols matching $PROBE_ALLOW"
         fi
+        # ${allow[@]+"${allow[@]}"}: an empty array is "unbound" to bash 3.2,
+        # which is what macOS runners execute this with.
         set -- "$cc_cmd" $flags -o "$out" "$work/probe.c" \
-          -Wl,-force_load,"$artifact" "$@" "${allow[@]}" \
+          -Wl,-force_load,"$artifact" "$@" ${allow[@]+"${allow[@]}"} \
           -lc++ -lsqlite3 -lz -lresolv \
           -framework Security -framework CoreFoundation -framework SystemConfiguration ;;
       windows)
