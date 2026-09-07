@@ -44,6 +44,7 @@ jobs:
           - 'flake.nix'
           - 'flake.lock'
           - 'library/**'
+          - 'examples/**'
           v2:
           - 'logos_delivery/**'
           - 'apps/**'
@@ -98,6 +99,11 @@ jobs:
         # job, which already forces -j1.
         run: make V=1 -j1 all
 
+      - name: Link a probe against liblogosdelivery
+        run: |
+          ext=so; [ "$RUNNER_OS" = macOS ] && ext=dylib
+          scripts/link_probe.sh shared build/liblogosdelivery.$ext
+
       - name: Build FFI examples
         run: make V=1 -j1 ffi-examples
 
@@ -114,6 +120,58 @@ jobs:
           name: liblogosdelivery
           path: build/liblogosdelivery.so
           retention-days: 1
+
+  # Every other job builds the portable path: the workflow-level NIMFLAGS carry
+  # -d:disableMarchNative, and config.nims treats that path separately from the
+  # one a developer gets from a plain `make liblogosdelivery` (-march=native on
+  # x86, -mcpu=apple-m1 on Apple silicon). This job builds that developer path.
+  # Nothing runs: a native build proves compile and link on this runner's CPU,
+  # nothing about runtime. A probe then links against the shared and the static
+  # library, so unresolved symbols fail here and not on a consumer's machine.
+  # Windows already builds without the define in windows-build.yml.
+  liblogosdelivery-native:
+    needs: changes
+    if: ${{ needs.changes.outputs.v2 == 'true' || needs.changes.outputs.common == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      NIMFLAGS: "--parallelBuild:${NPROC} --colors:off -d:chronicles_colors:none"
+
+    name: liblogosdelivery developer build (native arch) - ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Nim ${{ env.NIM_VERSION }}
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ env.NIM_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install nimble deps
+        uses: ./.github/actions/nimble-deps
+        with:
+          nim-version: ${{ env.NIM_VERSION }}
+
+      - name: Build the shared library with the developer flags
+        run: make V=1 -j1 liblogosdelivery
+
+      - name: Link a probe against the shared library
+        run: |
+          ext=so; [ "$RUNNER_OS" = macOS ] && ext=dylib
+          scripts/link_probe.sh shared build/liblogosdelivery.$ext
+
+      - name: Build the static library with the developer flags
+        run: make V=1 -j1 liblogosdelivery STATIC=1
+
+      # librln is the one archive a consumer supplies itself, so it goes on the
+      # probe's link line; everything else must already be inside the .a.
+      - name: Link a probe against the static library
+        run: scripts/link_probe.sh static build/liblogosdelivery.a librln_v2.0.2.a
 
   build-windows:
     needs: changes
@@ -171,6 +229,20 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: make V=1 -j1 liblogosdelivery-android-${{ matrix.target }}
 
+      # lld checks a shared library's unresolved symbols only when every library
+      # it needs is on the link line, hence librln and the NDK's own libs.
+      - name: Link a probe against the Android library
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          case "${{ matrix.target }}" in
+            arm64) abi=arm64-v8a;   triple=aarch64-linux-android ;;
+            amd64) abi=x86_64;      triple=x86_64-linux-android ;;
+            x86)   abi=x86;         triple=i686-linux-android ;;
+            arm)   abi=armeabi-v7a; triple=armv7a-linux-androideabi ;;
+          esac
+          PROBE_CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${triple}30-clang"             scripts/link_probe.sh shared build/android/$abi/liblogosdelivery.so -lrln -llog -ldl -lm
+
       - name: Audit installed deps
         run: make audit-deps
 
@@ -212,6 +284,15 @@ jobs:
       - name: Build liblogosdelivery for ios-${{ matrix.sdk }}
         # -j1: see the build job.
         run: make V=1 -j1 liblogosdelivery-ios-${{ matrix.sdk }}
+
+      # Force-loads the whole archive with the iOS toolchain, the way an app
+      # links it. librln symbols are the consumer's to supply, so they are the
+      # only unresolved ones allowed.
+      - name: Link a probe against the iOS library
+        run: |
+          sdk=iphoneos; minflag=-mios-version-min=18.0
+          if [ "${{ matrix.sdk }}" = simulator ]; then sdk=iphonesimulator; minflag=-mios-simulator-version-min=18.0; fi
+          PROBE_CC="xcrun -sdk $sdk clang"           PROBE_FLAGS="-arch arm64 -isysroot $(xcrun --sdk $sdk --show-sdk-path) $minflag"           PROBE_ALLOW='^_ffi_'             scripts/link_probe.sh static build/ios/$sdk-arm64/liblogosdelivery.a
 
       - name: Audit installed deps
         run: make audit-deps

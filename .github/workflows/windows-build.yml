@@ -115,6 +115,11 @@ jobs:
         export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
         make liblogosdelivery STATIC=0 V=1 -j
 
+    - name: Link a probe against liblogosdelivery.dll
+      run: |
+        export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+        PROBE_OS=windows PROBE_CC=gcc scripts/link_probe.sh shared build/liblogosdelivery.dll
+
     - name: Audit installed deps
       run: |
         export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$PATH"
