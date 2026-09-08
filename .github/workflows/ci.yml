@@ -178,6 +178,27 @@ jobs:
       - name: Link a consumer against the static library
         run: PROBE_CONSUMER=library scripts/link_probe.sh static build/liblogosdelivery.a librln_v2.0.2.a
 
+  build-windows:
+    needs: changes
+    if: ${{ needs.changes.outputs.v2 == 'true' || needs.changes.outputs.common == 'true' }}
+    uses: ./.github/workflows/windows-build.yml
+    with:
+      branch: ${{ github.ref }}
+
+  build-android:
+    needs: changes
+    if: ${{ needs.changes.outputs.v2 == 'true' || needs.changes.outputs.common == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # arm64 only: amd64 is blocked by a nim-lsquic android type mismatch,
+        # 32-bit ABIs by int overflows in nim-brokers and waku_store_sync.
+        target: [arm64]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    name: build-android-${{ matrix.target }}
+    steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
