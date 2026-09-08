@@ -31,7 +31,8 @@ usage() { sed -n '2,25p' "$0" >&2; exit 2; }
 mode=$1; artifact=$2; shift 2
 [ -f "$artifact" ] || { echo "link_probe: no such file: $artifact" >&2; exit 2; }
 
-cc_cmd=${PROBE_CC:-cc}
+# PROBE_CC may be several words ("xcrun -sdk iphoneos clang"); split it.
+read -r -a cc_cmd <<< "${PROBE_CC:-cc}"
 flags=${PROBE_FLAGS:-}
 os=${PROBE_OS:-}
 if [ -z "$os" ]; then
@@ -61,16 +62,16 @@ case "$mode" in
     name=${base#lib}; name=${name%%.so*}; name=${name%.dylib}; name=${name%.dll}
     case "$os" in
       linux)
-        set -- "$cc_cmd" $flags -o "$out" "$work/probe.c" \
+        set -- "${cc_cmd[@]}" $flags -o "$out" "$work/probe.c" \
           -L"$dir" -Wl,-rpath-link,"$dir" -Wl,--no-as-needed -l"$name" \
           -Wl,--no-allow-shlib-undefined "$@" ;;
       darwin|windows)
-        set -- "$cc_cmd" $flags -o "$out" "$work/probe.c" -L"$dir" -l"$name" "$@" ;;
+        set -- "${cc_cmd[@]}" $flags -o "$out" "$work/probe.c" -L"$dir" -l"$name" "$@" ;;
     esac ;;
   static)
     case "$os" in
       linux)
-        set -- "$cc_cmd" $flags -o "$out" "$work/probe.c" \
+        set -- "${cc_cmd[@]}" $flags -o "$out" "$work/probe.c" \
           -Wl,--whole-archive "$artifact" -Wl,--no-whole-archive "$@" \
           -lstdc++ -fopenmp -lpthread -ldl -lm -lrt ;;
       darwin)
@@ -83,12 +84,12 @@ case "$mode" in
         fi
         # ${allow[@]+"${allow[@]}"}: an empty array is "unbound" to bash 3.2,
         # which is what macOS runners execute this with.
-        set -- "$cc_cmd" $flags -o "$out" "$work/probe.c" \
+        set -- "${cc_cmd[@]}" $flags -o "$out" "$work/probe.c" \
           -Wl,-force_load,"$artifact" "$@" ${allow[@]+"${allow[@]}"} \
           -lc++ -lsqlite3 -lz -lresolv \
           -framework Security -framework CoreFoundation -framework SystemConfiguration ;;
       windows)
-        set -- "$cc_cmd" $flags -o "$out" "$work/probe.c" \
+        set -- "${cc_cmd[@]}" $flags -o "$out" "$work/probe.c" \
           -Wl,--whole-archive "$artifact" -Wl,--no-whole-archive "$@" \
           -lstdc++ -lws2_32 -liphlpapi -lbcrypt -lpthread ;;
     esac ;;
@@ -99,6 +100,6 @@ echo "link_probe: $*"
 if "$@"; then
   echo "link_probe: OK, $mode $base links"
 else
-  echo "link_probe: FAILED, $mode $base leaves symbols unresolved (see the linker output above)" >&2
+  echo "link_probe: FAILED, the probe link against $mode $base did not succeed (see the output above)" >&2
   exit 1
 fi
