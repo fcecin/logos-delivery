@@ -99,10 +99,10 @@ jobs:
         # job, which already forces -j1.
         run: make V=1 -j1 all
 
-      - name: Link a probe against liblogosdelivery
+      - name: Link a consumer against liblogosdelivery
         run: |
           ext=so; [ "$RUNNER_OS" = macOS ] && ext=dylib
-          scripts/link_probe.sh shared build/liblogosdelivery.$ext
+          PROBE_CONSUMER=library scripts/link_probe.sh shared build/liblogosdelivery.$ext
 
       - name: Build FFI examples
         run: make V=1 -j1 ffi-examples
@@ -157,43 +157,27 @@ jobs:
         with:
           nim-version: ${{ env.NIM_VERSION }}
 
+      # The probe's own controls: it must reject the broken fixtures on this
+      # runner's toolchain before its verdict on the real library means anything.
+      - name: Probe self-test
+        run: scripts/link_probe_selftest.sh
+
       - name: Build the shared library with the developer flags
         run: make V=1 -j1 liblogosdelivery
 
-      - name: Link a probe against the shared library
+      - name: Link a consumer against the shared library
         run: |
           ext=so; [ "$RUNNER_OS" = macOS ] && ext=dylib
-          scripts/link_probe.sh shared build/liblogosdelivery.$ext
+          PROBE_CONSUMER=library scripts/link_probe.sh shared build/liblogosdelivery.$ext
 
       - name: Build the static library with the developer flags
         run: make V=1 -j1 liblogosdelivery STATIC=1
 
       # librln is the one archive a consumer supplies itself, so it goes on the
       # probe's link line; everything else must already be inside the .a.
-      - name: Link a probe against the static library
-        run: scripts/link_probe.sh static build/liblogosdelivery.a librln_v2.0.2.a
+      - name: Link a consumer against the static library
+        run: PROBE_CONSUMER=library scripts/link_probe.sh static build/liblogosdelivery.a librln_v2.0.2.a
 
-  build-windows:
-    needs: changes
-    if: ${{ needs.changes.outputs.v2 == 'true' || needs.changes.outputs.common == 'true' }}
-    uses: ./.github/workflows/windows-build.yml
-    with:
-      branch: ${{ github.ref }}
-
-  build-android:
-    needs: changes
-    if: ${{ needs.changes.outputs.v2 == 'true' || needs.changes.outputs.common == 'true' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        # arm64 only: amd64 is blocked by a nim-lsquic android type mismatch,
-        # 32-bit ABIs by int overflows in nim-brokers and waku_store_sync.
-        target: [arm64]
-    runs-on: ubuntu-22.04
-    timeout-minutes: 60
-
-    name: build-android-${{ matrix.target }}
-    steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -229,9 +213,11 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: make V=1 -j1 liblogosdelivery-android-${{ matrix.target }}
 
-      # lld checks a shared library's unresolved symbols only when every library
-      # it needs is on the link line, hence librln and the NDK's own libs.
-      - name: Link a probe against the Android library
+      # The probe resolves every DT_NEEDED entry of the .so (librln next to it,
+      # the rest from the NDK sysroot) and links them explicitly, because lld
+      # checks a shared object's unresolved symbols only when all of its
+      # needed libraries are inputs. Its self-test runs with the same clang.
+      - name: Probe self-test and link a consumer against the Android library
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
@@ -241,7 +227,10 @@ jobs:
             x86)   abi=x86;         triple=i686-linux-android ;;
             arm)   abi=armeabi-v7a; triple=armv7a-linux-androideabi ;;
           esac
-          PROBE_CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${triple}30-clang"             scripts/link_probe.sh shared build/android/$abi/liblogosdelivery.so -lrln -llog -ldl -lm
+          bin=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
+          export PROBE_CC="$bin/${triple}30-clang" PROBE_READELF="$bin/llvm-readelf" PROBE_OS=linux
+          scripts/link_probe_selftest.sh
+          PROBE_CONSUMER=library scripts/link_probe.sh shared build/android/$abi/liblogosdelivery.so
 
       - name: Audit installed deps
         run: make audit-deps
@@ -286,13 +275,17 @@ jobs:
         run: make V=1 -j1 liblogosdelivery-ios-${{ matrix.sdk }}
 
       # Force-loads the whole archive with the iOS toolchain, the way an app
-      # links it. librln symbols are the consumer's to supply, so they are the
-      # only unresolved ones allowed.
-      - name: Link a probe against the iOS library
+      # links it. The librln exports a consumer supplies itself are the only
+      # unresolved symbols allowed (scripts/link_probe_rln_exports.txt). The
+      # probe's self-test runs with the same toolchain first.
+      - name: Probe self-test and link a consumer against the iOS library
         run: |
           sdk=iphoneos; minflag=-mios-version-min=18.0
           if [ "${{ matrix.sdk }}" = simulator ]; then sdk=iphonesimulator; minflag=-mios-simulator-version-min=18.0; fi
-          PROBE_CC="xcrun -sdk $sdk clang"           PROBE_FLAGS="-arch arm64 -isysroot $(xcrun --sdk $sdk --show-sdk-path) $minflag"           PROBE_ALLOW='^_ffi_'             scripts/link_probe.sh static build/ios/$sdk-arm64/liblogosdelivery.a
+          export PROBE_CC="xcrun -sdk $sdk clang" PROBE_OS=darwin
+          export PROBE_FLAGS="-arch arm64 -isysroot $(xcrun --sdk $sdk --show-sdk-path) $minflag"
+          scripts/link_probe_selftest.sh
+          PROBE_ALLOW_FILE=scripts/link_probe_rln_exports.txt PROBE_CONSUMER=library scripts/link_probe.sh static build/ios/$sdk-arm64/liblogosdelivery.a
 
       - name: Audit installed deps
         run: make audit-deps
