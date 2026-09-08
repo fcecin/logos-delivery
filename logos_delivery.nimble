@@ -139,6 +139,48 @@ const cBindingsFlags =
   " -d:ffiGenBindings -d:targetLang=c -d:ffiOutputDir=" & cBindingsDir &
   " -d:ffiSrcPath=../liblogosdelivery.nim "
 
+const leopardManifestDefine = "leopardArchiveManifest"
+  ## Compile-time channel from the library build to packaging: the build writes
+  ## the effective Leopard-RS archive path into the file this define names
+  ## (logos_delivery/channels/segmentation/leopard_build_stamp.nim), and the
+  ## static tasks below read it back. The path follows whatever nimcache and
+  ## defines the compile actually used, so packaging never guesses.
+
+proc leopardManifestFor(output: string): string =
+  return output & ".leopard-archive"
+
+proc leopardArchiveFrom(manifest: string): string =
+  if not fileExists(manifest):
+    quit "Leopard-RS archive manifest not written by the build: " & manifest
+  let path = readFile(manifest).strip()
+  if path.len == 0 or not fileExists(path):
+    quit "Leopard-RS archive named by " & manifest & " does not exist: " & path
+  return path
+
+proc mergeArchives(output, archive, extra: string) =
+  ## Flatten `extra`'s members into `archive`, writing `output` first and
+  ## replacing `archive` only on success. `ar -M` (MRI) on GNU/LLVM ar,
+  ## `libtool -static` on Apple. MRI parses file names itself, so paths with
+  ## spaces are refused rather than mangled.
+  when defined(macosx):
+    exec "libtool -static -o " & quoteShell(output) & " " & quoteShell(archive) & " " &
+      quoteShell(extra)
+  else:
+    for p in [output, archive, extra]:
+      if ' ' in p:
+        quit "archive paths with spaces are not supported by the ar -M merge: " & p
+    let script = "create " & output & "\naddlib " & archive & "\naddlib " & extra &
+      "\nsave\nend\n"
+    exec "printf '" & script & "' | ar -M"
+  mvFile(output, archive)
+
+proc mergeLeopardInto(archive: string) =
+  ## --app:staticlib archives Nim's own objects and ignores {.passL.}, the one
+  ## route nim-leopard uses to link Leopard-RS. Merge that archive in, so the
+  ## static library resolves its own leo_* symbols like the shared one does.
+  let leopard = leopardArchiveFrom(leopardManifestFor(archive))
+  mergeArchives(archive & ".merged", archive, leopard)
+
 proc buildLibrary(lib_name: string, srcDir = "./", params = "", `type` = "static", srcFile = "liblogosdelivery.nim", mainPrefix = "liblogosdelivery") =
   if not dirExists "build":
     mkDir "build"
@@ -147,6 +189,7 @@ proc buildLibrary(lib_name: string, srcDir = "./", params = "", `type` = "static
   if `type` == "static":
     exec "nim c" & " --out:build/" & lib_name &
       " --threads:on --app:staticlib --opt:speed --noMain --mm:refc --header -d:metrics --nimMainPrefix:" & mainPrefix & " --skipParentCfg:off -d:discv5_protocol_id=d5waku " &
+      " -d:" & leopardManifestDefine & "=" & leopardManifestFor("build/" & lib_name) & " " &
       cBindingsFlags & getMyCPU() & " " & params & getNimParams() & " " & srcDir & "/" & srcFile
   else:
     exec "nim c" & " --out:build/" & lib_name &
@@ -159,8 +202,10 @@ proc buildLibDynamicWindows(libName: string, folderName: string) =
     "dynamic", libName & ".nim", libname
 
 proc buildLibDynamicLinux(libName: string, folderName: string) =
+  # -z defs: an unresolved symbol in the library's own objects fails this link
+  # instead of the first consumer's dlopen.
   buildLibrary libName & ".so", folderName,
-    """-d:chronicles_line_numbers --warning:Deprecated:off --warning:UnusedImport:on -d:chronicles_log_level=TRACE """,
+    """-d:chronicles_line_numbers --warning:Deprecated:off --warning:UnusedImport:on -d:chronicles_log_level=TRACE --passL:-Wl,-z,defs """,
     "dynamic", libName & ".nim", libname
 
 proc buildLibDynamicMac(libName: string, folderName: string) =
@@ -184,6 +229,7 @@ proc buildLibStaticLinux(libName: string, folderName: string) =
   buildLibrary libName & ".a", folderName,
     """-d:chronicles_line_numbers --warning:Deprecated:off --warning:UnusedImport:on -d:chronicles_log_level=TRACE """,
     "static", libName & ".nim", libname
+  mergeLeopardInto("build/" & libName & ".a")
 
 proc buildLibStaticMac(libName: string, folderName: string) =
   let sdkPath = staticExec("xcrun --show-sdk-path").strip()
@@ -196,6 +242,7 @@ proc buildLibStaticMac(libName: string, folderName: string) =
   buildLibrary libName & ".a", folderName,
     archFlags & " -d:chronicles_line_numbers --warning:Deprecated:off --warning:UnusedImport:on -d:chronicles_log_level=TRACE",
     "static", libName & ".nim", libname
+  mergeLeopardInto("build/" & libName & ".a")
 
 ### Mobile Android
 
@@ -209,7 +256,7 @@ proc buildMobileAndroid(srcDir = ".", params = "") =
 
   exec "nim c" & " --out:" & outDir &
     "/liblogosdelivery.so --threads:on --app:lib --opt:speed --noMain --mm:refc -d:chronicles_sinks=textlines[dynamic] --header -d:chronosEventEngine=epoll -d:discv5_protocol_id=d5waku --passL:-L" &
-    outdir & " --passL:-lrln --passL:-llog --cpu:" & cpu & " --nimMainPrefix:liblogosdelivery --os:android -d:androidNDK " & params &
+    outdir & " --passL:-lrln --passL:-llog --passL:-Wl,-z,defs --cpu:" & cpu & " --nimMainPrefix:liblogosdelivery --os:android -d:androidNDK " & params &
     getNimParams() & " " & srcDir & "/liblogosdelivery.nim"
 
 task libLogosDeliveryAndroid, "Build the mobile bindings for Android":
@@ -269,6 +316,7 @@ proc buildMobileIOS(srcDir = ".", params = "") =
       " --threads:on --opt:size --header" &
       " -d:metrics -d:discv5_protocol_id=d5waku" &
       " --nimMainPrefix:liblogosdelivery --skipParentCfg:off" &
+      " -d:" & leopardManifestDefine & "=" & leopardManifestFor(nimLib) &
       " --cc:clang" &
       " --passC:\"" & targetFlags & "\" --passL:\"" & targetFlags & "\"" &
       " " & params & getNimParams() &
@@ -318,6 +366,10 @@ proc buildMobileIOS(srcDir = ".", params = "") =
 
   echo "Creating static library..."
   var inputs = @[nimLib]
+  # nim-leopard links Leopard-RS through {.passL.}, which --app:staticlib
+  # ignores, so its archive joins the libtool inputs like the nat objects
+  # above. The build wrote its path into the manifest.
+  inputs.add(leopardArchiveFrom(leopardManifestFor(nimLib)))
   for kind, path in walkDir(vendorObjDir):
     if kind == pcFile and path.endsWith(".o"):
       inputs.add(path)

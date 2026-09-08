@@ -23,78 +23,88 @@ if defined(windows):
 
 # Leopard-RS is built by nim-leopard, which shells out to cmake from a `static:`
 # block outside Nim's flag plumbing: nothing passed with --passC/--cpu/--os
-# reaches Leopard-RS' compiler, so every knob it has -- all strdefines -- has to
-# be assembled here.
+# reaches Leopard-RS' compiler, so every knob it has -- all strdefines -- is
+# assembled here. Common flags first, then one exclusive branch per target;
+# iOS comes before the portable branch because Nim defines `macosx` for
+# --os:ios and CI passes -d:disableMarchNative to the iOS job as well.
 #
-# nim-leopard also skips cmake entirely when its archive is already in nimcache,
-# and nimcache is not keyed by defines: a tree first built with other flags keeps
-# the old archive. Use -d:LeopardRebuild or wipe nimcache when switching.
+# The archive lands in <nimcache>/vendor_leopard. nim-leopard skips cmake when
+# it exists; logos_delivery/channels/segmentation/leopard_build_guard.nim
+# removes it when the settings below (or the toolchain) change.
+proc quoted(arg: string): string =
+  "\"" & arg & "\""
+
+proc requireEnv(name: string): string =
+  result = getEnv(name)
+  if result.len == 0:
+    raise newException(ValueError, name & " must be set for this cross build")
+
+var leopardCmake = @["-DCMAKE_BUILD_TYPE=Release"]
+# Every consumer of the archive on ELF is liblogosdelivery.so; Mach-O is
+# position-independent already and PE ignores the option.
+leopardCmake.add("-DCMAKE_POSITION_INDEPENDENT_CODE=ON")
+if defined(windows):
+  leopardCmake.add("-GMSYS Makefiles")
+if defined(macosx):
+  leopardCmake.add("-DENABLE_OPENMP=off")
+
 if defined(android):
-  # cmake runs on the build host, so left alone it hands Leopard-RS the host's
-  # x86-64 compiler and produces an archive that cannot link into the target
-  # .so. Point it at the same NDK clang this file gives Nim, and define ANDROID
-  # so Leopard-RS takes its LEO_TARGET_MOBILE path instead of including
-  # <tmmintrin.h>. -march=native must stay off even here: the x86_64 ABI's NDK
-  # clang accepts it, and would then tune for the build machine.
-  let ndkClang = getEnv("ANDROID_TOOLCHAIN_DIR") & "/bin/" & getEnv("ANDROID_COMPILER")
-  switch(
-    "define",
-    "LeopardCmakeFlags=-DCMAKE_BUILD_TYPE=Release -DENABLE_OPENMP=off" &
-      " -DCMAKE_POSITION_INDEPENDENT_CODE=ON" &
-      " -DCOMPILER_SUPPORTS_MARCH_NATIVE=FALSE -DCMAKE_SYSTEM_NAME=Linux" &
-      " -DCMAKE_C_COMPILER=" & ndkClang & " -DCMAKE_CXX_COMPILER=" & ndkClang &
-      "++ -DCMAKE_CXX_FLAGS=-DANDROID",
-  )
+  # cmake runs on the build host; point it at the NDK clang this file gives
+  # Nim, and define ANDROID so Leopard-RS takes its LEO_TARGET_MOBILE path
+  # instead of including <tmmintrin.h>. -march=native stays off: the x86_64
+  # NDK clang accepts it and would tune for the build machine.
+  let ndkClang = requireEnv("ANDROID_TOOLCHAIN_DIR") & "/bin/" & requireEnv("ANDROID_COMPILER")
+  leopardCmake.add([
+    "-DENABLE_OPENMP=off", "-DCOMPILER_SUPPORTS_MARCH_NATIVE=FALSE",
+    "-DCMAKE_SYSTEM_NAME=Linux", "-DCMAKE_C_COMPILER=" & ndkClang,
+    "-DCMAKE_CXX_COMPILER=" & ndkClang & "++", "-DCMAKE_CXX_FLAGS=-DANDROID",
+  ])
   # nim-leopard's non-macOS defaults add -fopenmp, and the NDK resolves its
-  # -lomp to a shared libomp.so that every consumer of our .so would then have
-  # to ship. Leopard is built without OpenMP above, so drop it on this side too.
+  # -lomp to a shared libomp.so that every consumer of our .so would have to
+  # ship. Leopard is built without OpenMP above, so drop it on this side too.
   switch("define", "LeopardExtraCompilerFlags=-fno-openmp")
   switch("define", "LeopardExtraLinkerFlags=-fno-openmp")
-  # Leopard-RS is C++ and allocates its tables with `new[]`. Everywhere else Nim
-  # notices the mixed-mode build and links through the C++ driver, which brings
-  # the runtime in by itself; here the android section below pins
+  # Leopard-RS is C++ and allocates with `new[]`. Elsewhere Nim links through
+  # the C++ driver, which brings the runtime; the android section below pins
   # clang.linkerexe to the NDK's C driver, which does not. Name libc++
-  # explicitly, and take the static one so the .so stays self-contained -- a
-  # -shared link does not fail on the missing symbols, it just defers them to
-  # dlopen on the device.
+  # explicitly, static, so the .so stays self-contained: a -shared link does
+  # not fail on the missing symbols, it defers them to dlopen on the device.
   switch("passL", "-lc++_static")
   switch("passL", "-lc++abi")
+elif defined(ios):
+  # Cross build: give cmake the SDK, architecture and deployment target the
+  # nimble task exports, or it compiles Leopard-RS with the host compiler.
+  leopardCmake.add([
+    "-DCOMPILER_SUPPORTS_MARCH_NATIVE=FALSE", "-DCMAKE_SYSTEM_NAME=iOS",
+    "-DCMAKE_OSX_SYSROOT=" & requireEnv("IOS_SDK_PATH"),
+    "-DCMAKE_OSX_ARCHITECTURES=" & requireEnv("IOS_ARCH"),
+    "-DCMAKE_OSX_DEPLOYMENT_TARGET=" & getEnv("IOS_DEPLOYMENT_TARGET", "18.0"),
+  ])
 elif defined(disableMarchNative):
-  # Leopard-RS' CMakeLists adds -march=native whenever the compiler accepts it.
-  # Seed the cache variable guarding that probe so a portable build stays
-  # portable -- and hand leopard the same x86 baseline this file gives the C
-  # compiler below, because Leopard-RS includes <tmmintrin.h> unconditionally and
-  # its SSSE3 intrinsics (_mm_shuffle_epi8) do not compile without an enabling
-  # flag. Its AVX2 paths are gated on __AVX2__, so they drop out on their own.
-  var leopardCxxFlags = ""
+  # Portable build: seed the cache variable guarding Leopard-RS' -march=native
+  # probe, and hand it the same x86 baseline this file gives the C compiler
+  # below. Leopard-RS includes <tmmintrin.h> unconditionally and its SSSE3
+  # intrinsics do not compile without an enabling flag; its AVX2 paths are
+  # gated on __AVX2__ and drop out on their own.
+  leopardCmake.add("-DCOMPILER_SUPPORTS_MARCH_NATIVE=FALSE")
   if defined(i386) or defined(amd64):
     if defined(macosx):
-      leopardCxxFlags = " -DCMAKE_CXX_FLAGS=-march=haswell"
+      leopardCmake.add("-DCMAKE_CXX_FLAGS=-march=haswell")
     elif defined(marchOptimized):
-      leopardCxxFlags = " -DCMAKE_CXX_FLAGS=-march=x86-64-v2"
+      leopardCmake.add("-DCMAKE_CXX_FLAGS=-march=x86-64-v2")
     else:
-      leopardCxxFlags = " -DCMAKE_CXX_FLAGS=-mssse3"
+      leopardCmake.add("-DCMAKE_CXX_FLAGS=-mssse3")
+else:
+  # Native developer build: Leopard-RS keeps its own -march=native probe,
+  # matching the -march=native this file gives the C compiler below.
+  discard
 
-  # Mirrors nim-leopard's own per-platform default, less -march=native.
-  let leopardCmakeBase =
-    if defined(macosx):
-      "-DCMAKE_BUILD_TYPE=Release -DENABLE_OPENMP=off"
-    elif defined(windows):
-      "-G\"MSYS Makefiles\" -DCMAKE_BUILD_TYPE=Release"
-    else:
-      "-DCMAKE_BUILD_TYPE=Release"
-
-  # -fPIC: Leopard-RS builds a static archive, and on ELF that archive also has
-  # to go into liblogosdelivery.so. Only the shared-library target needs it, and
-  # config.nims cannot tell which target is being built, so ask for it always --
-  # elsewhere it is already the default (Mach-O, the NDK, nixpkgs' hardening),
-  # which is why a non-PIC archive got this far unnoticed.
-  switch(
-    "define",
-    "LeopardCmakeFlags=" & leopardCmakeBase &
-      " -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCOMPILER_SUPPORTS_MARCH_NATIVE=FALSE" &
-      leopardCxxFlags,
-  )
+var leopardCmakeFlags = ""
+for arg in leopardCmake:
+  if leopardCmakeFlags.len > 0:
+    leopardCmakeFlags.add(" ")
+  leopardCmakeFlags.add(quoted(arg))
+switch("define", "LeopardCmakeFlags=" & leopardCmakeFlags)
 
 # https://github.com/status-im/nimbus-eth2/blob/stable/docs/cpu_features.md#ssse3-supplemental-sse3
 # suggests that SHA256 hashing with SSSE3 is 20% faster than without SSSE3, so

@@ -151,7 +151,10 @@ pkgs.stdenv.mkDerivation {
         "--noMain"
         "--header"
         "--nimMainPrefix:liblogosdelivery"
-      ] ++ cBindingsArgs;
+      ] ++ cBindingsArgs
+        # -z defs: an unresolved symbol in the library's own objects fails this
+        # link instead of the first consumer's dlopen.
+        ++ pkgs.lib.optional pkgs.stdenv.isLinux "--passL:-Wl,-z,defs";
     }}
 
     echo "== Building liblogosdelivery (static) =="
@@ -165,6 +168,19 @@ pkgs.stdenv.mkDerivation {
         "--nimMainPrefix:liblogosdelivery"
       ];
     }}
+
+    # --app:staticlib ignores {.passL.}, the route nim-leopard uses to link the
+    # Leopard-RS archive it built into $NIMCACHE. Merge it in, so the static
+    # library resolves its own leo_* symbols like the shared one does.
+    echo "== Merging Leopard-RS into liblogosdelivery.a =="
+    ${if pkgs.stdenv.isDarwin then ''
+    libtool -static -o build/liblogosdelivery.merged.a \
+      build/liblogosdelivery.a $NIMCACHE/vendor_leopard/liblibleopard.a
+    '' else ''
+    printf 'create build/liblogosdelivery.merged.a\naddlib build/liblogosdelivery.a\naddlib %s\nsave\nend\n' \
+      "$NIMCACHE/vendor_leopard/liblibleopard.a" | ar -M
+    ''}
+    mv build/liblogosdelivery.merged.a build/liblogosdelivery.a
     ''}
   '';
 

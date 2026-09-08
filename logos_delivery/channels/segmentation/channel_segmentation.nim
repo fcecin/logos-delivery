@@ -2,7 +2,11 @@
 
 import chronicles, chronos, stew/byteutils
 import brokers/broker_context
+# Before `segmentation`: drops a Leopard-RS archive built with other settings.
+import ./leopard_build_guard
 import segmentation
+# After it: records this build's settings and the archive path for packaging.
+import ./leopard_build_stamp
 
 import logos_delivery/api/conf/channels_conf
 import logos_delivery/api/events/reliable_channel_manager_events
