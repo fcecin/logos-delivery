@@ -198,12 +198,13 @@ NIM_PARAMS := $(NIM_PARAMS) -d:heaptracker
 endif
 endif
 
-# CPU baseline. The default is the portable build (see config.nims);
-# MARCH_NATIVE=1 selects the native flags instead.
-MARCH_NATIVE ?= 0
-ifeq ($(MARCH_NATIVE), 1)
-NIM_PARAMS := $(NIM_PARAMS) -d:marchNative
-endif
+# TODO: native builds are unsupported until nim-leopard builds Leopard-RS through
+# Nim; its cmake step ignores Nim's flags and the native .so does not link.
+# CPU baseline. The default is the portable build (see config.nims).
+# MARCH_NATIVE ?= 0
+# ifeq ($(MARCH_NATIVE), 1)
+# NIM_PARAMS := $(NIM_PARAMS) -d:marchNative
+# endif
 
 # Debug/Release mode
 ifeq ($(DEBUG), 0)
