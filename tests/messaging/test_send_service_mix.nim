@@ -20,10 +20,11 @@ import
     [send_service, send_processor, mix_processor, delivery_task]
 import ../testlib/[testasync, wakucore, wakunodeconf]
 
-## Tests for the anonymity levels of the send path. The mix processor keeps the
-## task for the mix window. Only a `Preferred` chain gives the task to the relay
-## and lightpush processors. The node in these tests has no mix mounted, so mix
-## cannot deliver.
+## Tests for the anonymity levels of the send path. The node in these tests has
+## no mix mounted, so `mixReady()` is false: the mix processor decides on the
+## level at once instead of holding the task. `Preferred` hands it to the relay
+## and lightpush processors; `Required` has no second path and fails it. The
+## mix window bounds failing mix attempts, so it is exercised on its own.
 
 type PlainSendProcessor = ref object of BaseSendProcessor
   calls: int
@@ -65,21 +66,28 @@ suite "SendService - anonymity level":
       firstAdmittedTime: Opt.some(Moment.now() - admittedAgo),
     )
 
-  asyncTest "a Required task keeps waiting for mix instead of using the plain path":
+  asyncTest "a Required task fails at once when mix cannot deliver":
+    ## There is no next option for `Required`, so the task ends with a reason
+    ## the application can read, instead of retrying quietly until it ages out.
     let plain = PlainSendProcessor()
     let mix = MixSendProcessor.new(
       waku, waku.brokerCtx, AnonymityLevel.Required, chronos.minutes(1)
     )
     mix.chain(plain)
 
-    let task = buildTask("required", chronos.minutes(10))
+    let task = buildTask("required", chronos.seconds(5))
+    check not mix.mixWindowElapsed(task) # `Required` has no window to spend
+
     await mix.process(task)
 
     check:
-      plain.calls == 0 # mix cannot deliver, but the plain path is off limits
-      task.state == DeliveryState.NextRoundRetry
+      plain.calls == 0 # the plain path is off limits
+      task.state == DeliveryState.FailedToDeliver
+      task.errorDesc == MixUnavailableReason
 
-  asyncTest "a Preferred task stays on mix while the mix window is open":
+  asyncTest "a Preferred task takes the plain path at once when mix cannot deliver":
+    ## The window is not a waiting room. A node that already knows mix is
+    ## unusable sends now, rather than sitting idle for the whole window.
     let plain = PlainSendProcessor()
     let mix = MixSendProcessor.new(
       waku, waku.brokerCtx, AnonymityLevel.Preferred, chronos.minutes(1)
@@ -87,13 +95,17 @@ suite "SendService - anonymity level":
     mix.chain(plain)
 
     let task = buildTask("preferred-early", chronos.seconds(5))
+    check not mix.mixWindowElapsed(task) # the window is still wide open
+
     await mix.process(task)
 
     check:
-      plain.calls == 0
-      task.state == DeliveryState.NextRoundRetry
+      plain.calls == 1
+      task.state == DeliveryState.SuccessfullyPropagated
 
   asyncTest "a Preferred task falls back to the plain path once the window elapsed":
+    ## The window still ends the mix phase of a task that mix kept and did not
+    ## deliver, which is what it is for now that an unusable mix is immediate.
     let plain = PlainSendProcessor()
     let mix = MixSendProcessor.new(
       waku, waku.brokerCtx, AnonymityLevel.Preferred, chronos.minutes(1)
@@ -102,6 +114,8 @@ suite "SendService - anonymity level":
 
     # Mix had the task since admission and did not deliver it.
     let task = buildTask("preferred-late", chronos.minutes(2))
+    check mix.mixWindowElapsed(task)
+
     await mix.process(task)
 
     check:
@@ -110,40 +124,33 @@ suite "SendService - anonymity level":
 
   asyncTest "an RLN proof refresh starts a new Preferred mix window":
     ## `parkForRlnProofRefresh` clears `firstAdmittedTime`, so the new proof
-    ## draws a new nonce. The mix window runs from that field, so the task gets
-    ## a new window and stays on mix.
-    let plain = PlainSendProcessor()
+    ## draws a new nonce. The mix window runs from that field, so the refreshed
+    ## task gets a whole window again.
     let mix = MixSendProcessor.new(
       waku, waku.brokerCtx, AnonymityLevel.Preferred, chronos.minutes(1)
     )
-    mix.chain(plain)
 
     let task = buildTask("rln-park", chronos.minutes(2))
+    check mix.mixWindowElapsed(task) # spent, before the refresh
+
     task.firstAdmittedTime = Opt.none(Moment) # what the RLN park leaves behind
 
-    await mix.process(task)
-
-    check:
-      plain.calls == 0
-      task.state == DeliveryState.NextRoundRetry
+    check not mix.mixWindowElapsed(task)
 
   asyncTest "a task parked for budget does not spend its mix window":
-    ## The window runs from admission. A task that did not pass admission has
-    ## no window, whatever the age of the message.
-    let plain = PlainSendProcessor()
+    ## The window runs from admission, not from the timestamp of the message.
+    ## A task that did not pass admission has spent none of it, however old the
+    ## message it carries is.
     let mix = MixSendProcessor.new(
       waku, waku.brokerCtx, AnonymityLevel.Preferred, chronos.minutes(1)
     )
-    mix.chain(plain)
 
     let task = buildTask("late-admission", chronos.minutes(2))
     task.firstAdmittedTime = Opt.none(Moment) # parked for epoch budget
 
-    await mix.process(task)
-
     check:
-      plain.calls == 0
-      task.state == DeliveryState.NextRoundRetry
+      task.messageAge() > chronos.minutes(1) # the message is far older
+      not mix.mixWindowElapsed(task)
 
   asyncTest "Preferred gets a second delivery window, the other levels do not":
     let manager =

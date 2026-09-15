@@ -351,6 +351,13 @@ proc send*(self: SendService, task: DeliveryTask) {.async.} =
     return
 
   await self.sendProcessor.process(task)
+  # `send` is asyncSpawned by the messaging API, which returns the request id to
+  # the caller only after this proc yields. With no RLN and budget to spare the
+  # body runs to completion synchronously, so a terminal event reported here --
+  # as a Required fail-fast produces -- would fire before the caller (e.g. a
+  # reliable channel) has registered the id, and be discarded. Yield once so the
+  # caller unwinds and registers first, then report.
+  await sleepAsync(ZeroDuration)
   reportTaskResult(self, task)
   if task.state != DeliveryState.FailedToDeliver:
     self.addTask(task)
