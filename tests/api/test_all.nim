@@ -8,5 +8,6 @@ import
   ./test_api_subscription,
   ./test_api_receive,
   ./test_api_health,
+  ./test_api_mix,
   ./test_messaging_rest,
   ./test_entry_layer

@@ -77,5 +77,6 @@ type KernelApi* = concept w
   myEnr(w) is Future[Result[string, string]]
   myPeerId(w) is Future[Result[string, string]]
   metrics(w) is Future[Result[string, string]]
+  mixPoolSize(w) is Future[Result[int, string]]
   isOnline(w) is Future[Result[bool, string]]
   pingPeer(w, peerAddr = string, timeoutMs = int) is Future[Result[int64, string]]

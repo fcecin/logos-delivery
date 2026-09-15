@@ -350,6 +350,12 @@ proc mountAutoSharding*(
   return ok()
 
 proc getMixNodePoolSize*(node: WakuNode): int =
+  ## Zero when mix is not mounted, rather than a nil dereference: this is a
+  ## public accessor, and "no mix" is a state a caller may legitimately be in.
+  ## A caller that needs to tell "not mounted" from "mounted and empty" should
+  ## ask the kernel API's `mixPoolSize`, which reports the difference.
+  if node.wakuMix.isNil():
+    return 0
   return node.wakuMix.poolSize()
 
 const MixNodeResolveTimeout = chronos.seconds(10)

@@ -34,3 +34,12 @@ proc waku_is_online(self: LogosDelivery): Future[Result[string, string]] {.ffi.}
   let online = (await self.waku.isOnline()).valueOr:
     return err(error)
   return ok($online)
+
+proc waku_get_mix_pool_size(
+    self: LogosDelivery
+): Future[Result[string, string]] {.ffi.} =
+  ## The number of mix nodes a packet could be routed through right now.
+  ## `err` when mix is not mounted, distinct from a mounted-but-empty pool.
+  let size = (await self.waku.mixPoolSize()).valueOr:
+    return err(error)
+  return ok($size)
