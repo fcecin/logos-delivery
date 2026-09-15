@@ -38,6 +38,32 @@ type
     multiAddr*: string
     pubKey*: Curve25519Key
 
+proc poolSize*(mix: WakuMix): int =
+  ## The number of mix nodes that can carry a packet, which is what `mixReady`
+  ## and the `mix_pool_size` gauge are meant to describe.
+  ##
+  ## A known mix key is not enough. Mix routes IPv4 TCP and QUIC-v1 addresses
+  ## only, so a peer whose key arrived without such an address sits in
+  ## `MixNodePool.len` -- a raw count of `MixPubKeyBook` -- while no path can
+  ## use it as a hop or an exit. Counting keys alone reports a pool that mix
+  ## cannot build a path from.
+  ##
+  ## This is the only writer of the gauge: the pool changes whenever discovery
+  ## learns a mix key, and there is no upstream hook to observe that, so the
+  ## metric is refreshed here, where the live value is computed. The health
+  ## monitor recomputes on every peer event, which is exactly when the pool
+  ## moves, so the gauge follows a bootstrapping node without any traffic.
+  ##
+  ## Walks the pool, where the raw count did not. Callers on a hot path should
+  ## know that; `mixReady` calls it once per send attempt, which is fine at any
+  ## pool size a node actually reaches.
+  var routable = 0
+  for peerId in mix.nodePool.peerIds():
+    if mix.nodePool.get(peerId).isSome():
+      routable.inc()
+  mix_pool_size.set(routable)
+  return routable
+
 proc processBootNodes(
     bootnodes: seq[MixNodePubInfo], peermgr: PeerManager, mix: WakuMix
 ) =
@@ -73,7 +99,6 @@ proc processBootNodes(
         peerId, @[multiAddr], publicKey = peerPubKey, mixPubKey = Opt.some(node.pubKey)
       )
     )
-  mix_pool_size.set(count)
   info "using mix bootstrap nodes ", count = count
 
 proc new*(
@@ -106,12 +131,10 @@ proc new*(
 
   processBootNodes(bootnodes, peermgr, m)
 
-  if m.nodePool.len < MinMixPoolSize:
+  let usable = m.poolSize()
+  if usable < MinMixPoolSize:
     info "Mix cannot publish yet, waiting for more mix nodes",
-      poolSize = m.nodePool.len, required = MinMixPoolSize
+      poolSize = usable, required = MinMixPoolSize
   return ok(m)
-
-proc poolSize*(mix: WakuMix): int =
-  mix.nodePool.len
 
 # Mix Protocol
