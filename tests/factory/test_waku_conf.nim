@@ -2,6 +2,7 @@
 
 import
   libp2p/crypto/[crypto, secp],
+  libp2p/crypto/curve25519,
   libp2p/multiaddress,
   nimcrypto/utils,
   std/[net, random, sequtils],
@@ -12,6 +13,7 @@ import
   logos_delivery/waku/factory/waku_conf,
   logos_delivery/waku/factory/conf_builder/conf_builder,
   logos_delivery/waku/factory/networks_config,
+  logos_delivery/waku/waku_mix,
   logos_delivery/waku/common/utils/parse_size_units
 
 suite "Waku Conf - build with cluster conf":
@@ -405,3 +407,95 @@ suite "Waku Conf Builder - rate limits":
 
     ## Then
     assert res.isOk(), $res.error
+
+suite "Waku Conf - mix nodes from a network preset":
+  ## A preset that turns mix on has to seed a pool with it. `MinMixPoolSize`
+  ## nodes are the fewest a path can be built from, so a preset that ships
+  ## fewer leaves the node unable to send until discovery makes up the
+  ## difference.
+
+  test "the presets that enable mix ship a pool that can build a path":
+    for preset in [NetworkPresetConf.LogosDevConf(), NetworkPresetConf.LogosTestConf()]:
+      check:
+        preset.mix
+        preset.mixnodes.len >= MinMixPoolSize
+
+  test "every mix node a preset ships parses":
+    for preset in [NetworkPresetConf.LogosDevConf(), NetworkPresetConf.LogosTestConf()]:
+      for entry in preset.mixnodes:
+        check parseMixNode(entry).isOk()
+
+  test "the presets that do not enable mix ship no mix nodes":
+    for preset in [
+      NetworkPresetConf.TheWakuNetworkConf(), NetworkPresetConf.StatusProdConf()
+    ]:
+      check:
+        not preset.mix
+        preset.mixnodes.len == 0
+
+  test "a preset's mix nodes reach the built conf":
+    var builder = WakuConfBuilder.init()
+    builder.discv5Conf.withUdpPort(9000)
+    # What an anonymity level does on the way in: it is the mix conf, not the
+    # preset's `mix` flag, that decides whether mix is mounted at all.
+    builder.mixConf.withEnabled(true)
+    builder.withNetworkPresetConf(NetworkPresetConf.LogosDevConf())
+
+    let conf = builder.build().valueOr:
+      raiseAssert "Conf build failed: " & $error
+
+    check conf.mixConf.isSome()
+    check conf.mixConf.get().mixnodes.len ==
+      NetworkPresetConf.LogosDevConf().mixnodes.len
+
+  test "mix nodes given by the user are kept alongside the preset's":
+    let extra = MixNodePubInfo(
+      multiAddr:
+        "/ip4/203.0.113.9/tcp/30303/p2p/" &
+        "16Uiu2HAmTUbnxLGT9JvV6mu9oPyDjqHK4Phs1VDJNUgESgNSkuby",
+      pubKey: intoCurve25519Key(
+        utils.fromHex(
+          "c288a425a6209c74ec07e2e8b6816e9b6995d1cd59b1ab482317c3dfb3ba200f"
+        )
+      ),
+    )
+
+    var builder = WakuConfBuilder.init()
+    builder.discv5Conf.withUdpPort(9000)
+    builder.mixConf.withEnabled(true)
+    builder.mixConf.withMixNodes(@[extra])
+    builder.withNetworkPresetConf(NetworkPresetConf.LogosDevConf())
+
+    let conf = builder.build().valueOr:
+      raiseAssert "Conf build failed: " & $error
+
+    check conf.mixConf.get().mixnodes.len ==
+      NetworkPresetConf.LogosDevConf().mixnodes.len + 1
+
+suite "Waku Conf - mix node entries":
+  const Key = "c288a425a6209c74ec07e2e8b6816e9b6995d1cd59b1ab482317c3dfb3ba200f"
+  const PeerId = "16Uiu2HAmTUbnxLGT9JvV6mu9oPyDjqHK4Phs1VDJNUgESgNSkuby"
+
+  test "a name is accepted, because a preset pins names":
+    ## The fleets publish `dns4`; `mountMix` resolves before the pool is built.
+    check parseMixNode(
+      "/dns4/delivery-01.do-ams3.logos.dev.status.im/tcp/30303/p2p/" & PeerId & ":" & Key
+    )
+      .isOk()
+
+  test "a literal address is accepted too":
+    check parseMixNode("/ip4/203.0.113.9/tcp/30303/p2p/" & PeerId & ":" & Key).isOk()
+
+  test "a malformed entry is rejected rather than raised on":
+    check:
+      parseMixNode("no-separator").isErr()
+      # a key with valid-hex prefix but trailing junk must be rejected, not
+      # silently truncated by the permissive hex decoder
+      parseMixNode("/ip4/203.0.113.9/tcp/30303/p2p/" & PeerId & ":" & Key & "zz").isErr()
+      parseMixNode("/ip4/203.0.113.9/tcp/30303/p2p/" & PeerId & ":" & Key & "00").isErr()
+      # a multiaddress without a /p2p/<peer id> must be refused at parse, not
+      # dropped at mount (R3-6)
+      parseMixNode("/ip4/203.0.113.9/tcp/30303:" & Key).isErr()
+      parseMixNode("/ip4/203.0.113.9/tcp/30303:" & Key & ":extra").isErr()
+      parseMixNode("not-a-multiaddress:" & Key).isErr()
+      parseMixNode("/ip4/203.0.113.9/tcp/30303/p2p/" & PeerId & ":abcd").isErr()

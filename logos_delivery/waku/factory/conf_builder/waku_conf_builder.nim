@@ -18,6 +18,7 @@ import
     waku_core/topics/pubsub_topic,
     waku_enr/capabilities,
     persistency/persistency,
+    waku_mix,
   ],
   tools/confutils/entry_nodes
 
@@ -470,6 +471,18 @@ proc applyNetworkPresetConf(builder: var WakuConfBuilder) =
   checkSetPresetValueToField(
     builder.mix, networkPresetConf.mix, "Mix was provided alongside a network conf"
   )
+
+  # The preset's mix nodes seed the pool at mount. Without them a preset that
+  # turns mix on starts with an empty pool and can send nothing until discovery
+  # finds `MinMixPoolSize` peers that publish a mix key.
+  var presetMixNodes: seq[MixNodePubInfo]
+  for entry in networkPresetConf.mixnodes:
+    let mixNode = parseMixNode(entry).valueOr:
+      warn "Skipping a malformed mix node in the network conf",
+        entry = entry, error = error
+      continue
+    presetMixNodes.add(mixNode)
+  builder.mixConf.withMixNodes(presetMixNodes)
 
   # Process entry nodes from network config - classify and distribute
   if networkPresetConf.entryNodes.len > 0:

@@ -2,6 +2,7 @@
 
 import testutils/unittests, chronos, results
 import libp2p/[crypto/crypto, peerid, multiaddress]
+import libp2p/nameresolving/nameresolver
 import libp2p_mix/curve25519
 
 import
@@ -82,3 +83,145 @@ suite "Waku Mix - pool size":
 
     discard addMixPeer("/ip4/127.0.0.1/tcp/60024")
     check node.getMixNodePoolSize() == MinMixPoolSize
+
+type StubResolver = ref object of NameResolver
+  ## Answers every name with one address, which is all the mix bootstrap path
+  ## asks of a resolver.
+  answer: string
+
+method resolveTxt(
+    self: StubResolver, address: string
+): Future[seq[string]] {.async: (raises: [CancelledError]).} =
+  return @[]
+
+method resolveIp(
+    self: StubResolver, address: string, port: Port, domain: Domain = Domain.AF_UNSPEC
+): Future[seq[TransportAddress]] {.
+    async: (raises: [CancelledError, TransportAddressError])
+.} =
+  return @[initTAddress(self.answer, port)]
+
+proc mixBootnode(address: string): MixNodePubInfo =
+  ## A bootstrap entry as a preset ships it: an address with a peer id, and the
+  ## node's mix public key.
+  let peerId = PeerId.init(generateSecp256k1Key()).tryGet()
+  let mixKeys = generateKeyPair().expect("mix key pair")
+  return
+    MixNodePubInfo(multiAddr: address & "/p2p/" & $peerId, pubKey: mixKeys.publicKey)
+
+suite "Waku Mix - bootstrap nodes":
+  ## Presets pin names, because a name survives a fleet node moving hosts, and
+  ## `mountMix` spends the name before the pool is built: mix routes literal
+  ## IPv4 TCP and QUIC-v1 addresses only.
+
+  proc mountWith(
+      bootnodes: seq[MixNodePubInfo], nameResolver: NameResolver = nil
+  ): Future[WakuNode] {.async.} =
+    let node = newTestWakuNode(generateSecp256k1Key(), nameResolver = nameResolver)
+    let mixKeys = generateKeyPair().expect("mix key pair")
+    (await node.mountMix(DefaultClusterId, mixKeys.privateKey, bootnodes)).isOkOr:
+      raiseAssert "Failed to mount mix: " & $error
+    await node.start()
+    return node
+
+  asyncTest "literal addresses seed the pool at mount":
+    ## What a seeded preset buys: a pool that can build a path from the first
+    ## second, instead of one that waits for discovery.
+    let node = await mountWith(
+      @[
+        mixBootnode("/ip4/127.0.0.1/tcp/60101"),
+        mixBootnode("/ip4/127.0.0.1/tcp/60102"),
+        mixBootnode("/ip4/127.0.0.1/tcp/60103"),
+        mixBootnode("/ip4/127.0.0.1/tcp/60104"),
+      ]
+    )
+
+    check node.getMixNodePoolSize() == MinMixPoolSize
+    await node.stop()
+
+  asyncTest "a name the node cannot resolve is dropped, and the rest still mount":
+    ## `newTestWakuNode` has no name resolver, so the two names cannot be spent.
+    ## They are dropped rather than failing the mount: one unreachable name
+    ## must not cost the node every other mix node it was given.
+    let node = await mountWith(
+      @[
+        mixBootnode("/ip4/127.0.0.1/tcp/60111"),
+        mixBootnode("/dns4/delivery-01.example.invalid/tcp/30303"),
+        mixBootnode("/ip4/127.0.0.1/tcp/60112"),
+        mixBootnode("/dns4/delivery-02.example.invalid/tcp/30303"),
+      ]
+    )
+
+    check node.getMixNodePoolSize() == 2
+    await node.stop()
+
+  asyncTest "a name is resolved into the address mix routes":
+    ## The mechanism a seeded preset rests on: the preset pins
+    ## `/dns4/<host>/tcp/30303`, and the pool ends up holding the literal the
+    ## name answered with. Nothing but the name is stored in the preset, so a
+    ## fleet node that moves keeps working.
+    let node = await mountWith(
+      @[
+        mixBootnode("/dns4/delivery-01.example.invalid/tcp/30301"),
+        mixBootnode("/dns4/delivery-02.example.invalid/tcp/30302"),
+        mixBootnode("/dns4/delivery-03.example.invalid/tcp/30303"),
+        mixBootnode("/dns4/delivery-04.example.invalid/tcp/30304"),
+      ],
+      StubResolver(answer: "127.0.0.1"),
+    )
+
+    check node.getMixNodePoolSize() == MinMixPoolSize
+    await node.stop()
+
+type NeverResolver = ref object of NameResolver
+  waits: seq[Future[void].Raising([CancelledError])]
+
+method resolveTxt(
+    self: NeverResolver, address: string
+): Future[seq[string]] {.async: (raises: [CancelledError]).} =
+  return @[]
+
+method resolveIp(
+    self: NeverResolver, address: string, port: Port, domain: Domain = Domain.AF_UNSPEC
+): Future[seq[TransportAddress]] {.
+    async: (raises: [CancelledError, TransportAddressError])
+.} =
+  let wait = sleepAsync(chronos.minutes(10))
+  self.waits.add(wait)
+  await wait
+  return @[]
+
+suite "Waku Mix - name resolution at mount (R3-1)":
+  ## A preset name that does not answer within MixNodeResolveTimeout must be
+  ## dropped, the literal kept, and the mount must survive -- never abort the
+  ## node start with an escaped CancelledError. Costs the 10 s timeout it tests.
+  asyncTest "a name that never answers is dropped, the mount survives":
+    let resolver = NeverResolver()
+    let node = newTestWakuNode(generateSecp256k1Key(), nameResolver = resolver)
+    let keys = generateKeyPair().expect("mix key pair")
+    let pid = PeerId.init(generateSecp256k1Key()).tryGet()
+    var aborted = false
+    try:
+      (
+        await node.mountMix(
+          DefaultClusterId,
+          keys.privateKey,
+          @[
+            MixNodePubInfo(
+              multiAddr: "/ip4/127.0.0.1/tcp/60401/p2p/" & $pid, pubKey: keys.publicKey
+            ),
+            MixNodePubInfo(
+              multiAddr: "/dns4/never.invalid/tcp/30303/p2p/" & $pid,
+              pubKey: keys.publicKey,
+            ),
+          ],
+        )
+      ).isOkOr:
+        raiseAssert "mount failed: " & error
+    except CancelledError:
+      aborted = true
+    check not aborted
+    check node.getMixNodePoolSize() == 1 # the literal survived
+    for wait in resolver.waits:
+      await wait.cancelAndWait()
+    await node.stop()

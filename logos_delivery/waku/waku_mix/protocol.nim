@@ -1,5 +1,6 @@
 {.push raises: [].}
 
+import std/strutils
 import chronicles, chronos, results, metrics
 
 import
@@ -37,6 +38,44 @@ type
   MixNodePubInfo* = object
     multiAddr*: string
     pubKey*: Curve25519Key
+
+proc parseMixNode*(entry: string): Result[MixNodePubInfo, string] =
+  ## Parses a `multiaddr:mixPublicKey` mix node entry, the form taken both by
+  ## the `--mix-node` argument and by the network presets.
+  ##
+  ## The address is not required to be a literal IPv4. The fleets publish
+  ## `dns4` names, and a name is what survives a node moving hosts, so a name
+  ## is what a preset should pin. `mountMix` resolves every entry before the
+  ## pool sees it, so mix still only ever holds an address it can route.
+  # Split on the last colon, not every colon: an IPv6 multiaddress carries
+  # colons of its own, and the key never does.
+  let parts = entry.rsplit(':', maxsplit = 1)
+  if parts.len != 2:
+    return err("expected `multiaddr:mixPublicKey`, got: " & entry)
+
+  discard MultiAddress.init(parts[0]).valueOr:
+    return err("invalid multiaddress in mix node entry: " & parts[0])
+
+  # `ncrutils.fromHex` decodes a valid prefix and ignores trailing junk, so
+  # validate the exact shape first: a mix key is 2*Curve25519KeySize hex
+  # characters, nothing more.
+  if parts[1].len != Curve25519KeySize * 2 or not parts[1].allCharsInSet(HexDigits):
+    return err(
+      "a mix public key is " & $(Curve25519KeySize * 2) & " hex characters, got: " &
+        parts[1]
+    )
+
+  # The address must carry a /p2p/<peer id>: processBootNodes needs it, and
+  # checking here rejects a bad entry at config time rather than dropping it at
+  # mount with an error log.
+  discard parsePeerInfo(parts[0]).valueOr:
+    return err("a mix node needs a /p2p/<peer id> in its multiaddress: " & parts[0])
+
+  return ok(
+    MixNodePubInfo(
+      multiAddr: parts[0], pubKey: intoCurve25519Key(ncrutils.fromHex(parts[1]))
+    )
+  )
 
 proc poolSize*(mix: WakuMix): int =
   ## The number of mix nodes that can carry a packet, which is what `mixReady`
@@ -99,7 +138,10 @@ proc processBootNodes(
         peerId, @[multiAddr], publicKey = peerPubKey, mixPubKey = Opt.some(node.pubKey)
       )
     )
-  info "using mix bootstrap nodes ", count = count
+  # `count` is entries accepted, which is not the pool: one name can answer with
+  # several addresses, and they collapse onto one peer.
+  let routable = mix.poolSize()
+  info "Using mix bootstrap nodes", entries = count, poolSize = routable
 
 proc new*(
     T: typedesc[WakuMix],
