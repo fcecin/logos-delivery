@@ -103,6 +103,7 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
     debug "Message propagated via Mix",
       requestId = task.requestId, msgHash = task.msgHash.to0xHex()
     task.state = DeliveryState.SuccessfullyPropagated
+    task.propagatedOverMix = true
     task.deliveryTime = Moment.now()
     if task.firstPropagatedTime.isNone():
       task.firstPropagatedTime = Opt.some(Moment.now())
