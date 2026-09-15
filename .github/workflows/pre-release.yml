@@ -4,8 +4,6 @@ on:
   push:
     tags:
     - 'v*-rc.*'
-  schedule:
-    - cron: 13 3 * * *
   workflow_dispatch:
 
 env:
