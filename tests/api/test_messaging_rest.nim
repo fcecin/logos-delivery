@@ -3,6 +3,7 @@
 import
   std/[options, net, sequtils, strutils],
   chronos,
+  metrics,
   testutils/unittests,
   presto,
   presto/client as presto_client,
@@ -12,6 +13,7 @@ import logos_delivery
 import
   logos_delivery/api/conf/logos_delivery_conf,
   logos_delivery/messaging/rest_api/client as messaging_rest_client,
+  logos_delivery/messaging/rest_api/event_cache,
   logos_delivery/waku/rest_api/endpoint/client,
   logos_delivery/waku/common/base64
 import tools/confutils/cli_args
@@ -176,6 +178,9 @@ suite "Messaging REST API":
       resp.data[0].source == MessageSource.History
       resp.data[^1].messageHash == "0x" & $(total - 1)
       resp.data[^1].source == MessageSource.Live
+      # seq numbers start at 1 and expose the gap: 1..5 were evicted
+      resp.data[0].seq == 6'u64
+      resp.data[^1].seq == uint64(total)
 
     let emptyResp = await client.messagingGetReceivedMessagesV1()
     check:
@@ -219,6 +224,44 @@ suite "Messaging REST API":
       unsubResp.status == 503
       sendResp.status == 503
       sendResp.data.contains("--num-shards-in-network")
+
+    (await node.stop()).isOkOr:
+      raiseAssert "Failed to stop node: " & error
+
+  asyncTest "received cache capacity follows --rest-messaging-cache-capacity":
+    var conf = restNodeConf()
+    conf.restMessagingCacheCapacity = 5
+    var node: LogosDelivery
+    lockNewGlobalBrokerContext:
+      node = (await LogosDelivery.new(conf)).valueOr:
+        raiseAssert error
+      (await node.start()).isOkOr:
+        raiseAssert "Failed to start node: " & error
+    let client = restClientFor(node)
+    let brokerCtx = node.waku.brokerCtx
+
+    const total = 8
+    let droppedBefore = logos_delivery_rest_received_dropped.value()
+    for i in 0 ..< total:
+      let wm =
+        fakeWakuMessage(payload = "msg-" & $i, contentTopic = "/test/1/recv/proto")
+      MessageReceivedEvent.emit(
+        brokerCtx,
+        MessageReceivedEvent(
+          messageHash: "0x" & $i, message: wm, source: MessageSource.Live
+        ),
+      )
+    await sleepAsync(settleDelay)
+
+    let resp = await client.messagingGetReceivedMessagesV1()
+    check:
+      resp.status == 200
+      resp.data.len == 5 # the configured capacity, not DefaultMaxReceived
+      resp.data[0].messageHash == "0x3" # 0..2 evicted
+      resp.data[^1].messageHash == "0x" & $(total - 1)
+      # the overflow is not silent: seq shows the gap and the metric counts it
+      resp.data[0].seq == 4'u64
+      logos_delivery_rest_received_dropped.value() == droppedBefore + 3
 
     (await node.stop()).isOkOr:
       raiseAssert "Failed to stop node: " & error

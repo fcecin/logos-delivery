@@ -30,6 +30,15 @@ const ROUTE_MESSAGING_EVENTS_SENDV1* = "/messaging/v1/events/send"
 const ROUTE_MESSAGING_EVENTS_SEND_BY_IDV1* = "/messaging/v1/events/send/{requestId}"
 const ROUTE_MESSAGING_EVENTS_RECEIVEDV1* = "/messaging/v1/events/received"
 
+const DroppedHeader* = "X-Messaging-Dropped"
+  ## On the two poll-all GETs: how many buffered items were evicted, unpolled,
+  ## since the previous poll. Overflow is reported, never hidden.
+
+proc droppedHeaders(dropped: uint64): HttpTable =
+  var headers = HttpTable.init()
+  headers.add(DroppedHeader, $dropped)
+  return headers
+
 const AutoshardingRequiredMsg =
   "autosharding is not configured: content-topic subscriptions and sends need --preset or --num-shards-in-network"
 
@@ -82,13 +91,16 @@ proc installEventListeners(brokerCtx: BrokerContext, cache: MessagingEventCache)
       cache.recordReceived(evt.messageHash, toRelayWakuMessage(evt.message), evt.source),
   )
 
-proc installMessagingApiHandlers*(router: var RestRouter, client: MessagingClient) =
+proc installMessagingApiHandlers*(
+    router: var RestRouter, client: MessagingClient, maxReceived = DefaultMaxReceived
+) =
   ## Mounts the MessagingClient subscribe / unsubscribe / send operations as
   ## REST endpoints onto the given (kernel-owned) router. Subscriptions are
   ## keyed by content topic, matching the messaging layer's content-topic API.
+  ## `maxReceived` bounds the received messages kept between polls.
 
   # Event observability: buffer send/received events for the poll-based GETs.
-  let eventCache = MessagingEventCache.new()
+  let eventCache = MessagingEventCache.new(maxReceived = maxReceived)
   installEventListeners(client.waku.brokerCtx, eventCache)
 
   # Content topics only resolve to shards with autosharding; without it every
@@ -180,8 +192,11 @@ proc installMessagingApiHandlers*(router: var RestRouter, client: MessagingClien
 
   router.api(MethodGet, ROUTE_MESSAGING_EVENTS_SENDV1) do() -> RestApiResponse:
     ## Returns all buffered send events grouped by request id, then clears them.
-    let data = eventCache.pollAllSend()
-    return RestApiResponse.jsonResponse(data, status = Http200).valueOr:
+    let (data, dropped) = eventCache.pollAllSend()
+    if dropped > 0:
+      warn "Messaging REST client fell behind: send statuses were evicted before being polled",
+        dropped = dropped, capacity = DefaultMaxSendRequests
+    return RestApiResponse.jsonResponse(data, Http200, droppedHeaders(dropped)).valueOr:
       error "An error occurred while building the json response", error = error
       return RestApiResponse.internalServerError($error)
 
@@ -209,9 +224,13 @@ proc installMessagingApiHandlers*(router: var RestRouter, client: MessagingClien
 
   router.api(MethodGet, ROUTE_MESSAGING_EVENTS_RECEIVEDV1) do() -> RestApiResponse:
     ## Returns buffered received messages (up to the cache capacity, oldest
-    ## first), then clears them — optimized for polling.
-    let data = eventCache.pollReceived()
-    return RestApiResponse.jsonResponse(data, status = Http200).valueOr:
+    ## first), then clears them — optimized for polling. Records carry `seq`;
+    ## evictions since the previous poll are reported in the header and logged.
+    let (data, dropped) = eventCache.pollReceived()
+    if dropped > 0:
+      warn "Messaging REST client fell behind: received messages were evicted before being polled",
+        dropped = dropped, capacity = maxReceived
+    return RestApiResponse.jsonResponse(data, Http200, droppedHeaders(dropped)).valueOr:
       error "An error occurred while building the json response", error = error
       return RestApiResponse.internalServerError($error)
 
@@ -224,7 +243,12 @@ proc mountRestApi*(client: MessagingClient) =
   if not client.waku.restServer.isNil():
     # The BTree route table is ref-backed, so mutating the copied router persists
     # (same pattern as the waku REST builder).
+    let capacity =
+      if client.waku.conf.restServerConf.isSome():
+        int(client.waku.conf.restServerConf.get().messagingCacheCapacity)
+      else:
+        DefaultMaxReceived
     var router = client.waku.restServer.router
-    installMessagingApiHandlers(router, client)
+    installMessagingApiHandlers(router, client, maxReceived = capacity)
     rest_server_builder.markRestApiInstalled("messaging")
     info "Mounted messaging REST API endpoints"

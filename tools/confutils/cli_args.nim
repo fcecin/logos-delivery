@@ -23,6 +23,7 @@ import
   logos_delivery/api/conf/modes,
   logos_delivery/waku/net/nat_strategy,
   logos_delivery/waku/factory/[waku_conf, conf_builder/conf_builder, networks_config],
+  logos_delivery/waku/factory/conf_builder/rest_server_conf_builder,
   logos_delivery/waku/common/[logging],
   logos_delivery/waku/[
     waku_enr,
@@ -54,6 +55,9 @@ const
   DefaultCLIPeerExchange* = true
   DefaultCLIRendezvous* = true
   DefaultCLINat* = "any"
+  DefaultCliRestMessagingCacheCapacity* = DefaultRestMessagingCacheCapacity
+    ## confutils expands `defaultValue` where `load` is called, so a CLI default
+    ## must be a symbol this module exports; this one aliases the builder's.
 
 type ConfResult*[T] = Result[T, string]
 
@@ -510,6 +514,13 @@ hence would have reachability issues.""",
     desc: "Capacity of the Relay REST API message cache.",
     defaultValue: 50,
     name: "rest-relay-cache-capacity"
+  .}: uint32
+
+  restMessagingCacheCapacity* {.
+    desc:
+      "Capacity of the messaging REST API received-messages cache. The newest messages are kept until polled.",
+    defaultValue: DefaultCliRestMessagingCacheCapacity,
+    name: "rest-messaging-cache-capacity"
   .}: uint32
 
   restAdmin* {.
@@ -1159,6 +1170,7 @@ proc toWakuConf*(n: WakuNodeConf): ConfResult[WakuConf] =
   b.restServerConf.withListenAddress(n.restAddress)
   b.restServerConf.withPort(n.restPort)
   b.restServerConf.withRelayCacheCapacity(n.restRelayCacheCapacity)
+  b.restServerConf.withMessagingCacheCapacity(n.restMessagingCacheCapacity)
   b.restServerConf.withAdmin(n.restAdmin)
   b.restServerConf.withAllowOrigin(n.restAllowOrigin)
 

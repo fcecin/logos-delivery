@@ -8,6 +8,7 @@ const
   DefaultRestEnabled: bool = false
   DefaultRestPort: Port = Port(8645)
   DefaultRestAdmin: bool = false
+  DefaultRestMessagingCacheCapacity*: uint32 = 50
 
 ################################
 ## REST Server Config Builder ##
@@ -20,6 +21,7 @@ type RestServerConfBuilder* = object
   port*: Opt[Port]
   admin*: Opt[bool]
   relayCacheCapacity*: Opt[uint32]
+  messagingCacheCapacity*: Opt[uint32]
 
 proc init*(T: type RestServerConfBuilder): RestServerConfBuilder =
   RestServerConfBuilder()
@@ -45,6 +47,11 @@ proc withAdmin*(b: var RestServerConfBuilder, admin: bool) =
 proc withRelayCacheCapacity*(b: var RestServerConfBuilder, relayCacheCapacity: uint32) =
   b.relayCacheCapacity = Opt.some(relayCacheCapacity)
 
+proc withMessagingCacheCapacity*(
+    b: var RestServerConfBuilder, messagingCacheCapacity: uint32
+) =
+  b.messagingCacheCapacity = Opt.some(messagingCacheCapacity)
+
 proc build*(b: RestServerConfBuilder): Result[Opt[RestServerConf], string] =
   if not b.enabled.get(DefaultRestEnabled):
     return ok(Opt.none(RestServerConf))
@@ -53,6 +60,14 @@ proc build*(b: RestServerConfBuilder): Result[Opt[RestServerConf], string] =
     return err("restServer.listenAddress is not specified")
   if b.relayCacheCapacity.isNone():
     return err("restServer.relayCacheCapacity is not specified")
+  # An empty cache is a sink: every buffered message is dropped as it arrives
+  # (and the relay cache's eviction indexes an empty seq).
+  if b.relayCacheCapacity.get() == 0:
+    return err("restServer.relayCacheCapacity must be at least 1")
+  let messagingCacheCapacity =
+    b.messagingCacheCapacity.get(DefaultRestMessagingCacheCapacity)
+  if messagingCacheCapacity == 0:
+    return err("restServer.messagingCacheCapacity must be at least 1")
 
   return ok(
     Opt.some(
@@ -62,6 +77,7 @@ proc build*(b: RestServerConfBuilder): Result[Opt[RestServerConf], string] =
         port: b.port.get(DefaultRestPort),
         admin: b.admin.get(DefaultRestAdmin),
         relayCacheCapacity: b.relayCacheCapacity.get(),
+        messagingCacheCapacity: messagingCacheCapacity,
       )
     )
   )
