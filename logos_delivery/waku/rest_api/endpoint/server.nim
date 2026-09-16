@@ -84,12 +84,16 @@ proc new*(
 
   let middlewares = [originHandlerMiddleware, restMiddleware]
 
-  ## This must be empty and needed only to confirm original initialization requirements of
-  ## the RestHttpServer now combining old and new middleware approach.
+  ## Presto's middleware hands a request whose path matches no route to the
+  ## next handler, not to its own error handler. This fallback forwards it
+  ## there, so the "endpoints are not available, check --x" answers of the
+  ## error handler are reachable; without it chronos sends an empty 404.
   proc defaultProcessCallback(
       rf: RequestFence
   ): Future[HttpResponseRef] {.async: (raises: [CancelledError]).} =
-    discard
+    if rf.isErr() or requestErrorHandler.isNil():
+      return nil # chronos answers 404 itself
+    return await requestErrorHandler(RestRequestError.NotFound, rf.get())
 
   server.httpServer = ?HttpServerRef.new(
     address,

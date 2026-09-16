@@ -40,6 +40,14 @@ proc messagingPostMessagesV1*(
   rest, endpoint: "/messaging/v1/messages", meth: HttpMethod.MethodPost
 .}
 
+# Raw variant: the typed client above cannot decode a non-2xx text error body,
+# so status-code assertions (400 / 503) on send use this string form.
+proc messagingPostMessagesRawV1*(
+  body: MessagingPostMessageRequest
+): RestResponse[string] {.
+  rest, endpoint: "/messaging/v1/messages", meth: HttpMethod.MethodPost
+.}
+
 proc messagingGetSendEventsV1*(): RestResponse[seq[SendStatus]] {.
   rest, endpoint: "/messaging/v1/events/send", meth: HttpMethod.MethodGet
 .}

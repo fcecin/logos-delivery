@@ -29,6 +29,12 @@ proc isContentSubscribed*(
   ## True if `contentTopic` is subscribed on the given `shard` (pubsub topic).
   return self.node.subscriptionManager.isContentSubscribed(shard, contentTopic)
 
+proc isAutoshardingConfigured*(self: Waku): bool =
+  ## True if content topics resolve to shards, which content-topic `subscribe`
+  ## and the messaging send path need. Set by a network preset or by
+  ## --num-shards-in-network.
+  return self.node.wakuAutoSharding.isSome()
+
 proc subscribedContentTopics*(self: Waku): seq[(PubsubTopic, HashSet[ContentTopic])] =
   ## Snapshot of every shard with its non-empty content-topic set.
   var res: seq[(PubsubTopic, HashSet[ContentTopic])]
