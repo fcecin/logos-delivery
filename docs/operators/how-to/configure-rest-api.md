@@ -16,6 +16,10 @@ These are the relevant command line options:
 
 Note that these command line options have their counterpart option in the node configuration file.
 
+The `/messaging/v1` routes are only mounted when the node runs the messaging layer
+(`--entry-layer=messaging` or `--entry-layer=channels`), and they need autosharding
+(a network `--preset` or `--num-shards-in-network`). See the [REST API](../../api/rest-api.md#messaging-api) page.
+
 Example:
 
 ```shell
