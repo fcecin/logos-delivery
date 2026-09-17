@@ -349,6 +349,10 @@ proc mountAutoSharding*(
   return ok()
 
 proc getMixNodePoolSize*(node: WakuNode): int =
+  ## Zero when mix is not mounted rather than a nil dereference: this is a
+  ## public accessor, and "no mix" is a state a caller may legitimately be in.
+  if node.wakuMix.isNil():
+    return 0
   return node.wakuMix.poolSize()
 
 proc mountMix*(
