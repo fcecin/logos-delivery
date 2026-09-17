@@ -377,6 +377,8 @@ proc sendChunkedFilterRpc(
         self.removePeer(shard, peer.peerId)
         return false
       i += filter_protocol.MaxContentTopicsPerRequest
+  except CancelledError as exc:
+    raise exc
   except CatchableError as exc:
     debug "sendChunkedFilterRpc: failed",
       op = kind, shard = shard, peer = peer.peerId, err = exc.msg

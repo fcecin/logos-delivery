@@ -10,8 +10,10 @@ import
     waku_lightpush,
     waku_lightpush/client,
     waku_lightpush/protocol_metrics,
+    waku_lightpush/rpc,
+    waku_lightpush/rpc_codec,
   ],
-  ../testlib/[assertions, wakucore, testasync, futures],
+  ../testlib/[assertions, wakucore, testasync, futures, gated_transport],
   ./lightpush_utils,
   ../resources/[pubsub_topics, content_topics, payloads]
 
@@ -388,3 +390,122 @@ suite "Waku Lightpush Client":
         publishResponse.error.code == LightPushErrorCode.NO_PEERS_TO_RELAY
         publishResponse.error.desc ==
           Opt.some(dialFailure & ": " & $serverRemotePeerInfo2 & " is not accessible")
+
+suite "Waku Lightpush Client - cancellation":
+  ## Cancel a publish request while the peer holds its response.
+  var serverSwitch {.threadvar.}: Switch
+  var clientSwitch {.threadvar.}: Switch
+  var client {.threadvar.}: WakuLightPushClient
+  var serverPeer {.threadvar.}: RemotePeerInfo
+  var requestSeen {.threadvar.}: AsyncEvent
+  var gate {.threadvar.}: Future[void]
+
+  asyncSetup:
+    requestSeen = newAsyncEvent()
+    gate = newFuture[void]("lightpush gate")
+    let hungHandler = proc(
+        pubsubTopic: PubsubTopic, message: WakuMessage
+    ): Future[WakuLightPushResult] {.async.} =
+      requestSeen.fire()
+      await gate
+      return ok(1)
+    serverSwitch = newTestSwitch()
+    clientSwitch = newTestSwitch()
+    discard await newTestWakuLightpushNode(serverSwitch, hungHandler)
+    client = newTestWakuLightpushClient(clientSwitch)
+    await allFutures(serverSwitch.start(), clientSwitch.start())
+    serverPeer = serverSwitch.peerInfo.toRemotePeerInfo()
+
+  asyncTeardown:
+    if not gate.finished():
+      gate.complete()
+    await allFutures(clientSwitch.stop(), serverSwitch.stop())
+
+  asyncTest "a cancelled publish ends cancelled, promptly":
+    let publish = client.publish(
+      Opt.some(DefaultPubsubTopic), fakeWakuMessage("hung peer"), serverPeer
+    )
+    check await requestSeen.wait().withTimeout(chronos.seconds(5))
+
+    publish.cancelSoon()
+    check:
+      await publish.join().withTimeout(chronos.seconds(3))
+      publish.cancelled()
+
+suite "Waku Lightpush Client - a peer that withholds its EOF":
+  ## Return the publish response while the peer keeps its stream open.
+  var serverSwitch {.threadvar.}: Switch
+  var clientSwitch {.threadvar.}: Switch
+  var client {.threadvar.}: WakuLightPushClient
+  var serverPeer {.threadvar.}: RemotePeerInfo
+  var answered {.threadvar.}: AsyncEvent
+  var release {.threadvar.}: AsyncEvent
+
+  asyncSetup:
+    answered = newAsyncEvent()
+    release = newAsyncEvent()
+    serverSwitch = newTestSwitch()
+    clientSwitch = newTestSwitch()
+    proc answerAndHold(
+        conn: Connection, proto: string
+    ) {.async: (raises: [CancelledError]).} =
+      try:
+        let buf = await conn.readLp(int(DefaultMaxRpcSize))
+        let req = LightpushRequest.decode(buf).valueOr:
+          return
+        let resp = LightPushResponse(
+          requestId: req.requestId,
+          statusCode: LightPushSuccessCode.SUCCESS,
+          relayPeerCount: Opt.some(1'u32),
+        )
+        await conn.writeLp(resp.encode().buffer)
+      except LPStreamError:
+        return
+      answered.fire()
+      await release.wait()
+      await conn.close()
+
+    serverSwitch.mount(
+      LPProtocol.new(codecs = @[WakuLightPushCodec], handler = answerAndHold)
+    )
+    client = newTestWakuLightpushClient(clientSwitch)
+    await allFutures(serverSwitch.start(), clientSwitch.start())
+    serverPeer = serverSwitch.peerInfo.toRemotePeerInfo()
+
+  asyncTeardown:
+    release.fire()
+    await allFutures(clientSwitch.stop(), serverSwitch.stop())
+
+  asyncTest "the publish returns with the answer, without waiting for the EOF":
+    let publish = client.publish(
+      Opt.some(DefaultPubsubTopic), fakeWakuMessage("held open"), serverPeer
+    )
+    check await answered.wait().withTimeout(chronos.seconds(5))
+
+    # Apply the timeout to join() so it cannot cancel the publish under test.
+    check:
+      await publish.join().withTimeout(chronos.seconds(3))
+      publish.completed()
+      publish.read().isOk()
+
+suite "Waku Lightpush Client - a transport that blocks the close frame":
+  ## Block the close-frame write after cancelling the response read.
+  ## The publish must finish while the write remains blocked.
+  asyncTest "a cancelled publish ends while the transport blocks the close frame":
+    let gated = await newGatedPeer()
+    defer:
+      await gated.close()
+    let client = newTestWakuLightpushClient(gated.switch)
+
+    let publish = client.publish(
+      Opt.some(DefaultPubsubTopic), fakeWakuMessage("backpressure"), gated.peer
+    )
+    check await gated.wire.requestWritten.wait().withTimeout(chronos.seconds(1))
+    gated.wire.blockWrites = true
+    publish.cancelSoon()
+    check await gated.wire.blockedWriteSeen.wait().withTimeout(chronos.seconds(1))
+
+    # Apply the timeout to join() so it cannot cancel the publish under test.
+    check:
+      await publish.join().withTimeout(chronos.seconds(1))
+      publish.cancelled()
