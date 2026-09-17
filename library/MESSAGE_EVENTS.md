@@ -60,7 +60,7 @@ Emitted when an error occurs during message sending or propagation.
 - `error`: Description of what went wrong
 
 ### 4. message_received
-Emitted once for every message accepted on a subscribed content topic, whether it arrived live from the network or was recovered from a Store peer (at startup, or after a connectivity gap). The `source` field tells the two apart.
+Emitted once for every message accepted on a subscribed content topic, whether it arrived live from the network (or, for a message this node sent over mix, was marked seen when the exit's reply arrived) or was recovered from a Store peer (at startup, or after a connectivity gap). The `source` field tells the two apart.
 
 **JSON Structure:**
 ```json

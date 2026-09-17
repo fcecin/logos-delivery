@@ -10,7 +10,7 @@ import
   logos_delivery/waku/waku,
   logos_delivery/waku/api/[store, subscriptions, publish],
   logos_delivery/messaging/rate_limit_manager/rate_limit_manager
-import logos_delivery/api/events/messaging_client_events
+import logos_delivery/api/events/[messaging_client_events, kernel_events]
 import logos_delivery/api/conf/modes
 import logos_delivery/messaging/messaging_metrics
 
@@ -183,6 +183,25 @@ proc checkMsgsInStore(self: SendService, tasksToValidate: seq[DeliveryTask]) {.a
   self.taskCache.applyItIf(hashesToValidate.contains(it.msgHash)):
     it.state = DeliveryState.NextRoundRetry
 
+proc awaitsStoreValidation*(self: SendService, task: DeliveryTask): bool =
+  ## True while a propagated task still needs a store node to confirm it.
+  ##
+  ## A message that went out over mix never does. The confirmation is a store
+  ## query carrying that message's hash, and it travels in clear text from this
+  ## node's own address seconds after the message appeared on the network --
+  ## handing any observer precisely the link the mixed send just paid to break.
+  ## A mixed message is complete when the exit's reply arrives, and
+  ## `reportTaskResult` reports it there instead.
+  ##
+  ## The trade is deliberate and worth stating: a mixed send has weaker delivery
+  ## assurance than a plain one, because the only witness it can safely use is
+  ## the exit's reply. Anonymity is the thing the caller asked for.
+  ##
+  ## Exported for the tests.
+  return
+    self.checkStoreForMessages and task.state == DeliveryState.SuccessfullyPropagated and
+    not task.isEphemeral() and not task.propagatedOverMix
+
 proc checkStoredMessages(self: SendService) {.async.} =
   if not self.checkStoreForMessages:
     return
@@ -193,8 +212,7 @@ proc checkStoredMessages(self: SendService) {.async.} =
     return
 
   let tasksToValidate = self.taskCache.filterIt(
-    it.state == DeliveryState.SuccessfullyPropagated and
-      it.propagationAge() > ArchiveTime and not it.isEphemeral()
+    self.awaitsStoreValidation(it) and it.propagationAge() > ArchiveTime
   )
 
   if tasksToValidate.len() == 0:
@@ -214,11 +232,39 @@ proc reportTaskResult(self: SendService, task: DeliveryTask) =
         self.brokerCtx, task.requestId, task.msgHash.to0xHex()
       )
       task.propagateEventEmitted = true
+
+    if task.propagatedOverMix and not task.seenEventEmitted:
+      # The receive service backfills, after an offline window, every message
+      # a store node holds on the subscribed topics that this node has not
+      # seen, fetching each by hash in clear from this node's own address.
+      # "Seen" is fed by the relay and filter handlers; a relay publish
+      # delivers the node's own message to them (`triggerSelf`), so a plain
+      # send is seen at once. A mixed message reaches the network through the
+      # exit and is seen only when it comes back, and one that does not come
+      # back in time is named to a store node at the next reconnection. Mark
+      # it seen here, as the relay does for its own publish.
+      MessageSeenEvent.emit(self.brokerCtx, task.pubsubTopic, task.msg)
+      task.seenEventEmitted = true
+
+    if task.propagatedOverMix and not task.sentEventEmitted and
+        self.checkStoreForMessages and not task.isEphemeral():
+      # A mixed send has no store confirmation, so the exit's reply is its
+      # completion -- but only report it where the plain path would have
+      # reported one, i.e. where store validation was going to run. This keeps
+      # the terminal event path-independent: a reliability-off or ephemeral
+      # send ends the same way whether it went plain or over mix. Gated on its
+      # own flag, not `propagateEventEmitted`, so a prior plain MessagePropagated
+      # does not swallow the mixed completion; `sentEventEmitted` keeps it once.
+      info "Message successfully sent over mix",
+        requestId = task.requestId, msgHash = task.msgHash.to0xHex()
+      MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+      task.sentEventEmitted = true
     return
   of DeliveryState.SuccessfullyValidated:
     info "Message successfully sent",
       requestId = task.requestId, msgHash = task.msgHash.to0xHex()
     MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+    task.sentEventEmitted = true
     return
   of DeliveryState.FailedToDeliver:
     error "Failed to send message",
@@ -260,7 +306,7 @@ proc evaluateAndCleanUp(self: SendService) =
   self.taskCache.keepItIf(
     not (
       it.state == DeliveryState.SuccessfullyPropagated and
-      (it.isEphemeral() or not self.checkStoreForMessages)
+      not self.awaitsStoreValidation(it)
     )
   )
 

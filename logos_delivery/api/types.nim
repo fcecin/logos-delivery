@@ -25,7 +25,9 @@ type
     Connected
 
   MessageSource* {.pure.} = enum
-    Live = "live" ## delivered as it was published, over relay or filter
+    Live = "live"
+      ## delivered as it was published, over relay or filter; or, for a message
+      ## this node sent over mix, when the exit's reply arrived
     History = "history" ## recovered from a Store peer, at start or after a gap
 
   PeerConnInfo* = object ## structured connected-peer info for the api boundary
