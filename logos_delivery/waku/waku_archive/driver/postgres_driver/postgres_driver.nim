@@ -932,8 +932,11 @@ method getMessages*(
     ascendingOrder = true,
     requestId = "",
 ): Future[ArchiveDriverResult[seq[ArchiveRow]]] {.async.} =
+  # countup includes its upper bound. Stop at the last hash to avoid an
+  # extra empty batch, which would query without a hash filter.
+  # An input without hashes still needs one query.
   let rows = collect(newSeq):
-    for i in countup(0, hashes.len, MaxHashesPerQuery):
+    for i in countup(0, max(hashes.len - 1, 0), MaxHashesPerQuery):
       let stop = min(i + MaxHashesPerQuery, hashes.len)
 
       let splittedHashes = hashes[i ..< stop]

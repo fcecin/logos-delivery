@@ -28,6 +28,8 @@ proc storeQueryToAny*(
       return err($error)
 
     return ok(queryResponse)
+  except CancelledError as exc:
+    raise exc
   except CatchableError as e:
     return err(e.msg)
 
@@ -51,5 +53,7 @@ proc storeQuery*(
       return err("storeQuery failed: " & $error)
 
     return ok(queryResponse)
+  except CancelledError as exc:
+    raise exc
   except CatchableError as e:
     return err(e.msg)

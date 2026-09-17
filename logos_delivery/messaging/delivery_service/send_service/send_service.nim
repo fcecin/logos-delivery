@@ -1,7 +1,7 @@
 ## This module reinforces the publish operation with regular store-v3 requests.
 ##
 
-import std/[sequtils, tables, typetraits]
+import std/[algorithm, sequtils, tables, typetraits]
 import chronos, chronicles
 import brokers/broker_context
 import
@@ -49,7 +49,6 @@ const DefaultMaxTaskCacheSize* = 1000
   ## Hard cap on tasks tracked by the send service; further sends are rejected.
 
 const ServiceLoopInterval* = chronos.seconds(1)
-  ## Interval at which we check that messages have been properly received by a store node
 
 const ArchiveTime = chronos.seconds(3)
   ## Estimation of the time we wait until we start confirming that a message has been properly
@@ -59,6 +58,15 @@ const MaxSendsInFlight* = 4
   ## The number of sends a service pass starts before it waits for them. One
   ## unanswered mix reply (`MixReplyTimeout`) then holds only its batch, and the
   ## batch size also caps the burst that one pass sends.
+
+const StoreValidationBatchSize = int(MaxPageSize)
+  ## Keep each validation batch within one Store response page.
+
+const StoreValidationInterval = chronos.seconds(1)
+  ## Minimum delay between completing one query and starting the next.
+
+const StoreQueryDeadline = chronos.seconds(10)
+  ## Timeout for the entire Store query, including dials and peer retries.
 
 type SendService* = ref object of RootObj
   brokerCtx: BrokerContext
@@ -77,7 +85,8 @@ type SendService* = ref object of RootObj
 
   waku: Waku
   checkStoreForMessages: bool
-  lastStoreCheckTime: Moment ## throttles store validation queries to ArchiveTime cadence
+  storeValidationHandle: Future[void]
+    ## Runs only when Store-based reliability is enabled.
   maxDeliveryTime*: timer.Duration
     ## How long an admitted task may keep trying before it is failed.
   maxParkedAge*: timer.Duration
@@ -158,7 +167,6 @@ proc new*(
     rateLimitManager: rateLimitManager,
     waku: waku,
     checkStoreForMessages: checkStoreForMessages,
-    lastStoreCheckTime: Moment.now(),
     maxDeliveryTime: maxDeliveryTime(anonymityLevel),
     maxParkedAge: maxParkedAge,
     maxValidationAge: maxValidationAge,
@@ -190,60 +198,103 @@ proc awaitsStoreValidation*(self: SendService, task: DeliveryTask): bool =
     self.storeConfirmationExpected(task) and
     task.state == DeliveryState.SuccessfullyPropagated and not task.propagatedAnonymously
 
-proc checkMsgsInStore(self: SendService, tasksToValidate: seq[DeliveryTask]) {.async.} =
-  if tasksToValidate.len() == 0:
+proc storeValidationKey(task: DeliveryTask): Moment =
+  ## Order by last query time, or first propagation for an unqueried task.
+  if task.lastStoreQueryTime.isSome():
+    task.lastStoreQueryTime.get()
+  else:
+    task.firstPropagatedTime.get()
+
+proc nextStoreValidationBatch*(
+    self: SendService,
+    tasks: seq[DeliveryTask],
+    now: Moment,
+    batchSize = StoreValidationBatchSize,
+): seq[DeliveryTask] =
+  ## Select up to `batchSize` tasks that await store validation.
+  ## Require propagation and the last query to be older than ArchiveTime.
+  ## Select the oldest storeValidationKey values first; keep cache order for ties.
+  var eligible: seq[DeliveryTask]
+  for task in tasks:
+    if not self.awaitsStoreValidation(task):
+      continue
+    if task.firstPropagatedTime.isNone() or
+        now - task.firstPropagatedTime.get() <= ArchiveTime:
+      continue
+    if task.lastStoreQueryTime.isSome() and
+        now - task.lastStoreQueryTime.get() <= ArchiveTime:
+      continue
+    eligible.add(task)
+  eligible.sort(
+    proc(a, b: DeliveryTask): int =
+      let ka = storeValidationKey(a)
+      let kb = storeValidationKey(b)
+      if ka < kb:
+        return -1
+      if kb < ka:
+        return 1
+      return 0
+  )
+  if eligible.len > batchSize:
+    eligible.setLen(batchSize)
+  return eligible
+
+proc checkMsgsInStore(self: SendService, batch: seq[DeliveryTask]) {.async.} =
+  ## Query one batch and confirm matching tasks still pending in the cache.
+  if batch.len() == 0 or not isStorePeerAvailable(self):
     return
 
-  if not isStorePeerAvailable(self):
-    debug "Skipping store validation for ",
-      messageCount = tasksToValidate.len(), error = "no store peer available"
-    return
+  let now = Moment.now()
+  for task in batch:
+    task.lastStoreQueryTime = Opt.some(now)
 
-  var hashesToValidate = tasksToValidate.mapIt(it.msgHash)
-  # TODO: confirm hash format for store query!!!
-
-  let storeResp: StoreQueryResponse = (
-    await self.waku.storeQueryToAny(
-      StoreQueryRequest(includeData: false, messageHashes: hashesToValidate)
+  let query = self.waku.storeQueryToAny(
+    StoreQueryRequest(
+      includeData: false,
+      messageHashes: batch.mapIt(it.msgHash),
+      paginationLimit: Opt.some(uint64(batch.len)),
     )
-  ).valueOr:
+  )
+  if not await query.withTimeout(StoreQueryDeadline):
+    debug "Store validation query timed out", hashCount = batch.len
+    return
+  if query.failed():
+    debug "Store validation query raised",
+      hashCount = batch.len, error = query.error.msg
+    return
+
+  let storeResp: StoreQueryResponse = query.read().valueOr:
     debug "Failed to get store validation for messages",
-      hashes = hashesToValidate.mapIt(shortLog(it)), error = $error
+      hashCount = batch.len, error = $error
     return
 
   let storedItems = storeResp.messages.mapIt(it.messageHash)
 
   # Set success state for the tasks found in store that the policy admits: the
   # store peer chooses its answer, so a hash match alone must not confirm a task.
-  # The retry below uses only the hashes that this node asked about.
+  # Leave unconfirmed messages pending for another Store query.
+  # Resending them can trigger duplicate rejection and lightpush rate limits.
   self.taskCache.applyItIf(
     self.awaitsStoreValidation(it) and storedItems.contains(it.msgHash)
   ):
     it.state = DeliveryState.SuccessfullyValidated
 
-  # set retry state for messages not found in store
-  hashesToValidate.keepItIf(not storedItems.contains(it))
-  self.taskCache.applyItIf(hashesToValidate.contains(it.msgHash)):
-    it.state = DeliveryState.NextRoundRetry
-
-proc checkStoredMessages(self: SendService) {.async.} =
-  if not self.checkStoreForMessages:
-    return
-
-  # Throttle store queries so they run at most every ArchiveTime (3s), regardless
-  # of the 1s service loop cadence.
-  if Moment.now() - self.lastStoreCheckTime < ArchiveTime:
-    return
-
-  let tasksToValidate = self.taskCache.filterIt(
-    self.awaitsStoreValidation(it) and it.propagationAge() > ArchiveTime
-  )
-
-  if tasksToValidate.len() == 0:
-    return
-
-  self.lastStoreCheckTime = Moment.now()
-  await self.checkMsgsInStore(tasksToValidate)
+proc storeValidationLoop(self: SendService) {.async.} =
+  ## Validate messages independently of send retries and task cleanup.
+  while true:
+    try:
+      let batch = self.nextStoreValidationBatch(self.taskCache, Moment.now())
+      if batch.len > 0 and not isStorePeerAvailable(self):
+        debug "Skipping store validation, no store peer available",
+          messageCount = batch.len
+        await sleepAsync(ArchiveTime)
+        continue
+      await self.checkMsgsInStore(batch)
+    except CancelledError as exc:
+      raise exc
+    except CatchableError as exc:
+      debug "Store validation round failed", error = exc.msg
+    await sleepAsync(StoreValidationInterval)
 
 proc loggedHash(task: DeliveryTask): string =
   ## The hash for INFO and ERROR records, withheld once the task is anonymized.
@@ -467,13 +518,12 @@ proc trySendMessages*(self: SendService) {.async.} =
     await self.drainInFlight()
 
 proc serviceLoop(self: SendService) {.async.} =
-  ## Continuously monitors that the sent messages have been received by a store node
+  ## Retry sends, report results and remove completed or expired tasks.
   while true:
     # A raise must not end the loop: nothing watches it until stop, and queued
     # tasks would never get a terminal event.
     try:
       await self.trySendMessages()
-      await self.checkStoredMessages()
       self.evaluateAndCleanUp()
     except CancelledError as exc:
       raise exc
@@ -486,11 +536,19 @@ proc serviceLoop(self: SendService) {.async.} =
 proc startSendService*(self: SendService) =
   self.stopping = false
   self.serviceLoopHandle = self.serviceLoop()
+  if self.checkStoreForMessages:
+    self.storeValidationHandle = self.storeValidationLoop()
 
 proc stopSendService*(self: SendService) {.async.} =
+  ## Cancel and await both loops, including any pending Store query.
   self.stopping = true
-  if not self.serviceLoopHandle.isNil():
-    await self.serviceLoopHandle.cancelAndWait()
+  var loops: seq[Future[void]]
+  for handle in [self.serviceLoopHandle, self.storeValidationHandle]:
+    if not handle.isNil():
+      loops.add(handle)
+  await cancelAndWait(loops)
+  self.serviceLoopHandle = nil
+  self.storeValidationHandle = nil
   # `cancelAndWait` on the loop leaves the batch running, so cancel the sends
   # here. Take the batch first: a pass in `drainInFlight` empties `inFlight` when
   # its last send finishes, which happens inside one of these cancels.
