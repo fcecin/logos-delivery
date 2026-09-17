@@ -18,6 +18,7 @@ import
     waku_core/topics/pubsub_topic,
     waku_enr/capabilities,
     persistency/persistency,
+    waku_mix,
   ],
   tools/confutils/entry_nodes
 
@@ -467,9 +468,27 @@ proc applyNetworkPresetConf(builder: var WakuConfBuilder) =
     builder.kademliaDiscoveryConf.bootstrapNodes, networkPresetConf.kadBootstrapNodes
   )
 
-  checkSetPresetValueToField(
-    builder.mix, networkPresetConf.mix, "Mix was provided alongside a network conf"
-  )
+  # `mix` is the one flag a user turns off against a preset on purpose: the
+  # preset enables mix so its nodes seed the pool, and whether this node mounts
+  # it stays the user's decision. Nothing is discarded, so this is not a
+  # warning. The field feeds nothing else: mounting and the ENR bit read
+  # `mixConf`, so the preset's value is not copied into it.
+  if builder.mix.isSome() and builder.mix.get() != networkPresetConf.mix:
+    info "Mix setting differs from the network conf, the user's setting wins",
+      used = builder.mix.get(), preset = networkPresetConf.mix
+
+  # The preset's mix nodes seed the pool at mount. Without them a preset that
+  # turns mix on starts with an empty pool and can send nothing until discovery
+  # finds `MinMixPoolSize` peers that publish a mix key.
+  var presetMixNodes: seq[MixNodePubInfo]
+  for entry in networkPresetConf.mixnodes:
+    let mixNode = parseMixNode(entry).valueOr:
+      # A preset entry is compiled in: a malformed one is the node's own fault.
+      error "Skipping a malformed mix node in the network conf",
+        entry = entry, error = error
+      continue
+    presetMixNodes.add(mixNode)
+  builder.mixConf.withMixNodes(presetMixNodes)
 
   # Process entry nodes from network config - classify and distribute
   if networkPresetConf.entryNodes.len > 0:
@@ -592,13 +611,6 @@ proc build*(
     else:
       debug "Whether to mount rendezvous is not specified, defaulting to not mounting"
       DefaultRendezvous
-
-  let mix =
-    if builder.mix.isSome():
-      builder.mix.get()
-    else:
-      debug "Whether to mount mix is not specified, defaulting to not mounting"
-      DefaultMix
 
   let relayPeerExchange = builder.relayPeerExchange.get(DefaultRelayPeerExchange)
 
@@ -785,7 +797,10 @@ proc build*(
     store = storeServiceConf.isSome,
     relay = relay,
     sync = storeServiceConf.isSome() and storeServiceConf.get().storeSyncConf.isSome,
-    mix = mix,
+    # Advertised only when mix is mounted (`mixConf`), never from the bare
+    # `mix` flag: a preset sets the flag, and a preset must not make a node
+    # claim, or run, a capability the user did not enable.
+    mix = mixConf.isSome(),
   )
 
   # portsShift is consumed here, WakuConf carries final bind ports.
