@@ -334,14 +334,6 @@ jobs:
       node_image_artifact: ${{ needs.build-docker-image.outputs.image_artifact }}
     secrets: inherit
 
-  nix:
-    needs: changes
-    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.nix == 'true' }}
-    permissions:
-      contents: read
-      pull-requests: read
-    uses: ./.github/workflows/ci-nix.yml
-    secrets: inherit
 
   lint:
     name: "Lint"
@@ -399,7 +391,6 @@ jobs:
       - send-api-e2e-tests
       - send-api-e2e-docker-tests
       - rest-e2e-tests
-      - nix
       - lint
     runs-on: ubuntu-22.04
     steps:
