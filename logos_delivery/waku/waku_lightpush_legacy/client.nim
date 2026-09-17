@@ -34,15 +34,23 @@ proc sendPushRequest(
     return err(dialFailure)
   let connection = connOpt.get()
 
+  var cancelled = false
   defer:
-    await connection.closeWithEOF()
+    wl.peerManager.closeDetached(connection, withEof = not cancelled)
 
   let rpc = PushRPC(requestId: generateRequestId(wl.rng), request: Opt.some(req))
-  await connection.writeLP(rpc.encode().buffer)
+  try:
+    await connection.writeLP(rpc.encode().buffer)
+  except CancelledError as exc:
+    cancelled = true
+    raise exc
 
   var buffer: seq[byte]
   try:
     buffer = await connection.readLp(DefaultMaxRpcSize.int)
+  except CancelledError as exc:
+    cancelled = true
+    raise exc
   except LPStreamRemoteClosedError:
     return err("Exception reading: " & getCurrentExceptionMsg())
 

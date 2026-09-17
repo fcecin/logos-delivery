@@ -36,46 +36,50 @@ proc sendSubscribeRequest(
     wfc: WakuFilterClient,
     servicePeer: RemotePeerInfo,
     filterSubscribeRequest: FilterSubscribeRequest,
-): Future[FilterSubscribeResult] {.async: (raises: []).} =
+): Future[FilterSubscribeResult] {.async: (raises: [CancelledError]).} =
   trace "Sending filter subscribe request",
     peerId = servicePeer.peerId, filterSubscribeRequest
 
-  var connOpt: Opt[Connection]
-  try:
-    connOpt = await wfc.peerManager.dialPeer(servicePeer, WakuFilterSubscribeCodec)
-    if connOpt.isNone():
-      trace "Failed to dial filter service peer", servicePeer
-      logos_delivery_filter_errors.inc(labelValues = [dialFailure])
-      return err(FilterSubscribeError.peerDialFailure($servicePeer))
-  except CatchableError:
-    let errMsg = "failed to dialPeer: " & getCurrentExceptionMsg()
-    trace "failed to dialPeer", error = getCurrentExceptionMsg()
-    logos_delivery_filter_errors.inc(labelValues = [errMsg])
-    return err(FilterSubscribeError.badResponse(errMsg))
+  let connection =
+    try:
+      (await wfc.peerManager.dialPeer(servicePeer, WakuFilterSubscribeCodec)).valueOr:
+        trace "Failed to dial filter service peer", servicePeer
+        logos_delivery_filter_errors.inc(labelValues = [dialFailure])
+        return err(FilterSubscribeError.peerDialFailure($servicePeer))
+    except CancelledError as exc:
+      raise exc
+    except CatchableError as exc:
+      let errMsg = "failed to dialPeer: " & exc.msg
+      trace "failed to dialPeer", error = exc.msg
+      logos_delivery_filter_errors.inc(labelValues = [errMsg])
+      return err(FilterSubscribeError.badResponse(errMsg))
 
-  let connection = connOpt.get()
-
+  var cancelled = false
   defer:
-    await connection.closeWithEOF()
+    wfc.peerManager.closeDetached(connection, withEof = not cancelled)
 
   try:
     await connection.writeLP(filterSubscribeRequest.encode().buffer)
-  except CatchableError:
-    let errMsg =
-      "exception in waku_filter_v2 client writeLP: " & getCurrentExceptionMsg()
-    trace "exception in waku_filter_v2 client writeLP", error = getCurrentExceptionMsg()
+  except CancelledError as exc:
+    cancelled = true
+    raise exc
+  except CatchableError as exc:
+    let errMsg = "exception in waku_filter_v2 client writeLP: " & exc.msg
+    trace "exception in waku_filter_v2 client writeLP", error = exc.msg
     logos_delivery_filter_errors.inc(labelValues = [errMsg])
     return err(FilterSubscribeError.badResponse(errMsg))
 
-  var respBuf: seq[byte]
-  try:
-    respBuf = await connection.readLp(DefaultMaxSubscribeResponseSize)
-  except CatchableError:
-    let errMsg =
-      "exception in waku_filter_v2 client readLp: " & getCurrentExceptionMsg()
-    trace "exception in waku_filter_v2 client readLp", error = getCurrentExceptionMsg()
-    logos_delivery_filter_errors.inc(labelValues = [errMsg])
-    return err(FilterSubscribeError.badResponse(errMsg))
+  let respBuf =
+    try:
+      await connection.readLp(DefaultMaxSubscribeResponseSize)
+    except CancelledError as exc:
+      cancelled = true
+      raise exc
+    except CatchableError as exc:
+      let errMsg = "exception in waku_filter_v2 client readLp: " & exc.msg
+      trace "exception in waku_filter_v2 client readLp", error = exc.msg
+      logos_delivery_filter_errors.inc(labelValues = [errMsg])
+      return err(FilterSubscribeError.badResponse(errMsg))
 
   let response = FilterSubscribeResponse.decode(respBuf).valueOr:
     trace "Failed to decode filter subscribe response", servicePeer
@@ -123,7 +127,7 @@ proc subscribe*(
     servicePeer: RemotePeerInfo,
     pubsubTopic: PubsubTopic,
     contentTopics: ContentTopic | seq[ContentTopic],
-): Future[FilterSubscribeResult] {.async: (raises: []).} =
+): Future[FilterSubscribeResult] {.async: (raises: [CancelledError]).} =
   var contentTopicSeq: seq[ContentTopic]
   when contentTopics is seq[ContentTopic]:
     contentTopicSeq = contentTopics
@@ -146,7 +150,7 @@ proc unsubscribe*(
     servicePeer: RemotePeerInfo,
     pubsubTopic: PubsubTopic,
     contentTopics: ContentTopic | seq[ContentTopic],
-): Future[FilterSubscribeResult] {.async: (raises: []).} =
+): Future[FilterSubscribeResult] {.async: (raises: [CancelledError]).} =
   var contentTopicSeq: seq[ContentTopic]
   when contentTopics is seq[ContentTopic]:
     contentTopicSeq = contentTopics
@@ -166,7 +170,7 @@ proc unsubscribe*(
 
 proc unsubscribeAll*(
     wfc: WakuFilterClient, servicePeer: RemotePeerInfo
-): Future[FilterSubscribeResult] {.async: (raises: []).} =
+): Future[FilterSubscribeResult] {.async: (raises: [CancelledError]).} =
   let requestId = generateRequestId(wfc.rng)
   let filterSubscribeRequest =
     FilterSubscribeRequest.unsubscribeAll(requestId = requestId)
@@ -180,11 +184,16 @@ proc initProtocolHandler(wfc: WakuFilterClient) =
   proc handler(conn: Connection, proto: string) {.async: (raises: [CancelledError]).} =
     ## Notice that the client component is acting as a server of WakuFilterPushCodec messages
     while not conn.atEof():
-      var buf: seq[byte]
-      try:
-        buf = await conn.readLp(int(DefaultMaxPushSize))
-      except CancelledError, LPStreamError:
-        debug "Error while reading conn", error = getCurrentExceptionMsg()
+      let buf =
+        try:
+          await conn.readLp(int(DefaultMaxPushSize))
+        except CancelledError as exc:
+          raise exc
+        except LPStreamEOFError:
+          return
+        except LPStreamError as exc:
+          debug "Error while reading conn", error = exc.msg
+          return
 
       let msgPush = MessagePush.decode(buf).valueOr:
         debug "Failed to decode message push", peerId = conn.peerId, error = $error

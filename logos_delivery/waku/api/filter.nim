@@ -41,6 +41,8 @@ proc filterSubscribe*(
       return err($error)
 
     return ok(true)
+  except CancelledError as exc:
+    raise exc
   except CatchableError as e:
     return err(e.msg)
 
@@ -63,6 +65,8 @@ proc filterUnsubscribe*(
       return err($error)
 
     return ok(true)
+  except CancelledError as exc:
+    raise exc
   except CatchableError as e:
     return err(e.msg)
 
@@ -83,5 +87,7 @@ proc filterUnsubscribeAll*(self: Waku): Future[Result[bool, string]] {.async.} =
       return err($error)
 
     return ok(true)
+  except CancelledError as exc:
+    raise exc
   except CatchableError as e:
     return err(e.msg)

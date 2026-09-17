@@ -44,14 +44,22 @@ proc sendPushRequest(
         dialFailure & ": " & $peer & " is not accessible",
       )
 
+  var cancelled = false
   defer:
-    await connection.closeWithEOF()
+    wl.peerManager.closeDetached(connection, withEof = not cancelled)
 
-  await connection.writeLP(req.encode().buffer)
+  try:
+    await connection.writeLP(req.encode().buffer)
+  except CancelledError as exc:
+    cancelled = true
+    raise exc
 
   var buffer: seq[byte]
   try:
     buffer = await connection.readLp(DefaultMaxRpcSize.int)
+  except CancelledError as exc:
+    cancelled = true
+    raise exc
   except LPStreamRemoteClosedError:
     debug "Failed to read response from peer", error = getCurrentExceptionMsg()
     return lightpushResultInternalError(

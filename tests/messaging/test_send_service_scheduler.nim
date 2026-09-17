@@ -12,11 +12,13 @@ import
   logos_delivery/api/types,
   logos_delivery/api/events/messaging_client_events,
   logos_delivery/waku/factory/waku_conf,
+  logos_delivery/waku/waku_lightpush/common,
   logos_delivery/messaging/rate_limit_manager/rate_limit_manager,
   logos_delivery/messaging/delivery_service/send_service/
-    [send_service, send_processor, delivery_task]
+    [send_service, send_processor, delivery_task, lightpush_processor]
 import ../testlib/[testasync, wakunodeconf, wakucore, wakunode]
 import ../waku_store/store_utils
+import ../waku_lightpush/lightpush_utils
 
 ## Scheduler-level coverage for the send service's rate-limit seam: a task is
 ## charged exactly once however many rounds it takes, and an over-budget task
@@ -35,6 +37,25 @@ method process(self: FakeSendProcessor, task: DeliveryTask): Future[void] {.asyn
   if outcome == DeliveryState.SuccessfullyPropagated and
       task.firstPropagatedTime.isNone():
     task.firstPropagatedTime = Opt.some(Moment.now())
+
+type LightpushOnRetryProcessor = ref object of BaseSendProcessor
+  ## Fail the initial send so the service loop performs the lightpush request.
+  calls: int
+  lightpush: LightpushSendProcessor
+
+method isValidProcessor(
+    self: LightpushOnRetryProcessor, task: DeliveryTask
+): bool {.gcsafe.} =
+  return true
+
+method sendImpl(
+    self: LightpushOnRetryProcessor, task: DeliveryTask
+): Future[void] {.async.} =
+  inc self.calls
+  if self.calls == 1:
+    task.state = DeliveryState.NextRoundRetry
+    return
+  await self.lightpush.sendImpl(task)
 
 proc testConf(): WakuConf =
   defaultTestWakuNodeConf().toWakuConf().valueOr:
@@ -739,7 +760,7 @@ suite "SendService - store validation worker":
       state: DeliveryState.Entry,
     )
 
-  proc newWorkerService(processor: FakeSendProcessor): SendService =
+  proc newWorkerService(processor: BaseSendProcessor): SendService =
     let manager = RateLimitManager.new(RateLimitConfig(enabled: false), nil).expect(
         "RateLimitManager.new"
       )
@@ -880,6 +901,46 @@ suite "SendService - store validation worker":
       )
       task.state == DeliveryState.SuccessfullyValidated
       processor.calls == 1
+
+  asyncTest "stopping the service ends a lightpush retry waiting on a hung peer":
+    ## Stop the service while its retry waits for a lightpush response.
+    ## The peer keeps the request pending until teardown.
+    let pushSeen = newAsyncEvent()
+    let pushGate = newAsyncEvent()
+    let hungPush = proc(
+        pubsubTopic: PubsubTopic, message: WakuMessage
+    ): Future[WakuLightPushResult] {.async.} =
+      pushSeen.fire()
+      await pushGate.wait()
+      return ok(1)
+    let lightpushNode = newTestWakuNode(generateSecp256k1Key())
+    lightpushNode.mountMetadata(TestClusterId, @[0'u16]).isOkOr:
+      raiseAssert "mountMetadata: " & error
+    discard await newTestWakuLightpushNode(lightpushNode.switch, hungPush)
+    await lightpushNode.start()
+    defer:
+      pushGate.fire()
+      await lightpushNode.stop()
+    waku.node.peerManager.addServicePeer(
+      lightpushNode.peerInfo.toRemotePeerInfo(), WakuLightPushCodec
+    )
+
+    let processor = LightpushOnRetryProcessor(
+      lightpush: LightpushSendProcessor.new(waku, waku.brokerCtx)
+    )
+    let service = newWorkerService(processor)
+    defer:
+      await service.stopSendService()
+    let task = workerTask("stop-during-lightpush", "l")
+    await service.send(task)
+    check task.state == DeliveryState.NextRoundRetry
+    check await pushSeen.wait().withTimeout(chronos.seconds(5))
+
+    # Apply the timeout to join() so it cannot cancel the stop under test.
+    let stopping = service.stopSendService()
+    check:
+      await stopping.join().withTimeout(chronos.seconds(3))
+      stopping.completed()
 
   asyncTest "a cancelled Store query is cancelled, not answered with an error":
     ## Both peers hold their responses. Retrying the second peer after

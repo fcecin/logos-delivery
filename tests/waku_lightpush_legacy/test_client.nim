@@ -12,7 +12,7 @@ import
     waku_lightpush_legacy/protocol_metrics,
     waku_lightpush_legacy/rpc,
   ],
-  ../testlib/[assertions, wakucore, testasync, futures],
+  ../testlib/[assertions, wakucore, testasync, futures, gated_transport],
   ./lightpush_utils,
   ../resources/[pubsub_topics, content_topics, payloads]
 
@@ -331,3 +331,24 @@ suite "Waku Legacy Lightpush Client":
 
       # Then the response is negative
       check not publishResponse.isOk()
+
+suite "Waku Legacy Lightpush Client - a transport that blocks the close frame":
+  ## Block the close-frame write after cancelling the response read.
+  ## The publish must finish while the write remains blocked.
+  asyncTest "a cancelled publish ends while the transport blocks the close frame":
+    let gated = await newGatedPeer()
+    defer:
+      await gated.close()
+    let client = newTestWakuLegacyLightpushClient(gated.switch)
+
+    let publish =
+      client.publish(DefaultPubsubTopic, fakeWakuMessage("backpressure"), gated.peer)
+    check await gated.wire.requestWritten.wait().withTimeout(chronos.seconds(1))
+    gated.wire.blockWrites = true
+    publish.cancelSoon()
+    check await gated.wire.blockedWriteSeen.wait().withTimeout(chronos.seconds(1))
+
+    # Apply the timeout to join() so it cannot cancel the publish under test.
+    check:
+      await publish.join().withTimeout(chronos.seconds(1))
+      publish.cancelled()
