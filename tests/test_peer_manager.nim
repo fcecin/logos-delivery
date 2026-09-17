@@ -2,6 +2,7 @@
 
 import
   std/[sequtils, strutils, times, sugar, net],
+  stew/byteutils,
   results,
   testutils/unittests,
   chronos,
@@ -35,7 +36,8 @@ import
   ./testlib/common,
   ./testlib/testutils,
   ./testlib/wakucore,
-  ./testlib/wakunode
+  ./testlib/wakunode,
+  ./testlib/gated_transport
 
 proc syncToBoundPort(node: WakuNode, key: keys.PrivateKey) =
   let addrs = node.switch.peerInfo.listenAddrs
@@ -369,6 +371,62 @@ procSuite "Peer Manager":
       conn2.isNone()
 
     await allFutures(nodes.mapIt(it.stop()))
+
+  asyncTest "a cancelled dial ends cancelled, not as a failed dial":
+    ## The listener accepts TCP but leaves the libp2p handshake pending.
+    let node = newTestWakuNode(generateSecp256k1Key())
+    await node.start()
+    defer:
+      await node.stop()
+
+    let accepted = newAsyncEvent()
+    var held: seq[StreamTransport]
+    proc mute(server: StreamServer, client: StreamTransport) {.async: (raises: []).} =
+      held.add(client)
+      accepted.fire()
+
+    let listener = createStreamServer(initTAddress("127.0.0.1:0"), mute, {ReuseAddr})
+    listener.start()
+    defer:
+      for client in held:
+        await client.closeWait()
+      listener.stop() # Stop accepting connections before closing the server.
+      await listener.closeWait()
+
+    let peer = RemotePeerInfo.init(
+      PeerId.init(generateSecp256k1Key()).tryGet(),
+      @[
+        MultiAddress.init("/ip4/127.0.0.1/tcp/" & $listener.localAddress().port).tryGet()
+      ],
+    )
+    let dial = node.peerManager.dialPeer(peer, WakuStoreCodec)
+    check await accepted.wait().withTimeout(chronos.seconds(5))
+
+    # Apply the timeout to join() so it cannot cancel the dial under test.
+    dial.cancelSoon()
+    check:
+      await dial.join().withTimeout(chronos.seconds(3))
+      dial.cancelled()
+
+  asyncTest "stop collects a detached close the transport holds":
+    let gated = await newGatedPeer()
+    defer:
+      await gated.close()
+    let pm = PeerManager.new(gated.switch)
+    let conn = (await pm.dialPeer(gated.peer, WakuStoreCodec)).get()
+    await conn.writeLp("request".toBytes())
+    check await gated.wire.requestWritten.wait().withTimeout(chronos.seconds(1))
+
+    gated.wire.blockWrites = true
+    pm.closeDetached(conn, withEof = false)
+    check:
+      await gated.wire.blockedWriteSeen.wait().withTimeout(chronos.seconds(1))
+      pm.detachedCloseCount == 1
+
+    let stopping = pm.stop()
+    check:
+      await stopping.join().withTimeout(chronos.seconds(3))
+      pm.detachedCloseCount == 0
 
   asyncTest "Adding, selecting and filtering peers work":
     let
