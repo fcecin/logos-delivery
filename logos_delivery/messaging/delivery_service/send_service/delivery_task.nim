@@ -31,6 +31,20 @@ type DeliveryTask* = ref object
     ## waiting for epoch budget. Guards re-admission on retry and anchors the
     ## delivery-timeout reaper, so a task parked for budget is not aged out
     ## before it can be sent.
+  sentEventEmitted*: bool
+    ## Set once `MessageSent` has been emitted for this task, so a mixed
+    ## completion is not lost when a prior propagation already flipped
+    ## `propagateEventEmitted`, and is never emitted twice.
+  seenEventEmitted*: bool
+    ## Set once a mixed propagation has been marked seen for the receive
+    ## service, so its backfill does not fetch this message by hash while the
+    ## seen table remembers it (`MaxMessageLife`).
+  propagatedOverMix*: bool
+    ## Set when the propagation that succeeded went through mix. Such a message
+    ## is never confirmed against a store node: a store query carries the
+    ## message hash, and it would travel in clear text from this node's own
+    ## address, seconds after the message appeared -- which hands an observer
+    ## exactly the link the mixed send just paid to break.
   propagateEventEmitted*: bool
   errorDesc*: string
 

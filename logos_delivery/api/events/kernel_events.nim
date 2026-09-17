@@ -7,7 +7,9 @@ import logos_delivery/waku/waku_core/message
 export event_broker, pubsub_topic, content_topic, message
 
 EventBroker:
-  # Internal event emitted when a message arrives from the network via any protocol
+  # Internal event emitted when a message arrives from the network via any
+  # protocol, or, for a message this node sent over mix, when the exit's reply
+  # arrives (the send service marks it seen).
   type MessageSeenEvent* = object
     topic*: PubsubTopic
     message*: WakuMessage

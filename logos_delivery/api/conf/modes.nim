@@ -18,6 +18,9 @@ type EntryLayer* {.pure.} = enum
   channels # kernel + messaging + reliable channels
 
 type AnonymityLevel* {.pure.} = enum
+  ## How a send may use Mix. A message sent over Mix is complete when the exit
+  ## node's reply arrives, and is never confirmed against a store node: that
+  ## query would name the message, in clear, from this node's own address.
   None ## Never use Mix. Send over the plain path, relay then lightpush.
   Preferred ## Try Mix first. Use the plain path after the Mix window expires.
   Required ## Use Mix only. Never use the plain path.
