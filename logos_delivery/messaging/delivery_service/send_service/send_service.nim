@@ -48,6 +48,14 @@ const ArchiveTime = chronos.seconds(3)
   ## Estimation of the time we wait until we start confirming that a message has been properly
   ## received and archived by a store node
 
+const MaxSendsInFlight* = 4
+  ## Sends started per service pass before the pass waits for them. The loop
+  ## used to await one send at a time, which is the special case 1: one
+  ## unanswered mix reply (MixReplyTimeout, 5 s) then stalled every queued
+  ## message behind it. This bounds that cost to a batch, and bounds the burst
+  ## a service pass emits at once. Not tuned; 1 restores the previous
+  ## behavior. Exported for the tests.
+
 type SendService* = ref object of RootObj
   brokerCtx: BrokerContext
   taskCache: seq[DeliveryTask]
@@ -65,6 +73,11 @@ type SendService* = ref object of RootObj
   lastStoreCheckTime: Moment ## throttles store validation queries to ArchiveTime cadence
   maxDeliveryTime*: timer.Duration
     ## How long an admitted task may keep trying before it is failed.
+  maxSendsInFlight: int ## Batch size of the service pass; see `MaxSendsInFlight`.
+  inFlight: seq[tuple[task: DeliveryTask, fut: Future[void]]]
+    ## Sends started by the current pass and not yet waited for, kept so
+    ## `stopSendService` can cancel them: `allFutures` does not cancel its
+    ## children when it is cancelled itself.
 
 proc setupSendProcessorChain(
     waku: Waku, brokerCtx: BrokerContext, anonymityLevel: AnonymityLevel
@@ -114,9 +127,11 @@ proc new*(
     rateLimitManager: RateLimitManager,
     sendProcessor: BaseSendProcessor = nil,
     anonymityLevel: AnonymityLevel = AnonymityLevel.None,
+    maxSendsInFlight = MaxSendsInFlight,
 ): Result[T, string] =
   ## `sendProcessor` overrides the relay/lightpush chain built from `waku`,
   ## letting a caller drive the scheduler against a scripted delivery outcome.
+  ## `maxSendsInFlight` is the pass's batch size; tests set it, nothing else does.
   if not waku.hasRelay() and not waku.hasLightpush():
     return err(
       "Could not create SendService. wakuRelay or wakuLightpushClient should be set"
@@ -141,6 +156,7 @@ proc new*(
     checkStoreForMessages: checkStoreForMessages,
     lastStoreCheckTime: Moment.now(),
     maxDeliveryTime: maxDeliveryTime(anonymityLevel),
+    maxSendsInFlight: max(1, maxSendsInFlight),
   )
 
   return ok(sendService)
@@ -353,14 +369,45 @@ proc admitAndProve(self: SendService, task: DeliveryTask): Future[bool] {.async.
 
   return true
 
+proc drainInFlight(self: SendService) {.async.} =
+  ## Waits for the sends of the current batch. A send whose processor raised
+  ## is logged with its task and the pass goes on: the task keeps whatever
+  ## state the processor left, and the next round retries it.
+  await allFutures(self.inFlight.mapIt(it.fut))
+  for send in self.inFlight:
+    if send.fut.cancelled():
+      continue
+    if send.fut.failed():
+      # Nothing remote reaches here: the send path turns every CatchableError
+      # into an error result. A raise is a local malfunction.
+      error "Send attempt raised, the task waits for the next round",
+        requestId = send.task.requestId,
+        msgHash = send.task.msgHash.to0xHex(),
+        error = send.fut.error.msg
+      # `process` turns a hand-off into `NextRoundRetry` in its tail, which a
+      # raise mid-chain skips: normalise here, or a task left at
+      # `FallbackRetry` is never selected again and the reaper fails it.
+      if send.task.state == DeliveryState.FallbackRetry or
+          send.task.state == DeliveryState.Entry:
+        send.task.state = DeliveryState.NextRoundRetry
+  self.inFlight.setLen(0)
+
 proc trySendMessages*(self: SendService) {.async.} =
+  ## One service pass. Driven by the loop; a caller that drives it directly
+  ## and then stops the service ends only the batch in flight.
   let tasksToSend = self.taskCache.filterIt(it.state == DeliveryState.NextRoundRetry)
 
   for task in tasksToSend:
-    # Todo, check if it has any perf gain to run them concurrent...
+    # Admission stays sequential: the per-epoch budget and the RLN nonce are
+    # charged in order. Only the network round trips overlap, at most
+    # `maxSendsInFlight` at a time.
     if not (await self.admitAndProve(task)):
       continue
-    await self.sendProcessor.process(task)
+    self.inFlight.add((task: task, fut: self.sendProcessor.process(task)))
+    if self.inFlight.len >= self.maxSendsInFlight:
+      await self.drainInFlight()
+  if self.inFlight.len > 0:
+    await self.drainInFlight()
 
 proc serviceLoop(self: SendService) {.async.} =
   ## Continuously monitors that the sent messages have been received by a store node
@@ -378,6 +425,14 @@ proc startSendService*(self: SendService) =
 proc stopSendService*(self: SendService) {.async.} =
   if not self.serviceLoopHandle.isNil():
     await self.serviceLoopHandle.cancelAndWait()
+  # Cancelling the loop cancels its wait on the batch, not the batch. Take the
+  # batch first: a pass parked in `drainInFlight` empties the field as soon as
+  # its last send finishes, which happens inside the cancel below.
+  let sends = self.inFlight
+  self.inFlight.setLen(0)
+  for send in sends:
+    if not send.fut.finished():
+      await send.fut.cancelAndWait()
 
 proc send*(self: SendService, task: DeliveryTask) {.async.} =
   assert(not task.isNil(), "task for send must not be nil")
