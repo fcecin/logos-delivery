@@ -769,20 +769,8 @@ proc isNumber(x: string): bool =
     result = false
 
 proc parseCmdArg*(T: type MixNodePubInfo, p: string): T =
-  let elements = p.split(":")
-  if elements.len != 2:
-    raise newException(
-      ValueError, "Invalid format for mix node expected multiaddr:mixPublicKey"
-    )
-  let multiaddr = MultiAddress.init(elements[0]).valueOr:
-    raise newException(ValueError, "Invalid multiaddress format")
-  if not multiaddr.contains(multiCodec("ip4")).get():
-    raise newException(
-      ValueError, "Invalid format for ip address, expected a ipv4 multiaddress"
-    )
-  return MixNodePubInfo(
-    multiaddr: elements[0], pubKey: intoCurve25519Key(ncrutils.fromHex(elements[1]))
-  )
+  return parseMixNode(p).valueOr:
+    raise newException(ValueError, error)
 
 proc parseCmdArg*(T: type ProtectedShard, p: string): T =
   let elements = p.split(":")

@@ -14,6 +14,7 @@ import
   libp2p/crypto/crypto,
   libp2p/crypto/curve25519,
   libp2p/[multiaddress, multicodec, peerinfo, wire],
+  libp2p/nameresolving/nameresolver,
   libp2p/protocols/ping,
   libp2p/protocols/pubsub/gossipsub,
   libp2p/protocols/pubsub/rpc/messages,
@@ -89,6 +90,12 @@ const clientId* = "Nimbus Waku v2 node"
 
 const WakuNodeVersionString* = "version / git commit hash: " & git_version
 
+const MixNodeResolveTimeout = chronos.seconds(10)
+  ## The whole budget a mount may spend resolving mix node names. The DNS
+  ## client gives each query 5 s and then walks the rest of its name server
+  ## list, so a list resolved one entry at a time can hold a node's start for
+  ## minutes. Every name goes out at once, and the lot is bounded by this.
+
 type
   # TODO: Move to application instance (e.g., the node app)
   WakuInfo* = object # NOTE One for simplicity, can extend later as needed
@@ -162,6 +169,7 @@ type
     ownsEdgeFilterPeerCountProvider*: bool
 
 import ./subscription_manager
+import ../waku_mix/protocol_metrics
 
 proc deduceRelayShard(
     node: WakuNode,
@@ -355,6 +363,119 @@ proc getMixNodePoolSize*(node: WakuNode): int =
     return 0
   return node.wakuMix.poolSize()
 
+proc resolveMixNodes(
+    node: WakuNode, mixnodes: seq[MixNodePubInfo]
+): Future[seq[MixNodePubInfo]] {.async.} =
+  ## Turns the names in a mix node list into the literal addresses mix routes.
+  ##
+  ## A sphinx packet carries the address of the next hop, so the pool holds
+  ## literals only: `libp2p_mix` keeps a peer whose address is IPv4 TCP or
+  ## QUIC-v1 and drops the rest. Configuration pins names instead, because a
+  ## name is what stays true when a fleet node moves hosts. This is where the
+  ## name is spent, once, before the pool is built.
+  ##
+  ## An entry that cannot be resolved is dropped rather than failing the
+  ## mount: one unreachable name should not cost the node every other mix node
+  ## it was given, nor its own start. A name not resolving is a network
+  ## condition, so each outcome is a debug line and a counter, and one warning
+  ## summarises what was dropped and kept.
+  var
+    resolved: seq[MixNodePubInfo]
+    pending: seq[MixNodePubInfo]
+    futures: seq[
+      Future[seq[MultiAddress]].Raising(
+        [CancelledError, MaError, TransportAddressError]
+      )
+    ]
+
+  for mixnode in mixnodes:
+    let address = MultiAddress.init(mixnode.multiAddr).valueOr:
+      warn "Skipping a mix node with an invalid multiaddress",
+        multiAddr = mixnode.multiAddr, error = error
+      continue
+
+    if not DNS.matchPartial(address):
+      resolved.add(mixnode)
+      continue
+
+    if node.switch.nameResolver.isNil():
+      warn "Skipping a mix node given by name: the node has no name resolver",
+        multiAddr = mixnode.multiAddr
+      continue
+
+    pending.add(mixnode)
+    futures.add(node.switch.nameResolver.resolveMAddress(address))
+
+  if futures.len == 0:
+    return resolved
+
+  # `allFutures(...).withTimeout` does not cancel its children, and a mount
+  # cancelled from the outside raises `CancelledError` straight through the
+  # await below. Either way every still-pending lookup must be cancelled, or a
+  # DNS request outlives the mount. The `finally` guarantees it on every exit.
+  var timedOut = false
+  try:
+    # One deadline for the whole set, not one per name: the point of resolving
+    # in parallel is that a slow name costs the mount its own wait and no one
+    # else's.
+    timedOut = not (
+      await allFutures(futures.mapIt(FutureBase(it))).withTimeout(MixNodeResolveTimeout)
+    )
+  finally:
+    for fut in futures:
+      if not fut.finished():
+        await fut.cancelAndWait()
+
+  var dropped = 0
+  for i, mixnode in pending:
+    let fut = futures[i]
+    # The `finally` above already cancelled every unfinished lookup on timeout,
+    # so a cancelled future here is a name that did not answer in time -- drop
+    # it and keep the rest. (An outside cancel never reaches this loop: the
+    # `try` re-raises after the `finally`.) Do not `await` a cancelled future;
+    # that re-raises CancelledError and would abort the mount.
+    if fut.cancelled():
+      debug "Gave up resolving a mix node name, skipping it",
+        multiAddr = mixnode.multiAddr
+      logos_delivery_mix_bootnode_resolve_failures.inc()
+      dropped.inc()
+      continue
+
+    let addresses =
+      try:
+        await fut
+      except CancelledError as exc:
+        raise exc
+      except CatchableError as exc:
+        debug "Failed to resolve a mix node name, skipping it",
+          multiAddr = mixnode.multiAddr, error = exc.msg
+        logos_delivery_mix_bootnode_resolve_failures.inc()
+        dropped.inc()
+        continue
+
+    if addresses.len == 0:
+      debug "A mix node name resolved to no address, skipping it",
+        multiAddr = mixnode.multiAddr
+      logos_delivery_mix_bootnode_resolve_failures.inc()
+      dropped.inc()
+      continue
+
+    # A name can answer with more than one address. Each becomes a pool entry
+    # for the same peer, which is one mix node with several ways to reach it.
+    for address in addresses:
+      resolved.add(MixNodePubInfo(multiAddr: $address, pubKey: mixnode.pubKey))
+
+  if dropped > 0:
+    # One line for the condition, whatever its size: an offline start, a
+    # captive portal, or a retired fleet node all land here.
+    warn "Dropped mix nodes whose names did not resolve",
+      dropped = dropped,
+      kept = resolved.len,
+      timedOut = timedOut,
+      timeout = MixNodeResolveTimeout
+
+  return resolved
+
 proc mountMix*(
     node: WakuNode,
     clusterId: uint16,
@@ -370,8 +491,10 @@ proc mountMix*(
     return err("Failed to convert multiaddress to string.")
   info "local addr", localaddr = localaddrStr
 
+  let bootnodes = await node.resolveMixNodes(mixnodes)
+
   node.wakuMix = WakuMix.new(
-    localaddrStr, node.peerManager, clusterId, mixPrivKey, mixnodes
+    localaddrStr, node.peerManager, clusterId, mixPrivKey, bootnodes
   ).valueOr:
     error "Waku Mix protocol initialization failed", err = error
     return
