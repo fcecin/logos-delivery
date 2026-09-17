@@ -48,6 +48,8 @@ type DeliveryTask* = ref object
   propagatedAnonymously*: bool
     ## Set when an anonymous path propagated the message. No store node confirms
     ## it: the query would name the message from this node's own address.
+  lastStoreQueryTime*: Opt[Moment]
+    ## Last Store validation query time; none until the first query.
   errorDesc*: string
 
 proc new*(
