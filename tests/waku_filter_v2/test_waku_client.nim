@@ -7,8 +7,9 @@ import
   logos_delivery/waku/waku_node,
   logos_delivery/waku/waku_core,
   logos_delivery/waku/waku_filter_v2/
-    [common, client, subscriptions, protocol, protocol_metrics, rpc_codec],
-  ../testlib/[wakucore, testasync, testutils, futures, sequtils, wakunode],
+    [common, client, subscriptions, protocol, protocol_metrics, rpc, rpc_codec],
+  ../testlib/
+    [wakucore, testasync, testutils, futures, sequtils, wakunode, gated_transport],
   ./waku_filter_utils,
   ../resources/payloads
 
@@ -2636,3 +2637,120 @@ suite "Waku Filter - End to End":
       # shall still receive message on default content topic
       check not await pushHandlerFuture.withTimeout(FUTURE_TIMEOUT)
       check not await pushHandlerFuture2nd.withTimeout(FUTURE_TIMEOUT)
+
+suite "Waku Filter client - cancellation":
+  ## Cancel a subscribe request after the peer reads it but before it responds.
+  var serverSwitch {.threadvar.}: Switch
+  var clientSwitch {.threadvar.}: Switch
+  var client {.threadvar.}: WakuFilterClient
+  var serverPeer {.threadvar.}: RemotePeerInfo
+  var requestSeen {.threadvar.}: AsyncEvent
+  var gate {.threadvar.}: AsyncEvent
+
+  asyncSetup:
+    requestSeen = newAsyncEvent()
+    gate = newAsyncEvent()
+    serverSwitch = newStandardSwitch()
+    clientSwitch = newStandardSwitch()
+    proc hungHandler(
+        conn: Connection, proto: string
+    ) {.async: (raises: [CancelledError]).} =
+      try:
+        discard await conn.readLp(DefaultMaxSubscribeResponseSize)
+      except LPStreamError:
+        return
+      requestSeen.fire()
+      await gate.wait()
+      await conn.close()
+
+    serverSwitch.mount(
+      LPProtocol.new(codecs = @[WakuFilterSubscribeCodec], handler = hungHandler)
+    )
+    client = await newTestWakuFilterClient(clientSwitch)
+    await allFutures(serverSwitch.start(), clientSwitch.start())
+    serverPeer = serverSwitch.peerInfo.toRemotePeerInfo()
+
+  asyncTeardown:
+    gate.fire()
+    await allFutures(client.stop(), serverSwitch.stop(), clientSwitch.stop())
+
+  asyncTest "a cancelled subscribe ends cancelled, promptly":
+    let sub = client.subscribe(serverPeer, DefaultPubsubTopic, DefaultContentTopic)
+    check await requestSeen.wait().withTimeout(chronos.seconds(5))
+
+    sub.cancelSoon()
+    check:
+      await sub.join().withTimeout(chronos.seconds(3))
+      sub.cancelled()
+
+suite "Waku Filter client - a peer that withholds its EOF":
+  ## Return the subscribe response while the peer keeps its stream open.
+  var serverSwitch {.threadvar.}: Switch
+  var clientSwitch {.threadvar.}: Switch
+  var client {.threadvar.}: WakuFilterClient
+  var serverPeer {.threadvar.}: RemotePeerInfo
+  var answered {.threadvar.}: AsyncEvent
+  var release {.threadvar.}: AsyncEvent
+
+  asyncSetup:
+    answered = newAsyncEvent()
+    release = newAsyncEvent()
+    serverSwitch = newStandardSwitch()
+    clientSwitch = newStandardSwitch()
+    proc answerAndHold(
+        conn: Connection, proto: string
+    ) {.async: (raises: [CancelledError]).} =
+      try:
+        let buf = await conn.readLp(DefaultMaxSubscribeResponseSize)
+        let req = FilterSubscribeRequest.decode(buf).valueOr:
+          return
+        let resp = FilterSubscribeResponse(requestId: req.requestId, statusCode: 200)
+        await conn.writeLp(resp.encode().buffer)
+      except LPStreamError:
+        return
+      answered.fire()
+      await release.wait()
+      await conn.close()
+
+    serverSwitch.mount(
+      LPProtocol.new(codecs = @[WakuFilterSubscribeCodec], handler = answerAndHold)
+    )
+    client = await newTestWakuFilterClient(clientSwitch)
+    await allFutures(serverSwitch.start(), clientSwitch.start())
+    serverPeer = serverSwitch.peerInfo.toRemotePeerInfo()
+
+  asyncTeardown:
+    release.fire()
+    await allFutures(client.stop(), serverSwitch.stop(), clientSwitch.stop())
+
+  asyncTest "the subscribe returns with the answer, without waiting for the EOF":
+    let sub = client.subscribe(serverPeer, DefaultPubsubTopic, DefaultContentTopic)
+    check await answered.wait().withTimeout(chronos.seconds(5))
+
+    # Apply the timeout to join() so it cannot cancel the request under test.
+    check:
+      await sub.join().withTimeout(chronos.seconds(3))
+      sub.completed()
+      sub.read().isOk()
+
+suite "Waku Filter client - a transport that blocks the close frame":
+  ## Block the close-frame write after cancelling the response read.
+  ## The request must finish while the write remains blocked.
+  asyncTest "a cancelled subscribe ends while the transport blocks the close frame":
+    let gated = await newGatedPeer()
+    defer:
+      await gated.close()
+    let client = await newTestWakuFilterClient(gated.switch)
+    defer:
+      await client.stop()
+
+    let sub = client.subscribe(gated.peer, DefaultPubsubTopic, DefaultContentTopic)
+    check await gated.wire.requestWritten.wait().withTimeout(chronos.seconds(1))
+    gated.wire.blockWrites = true
+    sub.cancelSoon()
+    check await gated.wire.blockedWriteSeen.wait().withTimeout(chronos.seconds(1))
+
+    # Apply the timeout to join() so it cannot cancel the request under test.
+    check:
+      await sub.join().withTimeout(chronos.seconds(1))
+      sub.cancelled()
