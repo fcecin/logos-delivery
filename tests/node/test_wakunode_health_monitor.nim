@@ -808,6 +808,90 @@ suite "Health Monitor - mix readiness":
     await nodeB.stop()
     await nodeA.stop()
 
+  asyncTest "Required mix stays Disconnected while the pool's fourth member is unroutable":
+    ## The health gate reads the routable count, not the key count: a fourth
+    ## peer whose address mix cannot route must not lift the status.
+    var nodeA: WakuNode
+    lockNewGlobalBrokerContext:
+      nodeA =
+        newTestWakuNode(generateSecp256k1Key(), parseIpAddress("127.0.0.1"), Port(0))
+      (await nodeA.mountRelay()).expect("Node A failed to mount Relay")
+      await nodeA.mountTestMix()
+      await nodeA.start()
+
+    let monitorA = NodeHealthMonitor.new(nodeA)
+    monitorA.adjustConnectionStatus = requireMixReady
+
+    var
+      lastStatus = ConnectionStatus.Disconnected
+      healthChangeSignal = newAsyncEvent()
+
+    monitorA.onConnectionStatusChange = proc(status: ConnectionStatus) {.async.} =
+      lastStatus = status
+      healthChangeSignal.fire()
+
+    monitorA.startHealthMonitor().expect("Health monitor failed to start")
+
+    var nodeB: WakuNode
+    lockNewGlobalBrokerContext:
+      nodeB =
+        newTestWakuNode(generateSecp256k1Key(), parseIpAddress("127.0.0.1"), Port(0))
+      (await nodeB.mountRelay()).expect("Node B failed to mount relay")
+      await nodeB.start()
+
+    await nodeA.connectToNodes(@[nodeB.switch.peerInfo.toRemotePeerInfo()])
+
+    proc dummyHandler(topic: PubsubTopic, msg: WakuMessage): Future[void] {.async.} =
+      discard
+
+    nodeA.subscribe((kind: PubsubSub, topic: DefaultPubsubTopic), dummyHandler).expect(
+      "Node A failed to subscribe"
+    )
+    nodeB.subscribe((kind: PubsubSub, topic: DefaultPubsubTopic), dummyHandler).expect(
+      "Node B failed to subscribe"
+    )
+
+    proc waitForStatus(expected: ConnectionStatus): Future[bool] {.async.} =
+      let deadline = Moment.now() + TestConnectivityTimeLimit
+      while lastStatus != expected and Moment.now() < deadline:
+        if await healthChangeSignal.wait().withTimeout(deadline - Moment.now()):
+          healthChangeSignal.clear()
+      return lastStatus == expected
+
+    let relayDeadline = Moment.now() + TestConnectivityTimeLimit
+    while monitorA.getSyncProtocolHealthInfo(RelayProtocol).health != HealthStatus.READY and
+        Moment.now() < relayDeadline:
+      await sleepAsync(100.milliseconds)
+    await sleepAsync(1.seconds)
+    check:
+      monitorA.getSyncProtocolHealthInfo(RelayProtocol).health == HealthStatus.READY
+      lastStatus == ConnectionStatus.Disconnected
+
+    # Three routable members plus one whose only address is a name.
+    for i in 0 ..< MinMixPoolSize - 1:
+      nodeA.addMixPeer(62100 + i, lightpush = true)
+    let unroutableKeys = generateKeyPair().expect("mix key pair")
+    nodeA.peerManager.addPeer(
+      RemotePeerInfo.init(
+        PeerId.init(generateSecp256k1Key()).tryGet(),
+        @[MultiAddress.init("/dns4/node.test/tcp/62199").tryGet()],
+        protocols = @[WakuLightPushCodec],
+        mixPubKey = Opt.some(unroutableKeys.publicKey),
+      )
+    )
+    await sleepAsync(1.seconds)
+    check:
+      nodeA.getMixNodePoolSize() == MinMixPoolSize - 1
+      lastStatus == ConnectionStatus.Disconnected
+
+    # The fourth routable member opens the gate.
+    nodeA.addMixPeer(62103, lightpush = true)
+    check await waitForStatus(ConnectionStatus.PartiallyConnected)
+
+    await monitorA.stopHealthMonitor()
+    await nodeB.stop()
+    await nodeA.stop()
+
   asyncTest "Required mix recovers when discovery learns a pool peer serves lightpush":
     var nodeA: WakuNode
     lockNewGlobalBrokerContext:
