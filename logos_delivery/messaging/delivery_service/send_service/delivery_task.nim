@@ -35,6 +35,8 @@ type DeliveryTask* = ref object
   queuedEventEmitted*: bool
     ## Set once the task has reported itself queued for rate-limit budget, so
     ## the event fires on the first park only and not on every retry round.
+  lastStoreQueryTime*: Opt[Moment]
+    ## Last Store validation query time; none until the first query.
   errorDesc*: string
 
 proc new*(

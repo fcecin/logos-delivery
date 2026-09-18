@@ -83,9 +83,7 @@ type RecvService* = ref object of RootObj
 
   backfill: BackfillState ## the startup catch-up from the persisted hint
   stopping: bool
-    ## Lets the startup catch-up exit at stop. `storeQueryToAny`, `sendStoreRequest`,
-    ## `dialPeer` and the brokers request path swallow `CancelledError`, so a cancel
-    ## can fail to get to the task. Re-raise it at those sites, then delete this.
+    ## Broker requests catch CancelledError, so shutdown also checks this flag.
 
 proc getMissingMsgsFromStore(
     self: RecvService, msgHashes: seq[WakuMessageHash]
