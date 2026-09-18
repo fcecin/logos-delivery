@@ -180,6 +180,8 @@ proc legacyLightpushPublish*(
     debug "legacy lightpush send rejected as RLN-invalid; scheduling merkle proof refresh"
     rln.get().groupManager.scheduleMerkleProofRefresh()
     return err(RlnProofRefreshScheduledMsg & ": " & publishResult.error)
+  except CancelledError as exc:
+    raise exc
   except CatchableError:
     return err(getCurrentExceptionMsg())
 

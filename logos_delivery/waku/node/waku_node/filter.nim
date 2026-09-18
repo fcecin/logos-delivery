@@ -101,7 +101,7 @@ proc filterSubscribe*(
     pubsubTopic: Opt[PubsubTopic],
     contentTopics: ContentTopic | seq[ContentTopic],
     peer: RemotePeerInfo | string,
-): Future[FilterSubscribeResult] {.async: (raises: []).} =
+): Future[FilterSubscribeResult] {.async: (raises: [CancelledError]).} =
   ## Registers for messages that match a specific filter. Triggers the handler whenever a message is received.
   if node.wakuFilterClient.isNil():
     debug "Cannot register filter subscription to topic",
@@ -170,6 +170,10 @@ proc filterSubscribe*(
 
         # Purpose is to update Waku Metadata
         node.topicSubscriptionQueue.emit((kind: PubsubSub, topic: $pubsub))
+    except CancelledError as exc:
+      # allFinished does not cancel the requests it awaits.
+      await cancelAndWait(futures)
+      raise exc
     except CatchableError:
       let errMsg = "exception in filterSubscribe: " & getCurrentExceptionMsg()
       debug "Exception in filterSubscribe", error = getCurrentExceptionMsg()
@@ -185,7 +189,7 @@ proc filterUnsubscribe*(
     pubsubTopic: Opt[PubsubTopic],
     contentTopics: ContentTopic | seq[ContentTopic],
     peer: RemotePeerInfo | string,
-): Future[FilterSubscribeResult] {.async: (raises: []).} =
+): Future[FilterSubscribeResult] {.async: (raises: [CancelledError]).} =
   ## Unsubscribe from a content filter V2".
 
   let remotePeer = parsePeerInfo(peer).valueOr:
@@ -246,6 +250,9 @@ proc filterUnsubscribe*(
 
         # Purpose is to update Waku Metadata
         node.topicSubscriptionQueue.emit((kind: PubsubUnsub, topic: $pubsub))
+    except CancelledError as exc:
+      await cancelAndWait(futures)
+      raise exc
     except CatchableError:
       let errMsg = "exception in filterUnsubscribe: " & getCurrentExceptionMsg()
       debug "Exception in filterUnsubscribe", error = getCurrentExceptionMsg()
@@ -258,7 +265,7 @@ proc filterUnsubscribe*(
 
 proc filterUnsubscribeAll*(
     node: WakuNode, peer: RemotePeerInfo | string
-): Future[FilterSubscribeResult] {.async: (raises: []).} =
+): Future[FilterSubscribeResult] {.async: (raises: [CancelledError]).} =
   ## Unsubscribe from a content filter V2".
 
   let remotePeer = parsePeerInfo(peer).valueOr:
