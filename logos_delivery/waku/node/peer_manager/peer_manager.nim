@@ -60,6 +60,7 @@ randomize()
 const
   # TODO: Make configurable
   DefaultDialTimeout* = chronos.seconds(10)
+  DetachedCloseDrainTimeout* = chronos.seconds(1)
 
   # Max attempts before removing the peer
   MaxFailedAttempts = 5
@@ -112,6 +113,7 @@ type PeerManager* = ref object of RootObj
   getShards: GetShards
   maxConnections: int
   activeStoreRequests*: Table[PeerId, int]
+  detachedCloses: seq[Future[void]]
 
 #~~~~~~~~~~~~~~~~~~~#
 # Helper Functions  #
@@ -190,6 +192,23 @@ proc removeActiveStoreRequest*(pm: PeerManager, peerId: PeerId) {.gcsafe.} =
 
 proc hasActiveStoreRequest*(pm: PeerManager, peerId: PeerId): bool {.gcsafe.} =
   pm.activeStoreRequests.contains(peerId)
+
+proc closeDetached*(pm: PeerManager, conn: Connection, withEof: bool) =
+  let fut =
+    if withEof:
+      conn.closeWithEOF()
+    else:
+      conn.close()
+  if fut.finished():
+    return
+  pm.detachedCloses.add(fut)
+  fut.addCallback(
+    proc(udata: pointer) {.gcsafe, raises: [].} =
+      pm.detachedCloses.keepItIf(it != fut)
+  )
+
+proc detachedCloseCount*(pm: PeerManager): int =
+  pm.detachedCloses.len
 
 proc loadFromStorage(pm: PeerManager) {.gcsafe.} =
   ## Load peers from storage, if available
@@ -453,13 +472,21 @@ proc dialPeer(
   # Dial Peer
   let dialFut = pm.switch.dial(peerId, addrs, proto)
 
-  let res = catch:
-    if await dialFut.withTimeout(dialTimeout):
-      return Opt.some(dialFut.read())
-    else:
+  let reasonFailed =
+    try:
+      if await dialFut.withTimeout(dialTimeout):
+        return Opt.some(dialFut.read())
       await cancelAndWait(dialFut)
-
-  let reasonFailed = if res.isOk: "timed out" else: res.error.msg
+      if dialFut.completed():
+        # The dial may complete while cancelAndWait runs.
+        pm.closeDetached(dialFut.read(), withEof = false)
+      "timed out"
+    except CancelledError as exc:
+      if dialFut.completed():
+        pm.closeDetached(dialFut.read(), withEof = false)
+      raise exc
+    except CatchableError as exc:
+      exc.msg
 
   trace "Dialing peer failed", peerId = peerId, reason = reasonFailed, proto = proto
 
@@ -1165,8 +1192,12 @@ proc start*(pm: PeerManager) =
   asyncSpawn pm.prunePeerStoreLoop()
   asyncSpawn pm.logAndMetrics()
 
-proc stop*(pm: PeerManager) =
+proc stop*(pm: PeerManager) {.async.} =
   pm.started = false
+  let pending = pm.detachedCloses
+  if pending.len > 0:
+    discard await allFutures(pending).withTimeout(DetachedCloseDrainTimeout)
+    await cancelAndWait(pending.filterIt(not it.finished()))
 
 proc new*(
     T: type PeerManager,
