@@ -106,8 +106,10 @@ proc networkConfiguration*(
       Opt.none(IpAddress)
 
   let
+    ## Port 0 is a bind-time placeholder. The rebuild at start writes the
+    ## bound port.
     discv5UdpPort =
-      if discv5Conf.isSome():
+      if discv5Conf.isSome() and discv5Conf.get().udpPort != Port(0):
         Opt.some(discv5Conf.get().udpPort)
       else:
         Opt.none(Port)

@@ -14,14 +14,22 @@ import
   brokers/broker_context
 
 import
-  logos_delivery/waku/
-    [waku_node, discovery/waku_discv5, waku_peer_exchange, node/peer_manager, waku_core],
+  logos_delivery/waku/[
+    waku_node,
+    waku_enr,
+    discovery/waku_discv5,
+    waku_peer_exchange,
+    node/peer_manager,
+    waku_core,
+  ],
   ../waku_peer_exchange/utils,
   ../testlib/[wakucore, wakunode, testasync]
 
 suite "Waku Peer Exchange":
   let
-    bindIp: IPAddress = parseIpAddress("0.0.0.0")
+    ## A concrete host: the ENR of a node bound to the wildcard host carries
+    ## no endpoint, and this suite dials nodes through their ENRs.
+    bindIp: IPAddress = parseIpAddress("127.0.0.1")
     bindPort: Port = Port(0)
 
   var node {.threadvar.}: WakuNode
@@ -118,6 +126,38 @@ suite "Waku Peer Exchange":
 
       # Check that the peer ended up in the peerstore
       check:
+        node.peerManager.switch.peerStore.peers.anyIt(it.peerId == rpInfo.peerId)
+
+    asyncTest "a record without a dialable endpoint is skipped, not a defect":
+      ## A node that has not resolved its addresses yet advertises an ENR
+      ## with no ip, tcp or multiaddrs. Such a record is legal and reaches
+      ## other nodes through peer exchange. The client used to dereference
+      ## the failed conversion.
+      await allFutures([node.mountPeerExchangeClient(), node2.mountPeerExchange()])
+
+      let bareKey = generateSecp256k1Key()
+      var builder = EnrBuilder.init(bareKey)
+      builder
+        .withWakuRelaySharding(RelayShards(clusterId: 1, shardIds: @[0'u16]))
+        .expect("shards")
+      let bare = builder.build().expect("record")
+      check bare.toRemotePeerInfo().isErr() ## nothing to dial in it
+      var bareInfo = RemotePeerInfo.init(PeerId.init(bareKey).expect("peer id"), @[])
+      bareInfo.enr = Opt.some(bare)
+      node2.peerManager.addPeer(bareInfo, PeerOrigin.Discv5)
+
+      var rpInfo = node3.peerInfo.toRemotePeerInfo()
+      rpInfo.enr = Opt.some(node3.enr)
+      node2.peerManager.addPeer(rpInfo, PeerOrigin.Discv5)
+
+      node.peerManager.addServicePeer(
+        node2.peerInfo.toRemotePeerInfo(), WakuPeerExchangeCodec
+      )
+
+      # The bare record is skipped; node3's, which has endpoints, is added.
+      let res = await node.fetchPeerExchangePeers(2)
+      check:
+        res.tryGet() == 1
         node.peerManager.switch.peerStore.peers.anyIt(it.peerId == rpInfo.peerId)
 
   suite "setPeerExchangePeer":

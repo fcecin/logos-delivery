@@ -381,12 +381,31 @@ suite "Waku NetConfig":
         wsFlag(wssEnabled)
       )
 
-  asyncTest "ENR is set with bindIp/Port if no extIp/Port are provided":
+  asyncTest "ENR is set with bindIp/Port when they are concrete and no extIp/Port are provided":
+    let
+      bindIp = parseIpAddress("192.0.2.1")
+      bindPort = Port(60000)
+
+    let netConfigRes = NetConfig.init(bindIp = bindIp, bindPort = bindPort)
+
+    assert netConfigRes.isOk(), $netConfigRes.error
+
+    let netConfig = netConfigRes.get()
+
+    check:
+      netConfig.enrIp.get() == bindIp
+      netConfig.enrPort.get() == bindPort
+
+  asyncTest "ENR omits ip and tcp for a wildcard bind with an unpinned port":
+    ## The test defaults are the library defaults: `0.0.0.0` and port 0 are
+    ## bind-time placeholders, and a peer can use neither.
     let conf = defaultTestWakuConf()
 
     let netConfigRes = NetConfig.init(
       bindIp = conf.endpointConf.p2pListenAddress,
       bindPort = conf.endpointConf.p2pTcpPort,
+      quicEnabled = true,
+      quicBindPort = Opt.some(Port(0)),
     )
 
     assert netConfigRes.isOk(), $netConfigRes.error
@@ -394,8 +413,27 @@ suite "Waku NetConfig":
     let netConfig = netConfigRes.get()
 
     check:
-      netConfig.enrIp.get() == conf.endpointConf.p2pListenAddress
-      netConfig.enrPort.get() == conf.endpointConf.p2pTcpPort
+      netConfig.enrIp.isNone()
+      netConfig.enrPort.isNone()
+      netConfig.enrMultiaddrs.len == 0 ## the wildcard QUIC entry is not dialable
+      netConfig.announcedAddresses.len == 2 ## the bind addresses still go to the mappers
+
+  asyncTest "ENR keeps a pinned port on a wildcard bind, and still omits the ip":
+    let netConfigRes = NetConfig.init(
+      bindIp = parseIpAddress("0.0.0.0"),
+      bindPort = Port(60000),
+      quicEnabled = true,
+      quicBindPort = Opt.some(Port(60000)),
+    )
+
+    assert netConfigRes.isOk(), $netConfigRes.error
+
+    let netConfig = netConfigRes.get()
+
+    check:
+      netConfig.enrIp.isNone()
+      netConfig.enrPort.get() == Port(60000)
+      netConfig.enrMultiaddrs.len == 0 ## the QUIC entry still names the wildcard host
 
   asyncTest "ENR is set with extIp/Port if provided":
     let
@@ -417,6 +455,40 @@ suite "Waku NetConfig":
     check:
       netConfig.extIp.get() == extIp
       netConfig.enrPort.get() == extPort
+
+  asyncTest "ENR omits a port of 0 that comes with an external ip":
+    ## `networkConfiguration` passes the bind port as the external port when
+    ## an external ip vouches for the host. An unpinned port is still port 0.
+    let netConfigRes = NetConfig.init(
+      bindIp = parseIpAddress("0.0.0.0"),
+      bindPort = Port(0),
+      extIp = Opt.some(parseIpAddress("203.0.113.9")),
+      extPort = Opt.some(Port(0)),
+    )
+
+    assert netConfigRes.isOk(), $netConfigRes.error
+
+    let netConfig = netConfigRes.get()
+
+    check:
+      netConfig.enrIp == Opt.some(parseIpAddress("203.0.113.9"))
+      netConfig.enrPort.isNone()
+
+  asyncTest "ENR omits every spelling of the wildcard host, and keeps a concrete one":
+    for host in ["0.0.0.0", "::", "::ffff:0.0.0.0"]:
+      for port in [Port(0), Port(60000)]:
+        let netConfig = NetConfig
+          .init(bindIp = parseIpAddress(host), bindPort = port)
+          .expect("netconfig for " & host)
+        check netConfig.enrIp.isNone()
+        check netConfig.enrPort ==
+          (if port == Port(0): Opt.none(Port) else: Opt.some(port))
+
+    for host in ["192.0.2.1", "2001:db8::1", "::ffff:192.0.2.1"]:
+      let netConfig = NetConfig
+        .init(bindIp = parseIpAddress(host), bindPort = Port(60000))
+        .expect("netconfig for " & host)
+      check netConfig.enrIp == Opt.some(parseIpAddress(host))
 
   asyncTest "ENR is set with dns4DomainName if provided":
     let

@@ -417,6 +417,9 @@ suite "Waku Discovery v5":
     asyncTest "Start waku and check discv5 discovered peers":
       let myRng = libp2p_keys.newRng()
       var confBuilder = defaultTestWakuConfBuilder()
+      ## A chosen host: the ENR of a node bound to the wildcard host carries no
+      ## host, and discv5 finds peers through their ENRs.
+      confBuilder.withP2pListenAddress(parseIpAddress("127.0.0.1"))
 
       confBuilder.withNodeKey(libp2p_keys.PrivateKey.random(Secp256k1, myRng)[])
       confBuilder.discv5Conf.withEnabled(true)
