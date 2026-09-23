@@ -60,10 +60,13 @@ proc new*(
   let sendQueueCapacity = conf.sendQueueCapacity.get(uint(DefaultMaxTaskCacheSize))
   if sendQueueCapacity notin 1'u .. SendQueueCapacityLimit:
     return err("sendQueueCapacity must be between 1 and " & $SendQueueCapacityLimit)
+  let sendProcessor = setupSendProcessorChain(waku, anonymityLevel).valueOr:
+    return err("failed to setup SendProcessorChain: " & error)
   let sendService = ?SendService.new(
     reliability,
     waku,
     rateLimitManager,
+    sendProcessor,
     anonymityLevel = anonymityLevel,
     maxParkedAge = seconds(int64(maxParkedAgeSec)),
     maxTaskCacheSize = int(sendQueueCapacity),
