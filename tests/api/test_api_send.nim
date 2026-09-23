@@ -13,6 +13,7 @@ import logos_delivery/api/conf/messaging_conf
 type SendEventOutcome {.pure.} = enum
   Sent
   Propagated
+  Archived
   Error
 
 type SendEventListenerManager = ref object
@@ -20,21 +21,26 @@ type SendEventListenerManager = ref object
   sentListener: MessageSentEventListener
   errorListener: MessageErrorEventListener
   propagatedListener: MessagePropagatedEventListener
+  archivedListener: MessageArchivedEventListener
   sentFuture: Future[void]
   errorFuture: Future[void]
   propagatedFuture: Future[void]
+  archivedFuture: Future[void]
   sentCount: int
   errorCount: int
   propagatedCount: int
+  archivedCount: int
   sentRequestIds: seq[RequestId]
   errorRequestIds: seq[RequestId]
   propagatedRequestIds: seq[RequestId]
+  archivedRequestIds: seq[RequestId]
 
 proc newSendEventListenerManager(brokerCtx: BrokerContext): SendEventListenerManager =
   let manager = SendEventListenerManager(brokerCtx: brokerCtx)
   manager.sentFuture = newFuture[void]("sentEvent")
   manager.errorFuture = newFuture[void]("errorEvent")
   manager.propagatedFuture = newFuture[void]("propagatedEvent")
+  manager.archivedFuture = newFuture[void]("archivedEvent")
 
   manager.sentListener = MessageSentEvent.listen(
     brokerCtx,
@@ -76,6 +82,19 @@ proc newSendEventListenerManager(brokerCtx: BrokerContext): SendEventListenerMan
   ).valueOr:
     raiseAssert error
 
+  manager.archivedListener = MessageArchivedEvent.listen(
+    brokerCtx,
+    proc(event: MessageArchivedEvent) {.async: (raises: []).} =
+      inc manager.archivedCount
+      manager.archivedRequestIds.add(event.requestId)
+      echo "ARCHIVED EVENT TRIGGERED (#",
+        manager.archivedCount, "): requestId=", event.requestId
+      if not manager.archivedFuture.finished():
+        manager.archivedFuture.complete()
+    ,
+  ).valueOr:
+    raiseAssert error
+
   return manager
 
 proc teardown(manager: SendEventListenerManager) {.async.} =
@@ -84,12 +103,14 @@ proc teardown(manager: SendEventListenerManager) {.async.} =
   await MessagePropagatedEvent.dropListener(
     manager.brokerCtx, manager.propagatedListener
   )
+  await MessageArchivedEvent.dropListener(manager.brokerCtx, manager.archivedListener)
 
 proc waitForEvents(
     manager: SendEventListenerManager, timeout: Duration
 ): Future[bool] {.async.} =
   return await allFutures(
-    manager.sentFuture, manager.propagatedFuture, manager.errorFuture
+    manager.sentFuture, manager.propagatedFuture, manager.archivedFuture,
+    manager.errorFuture,
   )
     .withTimeout(timeout)
 
@@ -98,13 +119,15 @@ proc outcomes(manager: SendEventListenerManager): set[SendEventOutcome] =
     result.incl(SendEventOutcome.Sent)
   if manager.propagatedFuture.completed():
     result.incl(SendEventOutcome.Propagated)
+  if manager.archivedFuture.completed():
+    result.incl(SendEventOutcome.Archived)
   if manager.errorFuture.failed():
     result.incl(SendEventOutcome.Error)
 
 proc validate(manager: SendEventListenerManager, expected: set[SendEventOutcome]) =
   echo "EVENT COUNTS: sent=",
-    manager.sentCount, ", propagated=", manager.propagatedCount, ", error=",
-    manager.errorCount
+    manager.sentCount, ", propagated=", manager.propagatedCount, ", archived=",
+    manager.archivedCount, ", error=", manager.errorCount
   check manager.outcomes() == expected
 
 proc validate(
@@ -116,6 +139,8 @@ proc validate(
   for requestId in manager.sentRequestIds:
     check requestId == expectedRequestId
   for requestId in manager.propagatedRequestIds:
+    check requestId == expectedRequestId
+  for requestId in manager.archivedRequestIds:
     check requestId == expectedRequestId
   for requestId in manager.errorRequestIds:
     check requestId == expectedRequestId
@@ -270,7 +295,8 @@ suite "Waku API - Send":
     discard await eventManager.waitForEvents(eventTimeout)
 
     eventManager.validate(
-      {SendEventOutcome.Sent, SendEventOutcome.Propagated}, requestId
+      {SendEventOutcome.Sent, SendEventOutcome.Propagated, SendEventOutcome.Archived},
+      requestId,
     )
 
     (await node.stop()).isOkOr:
@@ -445,7 +471,8 @@ suite "Waku API - Send":
     discard await eventManager.waitForEvents(eventTimeout)
 
     eventManager.validate(
-      {SendEventOutcome.Propagated, SendEventOutcome.Sent}, requestId
+      {SendEventOutcome.Propagated, SendEventOutcome.Sent, SendEventOutcome.Archived},
+      requestId,
     )
     (await node.stop()).isOkOr:
       raiseAssert "Failed to stop node: " & error

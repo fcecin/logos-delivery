@@ -88,6 +88,9 @@ suite "Messaging REST API":
     MessageSentEvent.emit(
       brokerCtx, MessageSentEvent(requestId: reqA, messageHash: "0xaa")
     )
+    MessageArchivedEvent.emit(
+      brokerCtx, MessageArchivedEvent(requestId: reqA, messageHash: "0xaa")
+    )
     MessageErrorEvent.emit(
       brokerCtx, MessageErrorEvent(requestId: reqB, messageHash: "0xbb", error: "boom")
     )
@@ -98,9 +101,10 @@ suite "Messaging REST API":
     check:
       byIdResp.status == 200
       byIdResp.data.requestId == $reqA
-      byIdResp.data.events.len == 2
+      byIdResp.data.events.len == 3
       byIdResp.data.events.anyIt(it.kind == SendEventKind.Sent)
       byIdResp.data.events.anyIt(it.kind == SendEventKind.Propagated)
+      byIdResp.data.events.anyIt(it.kind == SendEventKind.Archived)
 
     # Unknown / already-polled id → 404 (raw string client so the text error
     # body decodes; the typed client would raise on a non-2xx body).

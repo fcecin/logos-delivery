@@ -142,7 +142,7 @@ proc readValue*(
 
 #### Event observability DTOs
 ##
-## Send-related events (sent / propagated / error) are grouped per request id.
+## Send-related events (sent / propagated / archived / error) are grouped per request id.
 ## Received messages carry the full `WakuMessage` (serialized as
 ## `RelayWakuMessage`) and the `source` it came from (`live` / `history`),
 ## matching the nim `MessageReceivedEvent`. Both surfaces are populated by the
@@ -153,6 +153,7 @@ type
     Queued = "queued"
     Sent = "sent"
     Propagated = "propagated"
+    Archived = "archived"
     Error = "error"
 
   SendEventRecord* = object
@@ -211,6 +212,8 @@ proc readValue*(
     value = SendEventKind.Sent
   of "propagated":
     value = SendEventKind.Propagated
+  of "archived":
+    value = SendEventKind.Archived
   of "error":
     value = SendEventKind.Error
   else:

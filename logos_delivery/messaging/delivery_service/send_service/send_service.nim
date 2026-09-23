@@ -219,6 +219,7 @@ proc reportTaskResult(self: SendService, task: DeliveryTask) =
     info "Message successfully sent",
       requestId = task.requestId, msgHash = task.msgHash.to0xHex()
     MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+    MessageArchivedEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
     return
   of DeliveryState.FailedToDeliver:
     error "Failed to send message",

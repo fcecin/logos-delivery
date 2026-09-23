@@ -12,6 +12,7 @@ from src.node.wrapper_helpers import (
     wait_for_connected,
     wait_for_propagated,
     wait_for_sent,
+    wait_for_archived,
     wait_for_error,
 )
 from tests.wrappers_tests.conftest import build_node_config
@@ -177,7 +178,7 @@ class TestS07CoreSenderRelayAndStore(StepsCommon):
     S07 — Core sender with relay peers and store peer, reliability enabled.
     Sender relays message to a store-capable peer; delivery service validates
     the message reached the store via p2p reliability check.
-    Expected: Propagated, then Sent.
+    Expected: Propagated, then Sent, then Archived.
     """
 
     def test_s07_relay_propagation_with_store_validation(self, node_config):
@@ -243,6 +244,16 @@ class TestS07CoreSenderRelayAndStore(StepsCommon):
                     f"No message_sent event within {SENT_TIMEOUT_S}s after propagation. " f"Collected events: {sender_collector.events}"
                 )
                 assert sent["requestId"] == request_id
+
+                archived = wait_for_archived(
+                    collector=sender_collector,
+                    request_id=request_id,
+                    timeout_s=SENT_TIMEOUT_S,
+                )
+                assert archived is not None, (
+                    f"No message_archived event within {SENT_TIMEOUT_S}s after message_sent. " f"Collected events: {sender_collector.events}"
+                )
+                assert archived["requestId"] == request_id
 
                 error = wait_for_error(sender_collector, request_id, timeout_s=0)
                 assert error is None, f"Unexpected message_error event: {error}"

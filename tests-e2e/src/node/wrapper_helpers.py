@@ -13,6 +13,7 @@ DEFAULT_CONTENT_TOPIC = "/test/1/default/proto"
 DEFAULT_PAYLOAD = to_base64("test payload")
 EVENT_PROPAGATED = "message_propagated"
 EVENT_SENT = "message_sent"
+EVENT_ARCHIVED = "message_archived"
 EVENT_ERROR = "message_error"
 EVENT_CHANNEL_RECEIVED = "channel_message_received"
 
@@ -70,6 +71,10 @@ def is_sent_event(event: dict) -> bool:
     return event.get("eventType") == EVENT_SENT
 
 
+def is_archived_event(event: dict) -> bool:
+    return event.get("eventType") == EVENT_ARCHIVED
+
+
 def is_error_event(event: dict) -> bool:
     return event.get("eventType") == EVENT_ERROR
 
@@ -101,6 +106,10 @@ def wait_for_propagated(collector: EventCollector, request_id: str, timeout_s: f
 
 def wait_for_sent(collector: EventCollector, request_id: str, timeout_s: float) -> Optional[dict]:
     return wait_for_event(collector, request_id, is_sent_event, timeout_s)
+
+
+def wait_for_archived(collector: EventCollector, request_id: str, timeout_s: float) -> Optional[dict]:
+    return wait_for_event(collector, request_id, is_archived_event, timeout_s)
 
 
 def wait_for_error(collector: EventCollector, request_id: str, timeout_s: float) -> Optional[dict]:
@@ -143,14 +152,15 @@ def wait_for_connected(
     return None
 
 
-TERMINAL_EVENT_TYPES = {EVENT_PROPAGATED, EVENT_SENT, EVENT_ERROR}
+TERMINAL_EVENT_TYPES = {EVENT_PROPAGATED, EVENT_SENT, EVENT_ARCHIVED, EVENT_ERROR}
 
 
 def assert_event_invariants(collector: EventCollector, request_id: str) -> None:
     """Check per-request event invariants (issue #163):
     - All events carry the correct requestId.
-    - No duplicate terminal events (Propagated, Sent, Error).
+    - No duplicate terminal events (Propagated, Sent, Archived, Error).
     - Sent never appears before Propagated.
+    - Archived never appears before Sent.
     """
     events = collector.get_events_for_request(request_id)
     assert events, f"No events found for request {request_id}"
@@ -174,6 +184,13 @@ def assert_event_invariants(collector: EventCollector, request_id: str) -> None:
         assert first_index[EVENT_PROPAGATED] < first_index[EVENT_SENT], (
             f"message_sent (index {first_index[EVENT_SENT]}) arrived before "
             f"message_propagated (index {first_index[EVENT_PROPAGATED]}) "
+            f"for request {request_id}. Events: {events}"
+        )
+
+    if EVENT_ARCHIVED in first_index and EVENT_SENT in first_index:
+        assert first_index[EVENT_SENT] < first_index[EVENT_ARCHIVED], (
+            f"message_archived (index {first_index[EVENT_ARCHIVED]}) arrived before "
+            f"message_sent (index {first_index[EVENT_SENT]}) "
             f"for request {request_id}. Events: {events}"
         )
 

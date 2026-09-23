@@ -62,6 +62,13 @@ void event_callback(int ret, const char *msg, size_t len, void *userData) {
         extract_json_field(eventJson, "messageHash", messageHash, sizeof(messageHash));
         printf("[EVENT] Message propagated - RequestID: %s, Hash: %s\n", requestId, messageHash);
 
+    } else if (strcmp(eventType, "message_archived") == 0) {
+        char requestId[128];
+        char messageHash[128];
+        extract_json_field(eventJson, "requestId", requestId, sizeof(requestId));
+        extract_json_field(eventJson, "messageHash", messageHash, sizeof(messageHash));
+        printf("[EVENT] Message archived - RequestID: %s, Hash: %s\n", requestId, messageHash);
+
     } else if (strcmp(eventType, "connection_status_change") == 0) {
         char connectionStatus[256];
         extract_json_field(eventJson, "connectionStatus", connectionStatus, sizeof(connectionStatus));
@@ -243,6 +250,7 @@ int main() {
     // The listener registry takes the raw context pointer.
     logosdelivery_add_event_listener(ctx->ptr, "onMessageSent", event_callback, NULL);
     logosdelivery_add_event_listener(ctx->ptr, "onMessagePropagated", event_callback, NULL);
+    logosdelivery_add_event_listener(ctx->ptr, "onMessageArchived", event_callback, NULL);
     logosdelivery_add_event_listener(ctx->ptr, "onMessageError", event_callback, NULL);
     logosdelivery_add_event_listener(ctx->ptr, "onChannelMessageReceived", event_callback, NULL);
     logosdelivery_add_event_listener(ctx->ptr, "onChannelMessageSent", event_callback, NULL);

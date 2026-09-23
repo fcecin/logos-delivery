@@ -14,8 +14,9 @@ import
     [send_service, send_processor, delivery_task]
 import ../testlib/[testasync, wakunodeconf]
 
-## The events a send ends with once it has propagated. A propagated message
-## that no store node confirms within `MaxTimeInCache` is
+## The events a send ends with once it has propagated. A store node confirming
+## the message is the durable milestone: `MessageSent`, then `MessageArchived`.
+## A propagated message that no store node confirms within `MaxTimeInCache` is
 ## dropped from the task cache; with reliability on, the drop has to be
 ## reported, because a reliable channel finalises a send only on
 ## `MessageSent` or `MessageError`.
@@ -35,9 +36,11 @@ method process(self: ScriptedProcessor, task: DeliveryTask): Future[void] {.asyn
 type SendEvents = ref object
   ## The send events seen on the node's broker, in the order they arrived.
   sent: seq[MessageSentEvent]
+  archived: seq[MessageArchivedEvent]
   errors: seq[MessageErrorEvent]
   order: seq[string]
   sentListener: MessageSentEventListener
+  archivedListener: MessageArchivedEventListener
   errorListener: MessageErrorEventListener
 
 proc listenSendEvents(brokerCtx: BrokerContext): SendEvents =
@@ -50,6 +53,14 @@ proc listenSendEvents(brokerCtx: BrokerContext): SendEvents =
         events.order.add("sent"),
     )
     .expect("listen MessageSentEvent")
+  events.archivedListener = MessageArchivedEvent
+    .listen(
+      brokerCtx,
+      proc(event: MessageArchivedEvent) {.async: (raises: []).} =
+        events.archived.add(event)
+        events.order.add("archived"),
+    )
+    .expect("listen MessageArchivedEvent")
   events.errorListener = MessageErrorEvent
     .listen(
       brokerCtx,
@@ -62,6 +73,7 @@ proc listenSendEvents(brokerCtx: BrokerContext): SendEvents =
 
 proc stop(events: SendEvents, brokerCtx: BrokerContext) {.async.} =
   await MessageSentEvent.dropListener(brokerCtx, events.sentListener)
+  await MessageArchivedEvent.dropListener(brokerCtx, events.archivedListener)
   await MessageErrorEvent.dropListener(brokerCtx, events.errorListener)
 
 proc testConf(): WakuConf =
@@ -99,6 +111,27 @@ suite "SendService - store validation outcomes":
       .new(preferP2PReliability, waku, manager, ScriptedProcessor(outcome: outcome))
       .expect("SendService.new")
 
+  asyncTest "a store-confirmed message reports MessageSent, then MessageArchived":
+    ## `MessageSent` is the terminal today's consumers key on; `MessageArchived`
+    ## names what the confirmation is: the message is durable.
+    let service = newService(true, DeliveryState.SuccessfullyValidated)
+    let task = buildTask("store-confirmed")
+    let events = listenSendEvents(waku.brokerCtx)
+    defer:
+      await events.stop(waku.brokerCtx)
+
+    await service.send(task)
+    await sleepAsync(chronos.milliseconds(50))
+
+    check:
+      events.order == @["sent", "archived"]
+      events.errors.len == 0
+    if events.sent.len == 1 and events.archived.len == 1:
+      check:
+        events.sent[0].requestId == task.requestId
+        events.archived[0].requestId == task.requestId
+        events.archived[0].messageHash == task.msgHash.to0xHex()
+
   asyncTest "a reliable send that no store node confirms ends with MessageError":
     ## The test node has a store client, so with reliability on the propagated
     ## task waits for store validation. No store peer ever confirms it. Once
@@ -129,8 +162,9 @@ suite "SendService - store validation outcomes":
 
   asyncTest "with reliability off a propagated task is dropped without a terminal":
     ## No store confirmation will follow, so the task is dropped as soon as it
-    ## propagated, however old the propagation: no `MessageSent` and no
-    ## `MessageError`. The timeout terminal is for reliable sends only.
+    ## propagated, however old the propagation: no `MessageSent`, no
+    ## `MessageArchived` and no `MessageError`. The timeout terminal is for
+    ## reliable sends only.
     let service = newService(false, DeliveryState.SuccessfullyPropagated)
     let task = buildTask("reliability-off")
     let events = listenSendEvents(waku.brokerCtx)

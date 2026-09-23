@@ -5,7 +5,9 @@ import logos_delivery/api/types as api_types
 export event_broker, api_types
 
 EventBroker:
-  # Event emitted when a message is sent to the network
+  # The send service considers the message sent. Fires once a store node
+  # confirms the message (reliability enabled, non-ephemeral message); when no
+  # store confirmation will follow, the send ends at MessagePropagatedEvent.
   type MessageSentEvent* = object
     requestId*: RequestId
     messageHash*: string
@@ -29,6 +31,14 @@ EventBroker:
 EventBroker:
   # Confirmation that a message has been correctly delivered to some neighbouring nodes.
   type MessagePropagatedEvent* = object
+    requestId*: RequestId
+    messageHash*: string
+
+EventBroker:
+  # A store node confirmed it holds the message: the durable milestone of a
+  # reliable send, after which an offline recipient can recover it from Store.
+  # Fires right after MessageSentEvent.
+  type MessageArchivedEvent* = object
     requestId*: RequestId
     messageHash*: string
 

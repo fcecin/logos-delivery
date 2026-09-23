@@ -2,7 +2,7 @@
 ##
 ## REST is a poll-based client/server surface, so the interactive MessagingClient
 ## events must be buffered here for later observation:
-##   * send-related events (sent / propagated / error) grouped by request id
+##   * send-related events (sent / propagated / archived / error) grouped by request id
 ##   * received messages
 ##
 ## Both surfaces are evict-after-poll: a GET returns the buffered data and clears

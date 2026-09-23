@@ -31,10 +31,19 @@ proc periodicSender(logos: LogosDelivery): Future[void] {.async.} =
     echo "Failed to listen to message propagated event: ", error
     return
 
+  let archivedListener = MessageArchivedEvent.listen(
+    proc(event: MessageArchivedEvent) {.async: (raises: []).} =
+      echo "Message archived by a store node with request ID: ",
+        event.requestId, " hash: ", event.messageHash
+  ).valueOr:
+    echo "Failed to listen to message archived event: ", error
+    return
+
   defer:
     await MessageSentEvent.dropListener(sentListener)
     await MessageErrorEvent.dropListener(errorListener)
     await MessagePropagatedEvent.dropListener(propagatedListener)
+    await MessageArchivedEvent.dropListener(archivedListener)
 
   ## Periodically sends a Waku message every 30 seconds
   var counter = 0

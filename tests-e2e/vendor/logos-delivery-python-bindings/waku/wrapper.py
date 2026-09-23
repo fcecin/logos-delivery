@@ -65,6 +65,7 @@ EVENT_NAMES = (
     "onMessageSent",
     "onMessageError",
     "onMessagePropagated",
+    "onMessageArchived",
     "onMessageReceived",
     "onConnectionStatusChange",
     "onTopicHealthChange",
