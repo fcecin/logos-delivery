@@ -52,9 +52,8 @@ proc new*(
   ## for transport while exposing its own send/recv API.
   let reliability = conf.reliabilityEnabled.get(DefaultP2pReliability)
   let anonymityLevel = conf.anonymityLevel.get(AnonymityLevel.None)
-  let rateLimitManager = ?RateLimitManager.new(
-    conf.rateLimit.get(DefaultRateLimitConfig), rlnQuotaProvider(waku)
-  )
+  let rateLimitManager =
+    ?RateLimitManager.new(conf.rateLimitConfig(), rlnQuotaProvider(waku))
   let maxParkedAgeSec = conf.maxParkedAgeSec.get(uint(DefaultMaxParkedAge.seconds()))
   if maxParkedAgeSec notin 1'u .. MaxParkedAgeSecLimit:
     return err("maxParkedAgeSec must be between 1 and " & $MaxParkedAgeSecLimit)
