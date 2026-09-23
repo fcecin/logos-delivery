@@ -506,12 +506,12 @@ suite "Waku API - Send":
     (await node.stop()).isOkOr:
       raiseAssert "Failed to stop node: " & error
 
-  asyncTest "Store validation times out without event":
+  asyncTest "Store validation times out with an error event":
     ## The message propagates successfully, but the only reachable store peer never
     ## receives/archives it (it is outside the relay propagation path), so store
-    ## validation never confirms. After MaxTimeInCache the task must be dropped with a
-    ## warn log and NO app event: Propagated fires, but neither Sent nor Error - the
-    ## missing Sent event is the signal that delivery could not be validated.
+    ## validation never confirms. After MaxTimeInCache the task must be dropped and
+    ## the drop reported: Propagated fires, then Error, never Sent. Without the Error
+    ## a reliable channel send of this message would never finalise.
     var isolatedStoreNode: WakuNode
     lockNewGlobalBrokerContext:
       isolatedStoreNode = newTestWakuNode(generateSecp256k1Key())
@@ -552,11 +552,15 @@ suite "Waku API - Send":
     let requestId = (await node.messagingClient.send(envelope)).valueOr:
       raiseAssert error
 
-    # Must outlive MaxTimeInCache (1 min) so the store-validation timeout drop fires.
-    const eventTimeout = 65.seconds
-    discard await eventManager.waitForEvents(eventTimeout)
+    # The error fires MaxTimeInCache (1 min) after the first propagation, on the
+    # next service tick; the bound leaves room for the relay mesh to form first.
+    const errorTimeout = 90.seconds
+    let reported = await eventManager.errorFuture.withTimeout(errorTimeout)
+    check reported
 
-    eventManager.validate({SendEventOutcome.Propagated}, requestId)
+    eventManager.validate(
+      {SendEventOutcome.Propagated, SendEventOutcome.Error}, requestId
+    )
 
     await isolatedStoreNode.stop()
     (await node.stop()).isOkOr:

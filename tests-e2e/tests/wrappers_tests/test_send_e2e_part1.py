@@ -8,8 +8,10 @@ from src.libs.custom_logger import get_custom_logger
 from src.node.waku_node import WakuNode
 from src.node.wrappers_manager import WrapperManager
 from src.node.wrapper_helpers import (
+    STORE_VALIDATION_TIMEOUT_MSG,
     EventCollector,
     assert_event_invariants,
+    assert_no_error,
     create_message_bindings,
     get_node_multiaddr,
     wait_for_connected,
@@ -479,7 +481,9 @@ class TestSendBeforeRelay(StepsStore):
     def test_s23_no_sent_event_when_relay_has_no_store(self, node_config):
         """
         S23: non-ephemeral message, reliability enabled, no store peer ever reachable.
-          - Expected: Ok(RequestId), Propagated event only, no Sent and no terminal error.
+          - Expected: Ok(RequestId), Propagated, no Sent, no immediate error, then a
+            message_error once the store validation window elapses: the message
+            reached the network, but its archival could not be verified.
         """
         sender_collector = EventCollector()
 
@@ -528,6 +532,11 @@ class TestSendBeforeRelay(StepsStore):
                     f"after relay peer joined. Collected events: {sender_collector.events}"
                 )
 
+                # Regression guard: "no store reachable" must not become an
+                # immediate terminal error; the send service keeps waiting for a
+                # store node for the whole validation window.
+                assert_no_error(sender_collector, request_id, "right after propagation")
+
                 sent_event = wait_for_sent(
                     collector=sender_collector,
                     request_id=request_id,
@@ -540,19 +549,23 @@ class TestSendBeforeRelay(StepsStore):
                     f"Collected events: {sender_collector.events}"
                 )
 
-                # Regression guard: current behavior must NOT convert "no store
-                # reachable" into an immediate terminal error. If a future change
-                # starts emitting one, this assertion will catch it.
+                # Once the window elapses the task is dropped and the drop is
+                # reported: without a terminal event a reliable-channel send of
+                # this message would never finalise.
                 error_event = wait_for_error(
                     collector=sender_collector,
                     request_id=request_id,
-                    timeout_s=0,
+                    timeout_s=ERROR_AFTER_CACHE_EXPIRY_TIMEOUT_S,
                 )
-                assert error_event is None, (
-                    f"Unexpected terminal error event when no store peer is reachable. "
-                    f"S23 expects silent behavior (Propagated only).\n"
-                    f"Error event: {error_event}\n"
+                assert error_event is not None, (
+                    f"No message_error event within {ERROR_AFTER_CACHE_EXPIRY_TIMEOUT_S}s "
+                    f"after the store validation window when no store peer is reachable.\n"
                     f"Collected events: {sender_collector.events}"
+                )
+                assert error_event.get("error") == STORE_VALIDATION_TIMEOUT_MSG, (
+                    f"Unexpected error message in message_error event.\n"
+                    f"Expected: {STORE_VALIDATION_TIMEOUT_MSG!r}\n"
+                    f"Got:      {error_event.get('error')!r}"
                 )
 
                 assert_event_invariants(sender_collector, request_id)

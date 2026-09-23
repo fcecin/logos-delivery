@@ -41,7 +41,7 @@ Emitted when a message has been successfully propagated to neighboring nodes on 
 - `messageHash`: Hash of the message that was propagated
 
 ### 3. message_error
-Emitted when an error occurs during message sending or propagation.
+Emitted when the send fails: the message was rejected or could not be propagated within the retry window, or, with reliability enabled, a propagated non-ephemeral message was not confirmed by a store node within the store validation window (one minute from propagation). In the second case the message did reach the network and may have been received live; only its archival is unconfirmed. Do not read that error as "not delivered": resending would duplicate the message for online recipients.
 
 **JSON Structure:**
 ```json

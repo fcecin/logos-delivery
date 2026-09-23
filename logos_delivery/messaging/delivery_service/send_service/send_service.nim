@@ -265,24 +265,31 @@ proc evaluateAndCleanUp(self: SendService) =
   )
 
   # Store validation timed out: the message was propagated but never confirmed in a
-  # store node within MaxTimeInCache (measured from first propagation). This path emits
-  # no app event, so the metric counter below is its only durable signal; drop and count.
-  for task in self.taskCache:
-    if task.firstPropagatedTime.isSome() and
-        task.state != DeliveryState.SuccessfullyValidated and
-        task.propagationAge() > MaxTimeInCache:
-      debug "Message propagated but not validated by a store node within time window; stop trying.",
-        requestId = task.requestId,
-        msgHash = task.msgHash.to0xHex(),
-        propagationAge = task.propagationAge()
-      recordStoreValidationTimeout()
-
-  self.taskCache.keepItIf(
-    not (
-      it.firstPropagatedTime.isSome() and it.state != DeliveryState.SuccessfullyValidated and
+  # store node within MaxTimeInCache (measured from first propagation). Fail it and
+  # report the drop: this is the terminal outcome of a reliable send, and a reliable
+  # channel finalises a segment only on MessageSent or MessageError. The expired
+  # tasks are collected first, so a listener that re-enters the service cannot
+  # disturb the iteration, and the eviction keys on the state set here, so a task
+  # cannot age past the window between the report and the eviction and vanish
+  # unreported.
+  let expired = self.taskCache.filterIt(
+    it.firstPropagatedTime.isSome() and it.state != DeliveryState.SuccessfullyValidated and
       it.propagationAge() > MaxTimeInCache
-    )
   )
+  for task in expired:
+    debug "Message propagated but not validated by a store node within time window; stop trying.",
+      requestId = task.requestId,
+      msgHash = task.msgHash.to0xHex(),
+      propagationAge = task.propagationAge()
+    recordStoreValidationTimeout()
+    task.state = DeliveryState.FailedToDeliver
+    task.errorDesc =
+      "Propagated but not confirmed by a store node within the store validation window"
+    MessageErrorEvent.emit(
+      self.brokerCtx, task.requestId, task.msgHash.to0xHex(), task.errorDesc
+    )
+
+  self.taskCache.keepItIf(it.state != DeliveryState.FailedToDeliver)
 
 proc reportTaskQueued(self: SendService, task: DeliveryTask) =
   ## Announces a task parked for epoch budget, once per task. Retry rounds

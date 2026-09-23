@@ -11,7 +11,9 @@ EventBroker:
     messageHash*: string
 
 EventBroker:
-  # Event emitted when a message send operation fails
+  # The send failed: the message was rejected or did not propagate within the
+  # retry window, or it propagated but no store node confirmed it within the
+  # validation window (it may still have reached online recipients).
   type MessageErrorEvent* = object
     requestId*: RequestId
     messageHash*: string
