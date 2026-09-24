@@ -33,7 +33,7 @@ type
     clusterId: uint16
     pubKey*: Curve25519Key
     hopMissing: bool
-      ## Set when the last hop derivation found no address the encoder accepts.
+      ## `true` when the last hop derivation found no address the encoder accepts.
       ## The hop that mix still holds is then a leftover, unusable even if it
       ## encodes.
 

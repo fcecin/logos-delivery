@@ -302,10 +302,9 @@ proc updateMixSelfHop(node: WakuNode) =
       debug "Still no announced address can carry mix replies",
         announced = $node.announcedAddresses
     else:
-      warn "No announced address can carry mix replies, this node's mixed sends will fail",
-        announced = $node.announcedAddresses,
-        remedy =
-          "announce an IPv4 TCP or QUIC-v1 address: --nat=extip:<ip>, --nat=upnp, --dns4-domain-name or --ext-multiaddr"
+      warn "No announced address can carry mix replies, so this node's mixed sends fail. " &
+        "Announce an IPv4 TCP or QUIC-v1 address that peers can reach",
+        announced = $node.announcedAddresses
     return
   if chosen.get() != before or wasMissing:
     info "Mix self hop set", hop = $chosen.get(), before = $before
