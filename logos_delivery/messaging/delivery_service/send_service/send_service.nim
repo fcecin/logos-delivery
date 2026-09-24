@@ -327,7 +327,7 @@ proc admitAndProve(self: SendService, task: DeliveryTask): Future[bool] {.async.
     # Ephemeral traffic is shed rather than queued so it cannot eat into the
     # budget left for durable messages.
     if task.isEphemeral():
-      let quotaState = self.rateLimitManager.quotaState()
+      let quotaState = await self.rateLimitManager.quotaState()
       if quotaState != QuotaState.Normal:
         debug "Dropping ephemeral message as we are approaching rate-limit quota",
           requestId = task.requestId,
