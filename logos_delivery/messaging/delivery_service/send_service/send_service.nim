@@ -163,6 +163,20 @@ proc isFull*(self: SendService): bool =
 proc isStorePeerAvailable*(sendService: SendService): bool =
   return sendService.waku.hasStorePeer()
 
+proc storeConfirmationExpected(self: SendService, task: DeliveryTask): bool =
+  ## True when a plain send of this task would wait for a store confirmation:
+  ## reliability is on and the message is not ephemeral. `awaitsStoreValidation`
+  ## and the mixed completion in `reportTaskResult` both read it.
+  return self.checkStoreForMessages and not task.isEphemeral()
+
+proc awaitsStoreValidation*(self: SendService, task: DeliveryTask): bool =
+  ## True while a propagated task still needs a store node to confirm it. A task
+  ## that went out over mix never does: the store query would carry its hash in
+  ## clear from this node's own address. Every store confirmation passes here.
+  return
+    self.storeConfirmationExpected(task) and
+    task.state == DeliveryState.SuccessfullyPropagated and not task.propagatedOverMix
+
 proc checkMsgsInStore(self: SendService, tasksToValidate: seq[DeliveryTask]) {.async.} =
   if tasksToValidate.len() == 0:
     return
@@ -186,8 +200,12 @@ proc checkMsgsInStore(self: SendService, tasksToValidate: seq[DeliveryTask]) {.a
 
   let storedItems = storeResp.messages.mapIt(it.messageHash)
 
-  # Set success state for messages found in store
-  self.taskCache.applyItIf(storedItems.contains(it.msgHash)):
+  # Set success state for the tasks found in store that the policy admits: the
+  # store peer chooses its answer, so a hash match alone must not confirm a task.
+  # The retry below uses only the hashes that this node asked about.
+  self.taskCache.applyItIf(
+    self.awaitsStoreValidation(it) and storedItems.contains(it.msgHash)
+  ):
     it.state = DeliveryState.SuccessfullyValidated
 
   # set retry state for messages not found in store
@@ -205,8 +223,7 @@ proc checkStoredMessages(self: SendService) {.async.} =
     return
 
   let tasksToValidate = self.taskCache.filterIt(
-    it.state == DeliveryState.SuccessfullyPropagated and
-      it.propagationAge() > ArchiveTime and not it.isEphemeral()
+    self.awaitsStoreValidation(it) and it.propagationAge() > ArchiveTime
   )
 
   if tasksToValidate.len() == 0:
@@ -220,23 +237,49 @@ proc reportTaskResult(self: SendService, task: DeliveryTask) =
   of DeliveryState.SuccessfullyPropagated:
     # TODO: in case of unable to strore check messages shall we report success instead?
     if not task.propagateEventEmitted:
-      info "Message successfully propagated",
-        requestId = task.requestId, msgHash = task.msgHash.to0xHex()
+      # Omit the hash once the task is marked `selfMixedAnnounced`: INFO lines
+      # reach log collectors, and the hash would tie this node to a mixed message.
+      # `MixSendProcessor` still logs the hash at DEBUG.
+      if task.selfMixedAnnounced:
+        info "Message successfully propagated", requestId = task.requestId
+      else:
+        info "Message successfully propagated",
+          requestId = task.requestId, msgHash = task.msgHash.to0xHex()
       MessagePropagatedEvent.emit(
         self.brokerCtx, task.requestId, task.msgHash.to0xHex()
       )
       task.propagateEventEmitted = true
+
+    if task.propagatedOverMix and not task.sentEventEmitted and
+        self.storeConfirmationExpected(task):
+      # The exit's reply completes a mixed send when a plain send would wait for
+      # a store confirmation, so both paths end with the same event.
+      # `sentEventEmitted` keeps it to one; the INFO line omits the hash.
+      info "Message successfully sent over mix", requestId = task.requestId
+      MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+      task.sentEventEmitted = true
     return
   of DeliveryState.SuccessfullyValidated:
-    info "Message successfully sent",
-      requestId = task.requestId, msgHash = task.msgHash.to0xHex()
+    # A marked task reaches this only through the clear republish of a
+    # `Preferred` send whose mix reply was lost; the hash is omitted as above.
+    if task.selfMixedAnnounced:
+      info "Message successfully sent", requestId = task.requestId
+    else:
+      info "Message successfully sent",
+        requestId = task.requestId, msgHash = task.msgHash.to0xHex()
     MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+    task.sentEventEmitted = true
     return
   of DeliveryState.FailedToDeliver:
-    error "Failed to send message",
-      requestId = task.requestId,
-      msgHash = task.msgHash.to0xHex(),
-      error = task.errorDesc
+    # Omit the hash for a marked task: the exit may have published the message
+    # even though its reply was lost.
+    if task.selfMixedAnnounced:
+      error "Failed to send message", requestId = task.requestId, error = task.errorDesc
+    else:
+      error "Failed to send message",
+        requestId = task.requestId,
+        msgHash = task.msgHash.to0xHex(),
+        error = task.errorDesc
     MessageErrorEvent.emit(
       self.brokerCtx, task.requestId, task.msgHash.to0xHex(), task.errorDesc
     )
@@ -253,21 +296,31 @@ proc reportTaskResult(self: SendService, task: DeliveryTask) =
     # Report that reason if set.
     if task.errorDesc.len == 0:
       task.errorDesc = "Unable to send within retry time window"
-    error "Failed to send message",
-      requestId = task.requestId,
-      msgHash = task.msgHash.to0xHex(),
-      error = task.errorDesc,
-      age = task.admissionAge()
+    if task.selfMixedAnnounced:
+      error "Failed to send message",
+        requestId = task.requestId, error = task.errorDesc, age = task.admissionAge()
+    else:
+      error "Failed to send message",
+        requestId = task.requestId,
+        msgHash = task.msgHash.to0xHex(),
+        error = task.errorDesc,
+        age = task.admissionAge()
     task.state = DeliveryState.FailedToDeliver
     MessageErrorEvent.emit(
       self.brokerCtx, task.requestId, task.msgHash.to0xHex(), task.errorDesc
     )
   elif task.isParkedExpired(self.maxParkedAge):
-    error "Failed to send message",
-      requestId = task.requestId,
-      msgHash = task.msgHash.to0xHex(),
-      error = "Parked message too old",
-      age = task.messageAge()
+    if task.selfMixedAnnounced:
+      error "Failed to send message",
+        requestId = task.requestId,
+        error = "Parked message too old",
+        age = task.messageAge()
+    else:
+      error "Failed to send message",
+        requestId = task.requestId,
+        msgHash = task.msgHash.to0xHex(),
+        error = "Parked message too old",
+        age = task.messageAge()
     task.state = DeliveryState.FailedToDeliver
     MessageErrorEvent.emit(
       self.brokerCtx,
@@ -287,7 +340,7 @@ proc evaluateAndCleanUp*(self: SendService) =
   self.taskCache.keepItIf(
     not (
       it.state == DeliveryState.SuccessfullyPropagated and
-      (it.isEphemeral() or not self.checkStoreForMessages)
+      not self.awaitsStoreValidation(it)
     )
   )
 
@@ -318,8 +371,9 @@ proc reportTaskQueued(self: SendService, task: DeliveryTask) =
   if task.queuedEventEmitted:
     return
 
-  info "Message queued for rate-limit budget",
-    requestId = task.requestId, msgHash = task.msgHash.to0xHex()
+  # No hash for any send: a task that an RLN proof refresh parks after a mix
+  # attempt comes here marked. The event below gives the hash to the application.
+  info "Message queued for rate-limit budget", requestId = task.requestId
   MessageQueuedEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
   task.queuedEventEmitted = true
 

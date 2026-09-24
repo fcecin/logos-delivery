@@ -18,6 +18,9 @@ type EntryLayer* {.pure.} = enum
   channels # kernel + messaging + reliable channels
 
 type AnonymityLevel* {.pure.} = enum
+  ## How a send may use Mix. A mixed send completes on the exit's reply and gets no
+  ## store confirmation, so its delivery assurance is weaker. A `Preferred` send
+  ## whose Mix attempt gets no reply goes out again in clear after the Mix window.
   None ## Never use Mix. Send over the plain path, relay then lightpush.
   Preferred
     ## Try Mix first. Take the plain path at once when Mix cannot attempt the

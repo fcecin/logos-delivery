@@ -517,6 +517,25 @@ suite "SendService - anonymity level with a mounted mix":
     await fut.cancelAndWait()
     check plain.calls == 0
 
+  asyncTest "a mix attempt marks the task before it can know whether it worked":
+    ## The exit publishes before it replies, so the mark must be set before any
+    ## reply. The test cancels the attempt before a reply can arrive.
+    for i in 0 ..< MinMixPoolSize:
+      addMixPeer(60170 + i, lightpush = true)
+
+    let mix = MixSendProcessor.new(
+      waku, waku.brokerCtx, AnonymityLevel.Required, chronos.minutes(1)
+    )
+    let task = buildTask("announced-at-attempt", chronos.seconds(5))
+
+    let fut = mix.process(task)
+    await sleepAsync(chronos.milliseconds(10))
+    await fut.cancelAndWait()
+
+    check:
+      task.state != DeliveryState.SuccessfullyPropagated # no reply ever came
+      task.selfMixedAnnounced # ... and it was marked anyway
+
   asyncTest "a usable mix is attempted, not decided against":
     ## A routable pool with an exit passes the pre-check. `tryCount` grows before
     ## the first await; the test then cancels the attempt.
