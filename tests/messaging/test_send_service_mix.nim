@@ -1,5 +1,6 @@
 {.used.}
 
+import std/sets
 import chronos, chronicles, testutils/unittests, results, stew/byteutils
 
 import
@@ -615,6 +616,34 @@ suite "Mix send path - exit peer selection":
     check:
       waku.lightpushPeerAvailable(shard)
       waku.selectMixLightpushPeer(shard).isNone()
+
+  asyncTest "repeated selections spread over every mix-capable exit":
+    ## Three usable exits and a hundred draws: every exit must come up. A uniform
+    ## draw misses one with probability below 1e-17; a draw that always skips one
+    ## candidate never sees three.
+    for _ in 0 ..< 3:
+      discard addLightpushPeer(mixCapable = true)
+
+    var seen: HashSet[PeerId]
+    for _ in 0 ..< 100:
+      let selected = waku.selectMixLightpushPeer(shard).valueOr:
+        raiseAssert "expected a mix-capable exit to be selected"
+      seen.incl(selected.peerId)
+    check seen.len == 3
+
+  asyncTest "two mix-capable exits are both selected over repeated draws":
+    ## A permutation that always moves the first candidate off the front, as
+    ## Sattolo's algorithm in `Rng.shuffle` does, returns the same exit on every
+    ## call with two candidates, and fails this.
+    for _ in 0 ..< 2:
+      discard addLightpushPeer(mixCapable = true)
+
+    var seen: HashSet[PeerId]
+    for _ in 0 ..< 50:
+      let selected = waku.selectMixLightpushPeer(shard).valueOr:
+        raiseAssert "expected a mix-capable exit to be selected"
+      seen.incl(selected.peerId)
+    check seen.len == 2
 
   asyncTest "the mix-capable peer is picked out of a mixed set":
     discard addLightpushPeer(mixCapable = false)
