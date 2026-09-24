@@ -278,19 +278,55 @@ proc enrBaseline*(node: WakuNode): EnrBaseline =
       Opt.none(Port)
   return (ip: node.enrHost, tcp: bound)
 
+proc updateMixSelfHop(node: WakuNode) =
+  ## Sets mix's own hop, which closes every reply path, to the first address mix
+  ## can encode, in this order: a direct address known from outside, the ENR
+  ## endpoint, a relay route known from outside, then the announced set.
+  if node.wakuMix.isNil():
+    return
+  let before = node.wakuMix.localMixPubInfo().multiAddr
+  let wasMissing = node.wakuMix.selfHopMissing()
+  let outside = node.enrAddresses()
+  var preferred = outside.filterIt(not it.isCircuitRelayMA())
+  let baseline = node.enrBaseline()
+  if baseline.ip.isSome() and baseline.tcp.isSome():
+    let endpoint =
+      MultiAddress.init(initTAddress(baseline.ip.get(), baseline.tcp.get()))
+    if endpoint.isOk() and endpoint.get() notin outside:
+      preferred.add(endpoint.get())
+  preferred.add(outside.filterIt(it.isCircuitRelayMA()))
+  let chosen = node.wakuMix.updateSelfHop(preferred, node.announcedAddresses)
+  if chosen.isNone():
+    # Warn once, when the hop goes missing; later commits log at debug.
+    if wasMissing:
+      debug "Still no announced address can carry mix replies",
+        announced = $node.announcedAddresses
+    else:
+      warn "No announced address can carry mix replies, this node's mixed sends will fail",
+        announced = $node.announcedAddresses,
+        remedy =
+          "announce an IPv4 TCP or QUIC-v1 address: --nat=extip:<ip>, --nat=upnp, --dns4-domain-name or --ext-multiaddr"
+    return
+  if chosen.get() != before or wasMissing:
+    info "Mix self hop set", hop = $chosen.get(), before = $before
+
 proc updateEnrConfiguredEndpoint*(node: WakuNode, netConfig: NetConfig) =
   ## A dns4 name can answer differently at start, so the scalars follow that
   ## resolution rather than the one from construction.
   node.enrHost = netConfig.enrIp
   node.enrPort = netConfig.enrPort
+  # The hop follows the scalars once start has resolved the addresses.
+  if node.baseAnnounced.isSome():
+    node.updateMixSelfHop()
 
 proc copyCommittedAddresses*(node: WakuNode) =
-  ## Copy the committed peerInfo addresses into announcedAddresses and refresh
-  ## the ENR, once start has resolved the addresses. A `Waku` installs its own
-  ## refresh, which also keeps the live discv5 record.
+  ## Copy the committed peerInfo addresses into announcedAddresses, update mix's
+  ## own hop, and refresh the ENR, once start has resolved the addresses.
+  ## A `Waku` installs its own refresh, which also keeps the live discv5 record.
   if node.baseAnnounced.isNone():
     return
   node.announcedAddresses = node.switch.peerInfo.addrs
+  node.updateMixSelfHop()
   if not node.onCommittedAddresses.isNil():
     node.onCommittedAddresses()
   else:

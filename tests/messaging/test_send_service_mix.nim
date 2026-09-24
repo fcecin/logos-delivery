@@ -3,6 +3,7 @@
 import chronos, chronicles, testutils/unittests, results, stew/byteutils
 
 import
+  libp2p_mix,
   libp2p_mix/curve25519,
   libp2p/[peerid, multiaddress],
   libp2p/stream/connection,
@@ -10,9 +11,11 @@ import
   logos_delivery/waku/api/publish,
   logos_delivery/waku/node/peer_manager,
   logos_delivery/waku/node/peer_manager/waku_peer_store,
+  logos_delivery/waku/node/waku_node,
   logos_delivery/waku/node/waku_node/lightpush,
   logos_delivery/waku/waku_lightpush/common,
   logos_delivery/waku/waku_core,
+  logos_delivery/waku/waku_mix,
   logos_delivery/api/types,
   logos_delivery/waku/factory/waku_conf,
   logos_delivery/messaging/rate_limit_manager/rate_limit_manager,
@@ -356,3 +359,57 @@ suite "Mix send path - the reply budget":
     check:
       res.isErr()
       res.error.code == LightPushErrorCode.SERVICE_NOT_AVAILABLE
+
+suite "Mix send path - the node's own hop":
+  ## `mixReady()` is false while mix cannot encode this node's own hop: every
+  ## reply path and cover packet would fail at build time.
+  var waku {.threadvar.}: Waku
+
+  asyncSetup:
+    waku = (await Waku.new(testConf())).expect("Waku.new")
+
+  asyncTeardown:
+    # The test mix is not mounted on the switch, so the node must not stop it.
+    waku.node.wakuMix = nil
+    discard await waku.stop()
+
+  proc addMixPeer(port: int) =
+    let peerId = PeerId.init(generateSecp256k1Key()).tryGet()
+    let keyPair = generateKeyPair().expect("mix key pair")
+    waku.node.peerManager.addPeer(
+      RemotePeerInfo.init(
+        peerId,
+        @[MultiAddress.init("/ip4/127.0.0.1/tcp/" & $port).tryGet()],
+        protocols = @[WakuLightPushCodec],
+        shards = @[0'u16],
+        mixPubKey = Opt.some(keyPair.publicKey),
+      )
+    )
+
+  asyncTest "a hop mix cannot encode keeps the send gate closed whatever the pool holds":
+    ## `WakuMix.new` takes the address as a string, as `mountMix` passes it, so
+    ## the test gives it a name. Nothing dials; the test reads only the gate.
+    let mixKeys = generateKeyPair().expect("mix key pair")
+    waku.node.wakuMix = WakuMix
+      .new(
+        "/dns4/node.test/tcp/30303",
+        waku.node.peerManager,
+        3'u16,
+        mixKeys.privateKey,
+        @[],
+      )
+      .expect("WakuMix.new")
+    for i in 0 ..< MinMixPoolSize:
+      addMixPeer(60300 + i)
+    check:
+      waku.node.getMixNodePoolSize() >= MinMixPoolSize
+      not waku.node.wakuMix.selfHopUsable()
+      not waku.mixReady()
+
+    # The same node with a hop the encoder accepts: the gate opens.
+    waku.node.wakuMix
+      .setLocalMultiAddr(MultiAddress.init("/ip4/127.0.0.1/tcp/30303").tryGet())
+      .expect("an IPv4 TCP hop is accepted")
+    check:
+      waku.node.wakuMix.selfHopUsable()
+      waku.mixReady()
