@@ -35,6 +35,17 @@ type DeliveryTask* = ref object
   queuedEventEmitted*: bool
     ## Set once the task has reported itself queued for rate-limit budget, so
     ## the event fires on the first park only and not on every retry round.
+  sentEventEmitted*: bool
+    ## Set when this task emits `MessageSent`, so the event fires once. A mixed
+    ## completion checks this flag, so an earlier `MessagePropagated` cannot hide
+    ## the completion.
+  selfMixedAnnounced*: bool
+    ## Set at the first mix attempt and never cleared; from then on, the INFO and
+    ## ERROR records of this task omit the hash. The exit publishes before it
+    ## replies, so a message whose reply is lost is still on the network.
+  propagatedOverMix*: bool
+    ## Set when mix propagated the message. No store node confirms such a message:
+    ## the query would carry its hash in clear from this node's own address.
   errorDesc*: string
 
 proc new*(
