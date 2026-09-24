@@ -455,6 +455,9 @@ proc mountAutoSharding*(
   return ok()
 
 proc getMixNodePoolSize*(node: WakuNode): int =
+  ## The number of mix pool members a path can use; zero when mix is not mounted.
+  if node.wakuMix.isNil():
+    return 0
   return node.wakuMix.poolSize()
 
 proc mountMix*(
