@@ -229,18 +229,20 @@ openssl req -x509 -newkey rsa:4096 -keyout ./ssl_dir/key.pem -out ./ssl_dir/cert
 logosdeliverynode --websocket-secure-support=true --websocket-secure-key-path="./ssl_dir/key.pem" --websocket-secure-cert-path="./ssl_dir/cert.pem"
 ```
 
-## Enabling QUIC
+## QUIC
 
-QUIC is a UDP-based transport that peers can use to connect to your node.
+QUIC is a UDP-based transport that peers can use to connect to your node. It is enabled by default.
 
-The default port for QUIC is 60000.
-
-```shell
-logosdeliverynode --quic-support=true
-```
+By default, QUIC listens on the same port number as TCP (`--tcp-port`), over UDP. Make sure that UDP port is reachable, or disable QUIC.
 
 To listen on a different UDP port, use `--quic-port`:
 
 ```shell
-logosdeliverynode --quic-support=true --quic-port=<port>
+logosdeliverynode --quic-port=<port>
+```
+
+To disable QUIC:
+
+```shell
+logosdeliverynode --quic-support=false
 ```
