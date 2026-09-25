@@ -21,6 +21,9 @@ type DeliveryTask* = ref object
   msg*: WakuMessage
   msgHash*: WakuMessageHash
   tryCount*: int
+  heldRounds*: int
+    ## Rounds a processor left this task for the next round without attempting
+    ## it; reset when an attempt starts.
   state*: DeliveryState
   deliveryTime*: Moment
   firstPropagatedTime*: Opt[Moment]
