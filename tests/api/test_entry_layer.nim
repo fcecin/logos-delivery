@@ -1,6 +1,6 @@
 {.used.}
 
-import std/[options, net, sequtils]
+import std/[options, net, sequtils, strutils]
 import chronos, testutils/unittests, presto, presto/client as presto_client
 import brokers/broker_context
 import logos_delivery
@@ -111,7 +111,21 @@ suite "LogosDelivery - entry layer selection":
     let client = restClientFor(node)
     let subResp =
       await client.messagingPostSubscriptionsV1(@["/test/1/entry-layer/proto"])
-    check subResp.status == 404 # route not mounted
+    check:
+      subResp.status == 404
+      subResp.data.contains("--entry-layer")
+
+    let withQuery =
+      await issueRequest(node.waku.restServer.getAddress("/messaging?x=1"))
+    check:
+      withQuery.status == 404
+      withQuery.data.contains("--entry-layer")
+
+    # presto rejects a path with more than 64 segments
+    let tooDeep = await issueRequest(
+      node.waku.restServer.getAddress("/messaging" & "/x".repeat(70))
+    )
+    check tooDeep.status == 400
 
     (await node.stop()).isOkOr:
       raiseAssert "stop failed: " & error

@@ -84,12 +84,20 @@ proc new*(
 
   let middlewares = [originHandlerMiddleware, restMiddleware]
 
-  ## This must be empty and needed only to confirm original initialization requirements of
-  ## the RestHttpServer now combining old and new middleware approach.
+  ## Forwards a request that presto did not route to the error handler: 400 for
+  ## a path that fails to parse, 404 with the hint of its root for any other.
   proc defaultProcessCallback(
       rf: RequestFence
   ): Future[HttpResponseRef] {.async: (raises: [CancelledError]).} =
-    discard
+    if rf.isErr() or requestErrorHandler.isNil():
+      return nil # chronos answers the request itself
+    let request = rf.get()
+    let error =
+      if SegmentedPath.init(request.meth, request.uri.path).isErr():
+        RestRequestError.Invalid
+      else:
+        RestRequestError.NotFound
+    return await requestErrorHandler(error, request)
 
   server.httpServer = ?HttpServerRef.new(
     address,

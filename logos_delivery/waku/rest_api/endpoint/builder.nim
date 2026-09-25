@@ -30,6 +30,15 @@ import
 # Ref: https://nim-lang.org/docs/manual.html#threads-gc-safety
 var restServerNotInstalledTab {.threadvar.}: TableRef[string, string]
 
+const
+  RestRootAdmin* = "admin"
+  RestRootDebug* = "debug"
+  RestRootRelay* = "relay"
+  RestRootFilter* = "filter"
+  RestRootLightpush* = "lightpush"
+  RestRootStore* = "store"
+  RestRootMessaging* = "messaging"
+
 export WakuRestServerRef
 
 type RestServerConf* = object
@@ -53,19 +62,20 @@ proc startRestServerEssentials*(
       of RestRequestError.Invalid:
         return await request.respond(Http400, "Invalid request", HttpTable.init())
       of RestRequestError.NotFound:
-        let paths = request.rawPath.split("/")
+        let paths = request.uri.path.split("/")
         let rootPath =
           if len(paths) > 1:
             paths[1]
           else:
             ""
+        # chronos defaults to text/html.
+        var headers = HttpTable.init()
+        headers.add("Content-Type", "text/plain")
         restServerNotInstalledTab[].withValue(rootPath, errMsg):
-          return await request.respond(Http404, errMsg[], HttpTable.init())
+          return await request.respond(Http404, errMsg[], headers)
         do:
           return await request.respond(
-            Http400,
-            "Bad request initiated. Invalid path or method used.",
-            HttpTable.init(),
+            Http404, "Not found: invalid path or method used.", headers
           )
       of RestRequestError.InvalidContentBody:
         return await request.respond(Http400, "Invalid content body", HttpTable.init())
@@ -97,23 +107,36 @@ proc startRestServerEssentials*(
   ## Health REST API
   installHealthApiHandler(server.router, nodeHealthMonitor)
 
-  restServerNotInstalledTab["admin"] =
+  restServerNotInstalledTab[RestRootAdmin] =
     "/admin endpoints are not available while initializing."
-  restServerNotInstalledTab["debug"] =
+  restServerNotInstalledTab[RestRootDebug] =
     "/debug endpoints are not available while initializing."
-  restServerNotInstalledTab["relay"] =
+  restServerNotInstalledTab[RestRootRelay] =
     "/relay endpoints are not available while initializing."
-  restServerNotInstalledTab["filter"] =
+  restServerNotInstalledTab[RestRootFilter] =
     "/filter endpoints are not available while initializing."
-  restServerNotInstalledTab["lightpush"] =
+  restServerNotInstalledTab[RestRootLightpush] =
     "/lightpush endpoints are not available while initializing."
-  restServerNotInstalledTab["store"] =
+  restServerNotInstalledTab[RestRootStore] =
     "/store endpoints are not available while initializing."
+  restServerNotInstalledTab[RestRootMessaging] =
+    "/messaging endpoints are not available while initializing."
 
   server.start()
   info "Starting REST HTTP server", url = "http://" & $address & ":" & $port & "/"
 
   ok(server)
+
+proc markRestApiInstalled*(rootPath: string) =
+  ## Removes the 404 hint for `rootPath`. The hint table is per thread and
+  ## shared by every REST server on that thread.
+  if not restServerNotInstalledTab.isNil():
+    restServerNotInstalledTab.del(rootPath)
+
+proc markRestApiNotInstalled*(rootPath: string, reason: string) =
+  ## Sets the 404 hint for a root whose endpoints are not mounted.
+  if not restServerNotInstalledTab.isNil():
+    restServerNotInstalledTab[rootPath] = reason
 
 proc startRestServerProtocolSupport*(
     restServer: WakuRestServerRef,
@@ -130,12 +153,14 @@ proc startRestServerProtocolSupport*(
   ## Admin REST API
   if conf.admin:
     installAdminApiHandlers(router, node)
+    markRestApiInstalled(RestRootAdmin)
   else:
-    restServerNotInstalledTab["admin"] =
+    restServerNotInstalledTab[RestRootAdmin] =
       "/admin endpoints are not available. Please check your configuration: --rest-admin=true"
 
   ## Debug REST API
   installDebugApiHandlers(router, node)
+  markRestApiInstalled(RestRootDebug)
 
   ## Relay REST API
   if relayEnabled:
@@ -168,8 +193,9 @@ proc startRestServerProtocolSupport*(
           continue
 
     installRelayApiHandlers(router, node, cache)
+    markRestApiInstalled(RestRootRelay)
   else:
-    restServerNotInstalledTab["relay"] =
+    restServerNotInstalledTab[RestRootRelay] =
       "/relay endpoints are not available. Please check your configuration: --relay"
 
   ## Filter REST API
@@ -185,8 +211,9 @@ proc startRestServerProtocolSupport*(
     rest_filter_endpoint.installFilterRestApiHandlers(
       router, node, filterCache, filterDiscoHandler
     )
+    markRestApiInstalled(RestRootFilter)
   else:
-    restServerNotInstalledTab["filter"] = "/filter endpoints are not available."
+    restServerNotInstalledTab[RestRootFilter] = "/filter endpoints are not available."
 
   ## Store REST API
   let storeDiscoHandler =
@@ -196,6 +223,7 @@ proc startRestServerProtocolSupport*(
       Opt.none(DiscoveryHandler)
 
   rest_store_endpoint.installStoreApiHandlers(router, node, storeDiscoHandler)
+  markRestApiInstalled(RestRootStore)
 
   ## Light push API
   ## Install it either if client is mounted)
@@ -215,8 +243,10 @@ proc startRestServerProtocolSupport*(
     rest_lightpush_endpoint.installLightPushRequestHandler(
       router, node, lightDiscoHandler
     )
+    markRestApiInstalled(RestRootLightpush)
   else:
-    restServerNotInstalledTab["lightpush"] = "/lightpush endpoints are not available."
+    restServerNotInstalledTab[RestRootLightpush] =
+      "/lightpush endpoints are not available."
 
   info "REST services are installed"
   return ok()
