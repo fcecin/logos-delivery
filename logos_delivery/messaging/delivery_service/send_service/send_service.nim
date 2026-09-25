@@ -89,7 +89,6 @@ type SendService* = ref object of RootObj
   inFlightSends: int
     ## Sends accepted but not yet in `taskCache`; counted against the cap so
     ## concurrent sends cannot overshoot it.
-  maxSendsInFlight: int ## Batch size of the service pass; see `MaxSendsInFlight`.
   inFlight: seq[tuple[task: DeliveryTask, fut: Future[void]]]
     ## Sends started by the current pass and not yet waited for, kept so
     ## `stopSendService` can cancel them: `allFutures` does not cancel its
@@ -147,9 +146,7 @@ proc new*(
     maxParkedAge: timer.Duration = DefaultMaxParkedAge,
     maxTaskCacheSize: int = DefaultMaxTaskCacheSize,
     maxValidationAge: timer.Duration = MaxTimeInCache,
-    maxSendsInFlight = MaxSendsInFlight,
 ): Result[T, string] =
-  ## `maxSendsInFlight` sets the batch size of the service pass, at least 1.
   let checkStoreForMessages = preferP2PReliability and waku.isStoreMounted()
 
   let sendService = SendService(
@@ -166,7 +163,6 @@ proc new*(
     maxParkedAge: maxParkedAge,
     maxValidationAge: maxValidationAge,
     maxTaskCacheSize: maxTaskCacheSize,
-    maxSendsInFlight: max(1, maxSendsInFlight),
   )
 
   return ok(sendService)
@@ -424,15 +420,11 @@ proc drainInFlight(self: SendService) {.async.} =
       continue
     if send.fut.failed():
       # The send path turns every remote error into a result, so a raise here is
-      # a local fault. The record omits the hash of a task marked as mixed.
-      if send.task.selfMixedAnnounced:
-        error "Send attempt raised, the task waits for the next round",
-          requestId = send.task.requestId, error = send.fut.error.msg
-      else:
-        error "Send attempt raised, the task waits for the next round",
-          requestId = send.task.requestId,
-          msgHash = send.task.msgHash.to0xHex(),
-          error = send.fut.error.msg
+      # a local fault.
+      error "Send attempt raised, the task waits for the next round",
+        requestId = send.task.requestId,
+        msgHash = send.task.loggedHash(),
+        error = send.fut.error.msg
       # A raise skips the tail of `process` that moves a hand-off to
       # `NextRoundRetry`, and no pass selects `FallbackRetry`, so move it here.
       if send.task.state == DeliveryState.FallbackRetry or
@@ -450,18 +442,18 @@ proc trySendMessages*(self: SendService) {.async.} =
       # Break to the tail, which waits for the sends that this pass started.
       break
     # Admit in order, so the epoch budget and the RLN nonce are charged in
-    # order. Only the network round trips overlap, `maxSendsInFlight` at most.
+    # order. Only the network round trips overlap, `MaxSendsInFlight` at most.
     let admitted =
       try:
         await self.admitAndProve(task)
       except CancelledError as exc:
         raise exc
       except CatchableError as exc:
-        # A raise from admission ends the loop. Wait first for the sends that
-        # this pass started, up to `maxSendsInFlight - 1`.
-        if self.inFlight.len > 0:
-          await self.drainInFlight()
-        raise exc
+        # The task is not sent and stays at `NextRoundRetry`; the reapers fail it
+        # with an event if admission keeps raising.
+        error "Admission raised, the task waits for the next round",
+          requestId = task.requestId, msgHash = task.loggedHash(), error = exc.msg
+        false
     if not admitted:
       continue
     if self.stopping:
@@ -469,7 +461,7 @@ proc trySendMessages*(self: SendService) {.async.} =
       # proof, and a stop that ran meanwhile cannot cancel a send started now.
       break
     self.inFlight.add((task: task, fut: self.sendProcessor.process(task)))
-    if self.inFlight.len >= self.maxSendsInFlight:
+    if self.inFlight.len >= MaxSendsInFlight:
       await self.drainInFlight()
   if self.inFlight.len > 0:
     await self.drainInFlight()
@@ -477,9 +469,16 @@ proc trySendMessages*(self: SendService) {.async.} =
 proc serviceLoop(self: SendService) {.async.} =
   ## Continuously monitors that the sent messages have been received by a store node
   while true:
-    await self.trySendMessages()
-    await self.checkStoredMessages()
-    self.evaluateAndCleanUp()
+    # A raise must not end the loop: nothing watches it until stop, and queued
+    # tasks would never get a terminal event.
+    try:
+      await self.trySendMessages()
+      await self.checkStoredMessages()
+      self.evaluateAndCleanUp()
+    except CancelledError as exc:
+      raise exc
+    except CatchableError as exc:
+      error "Send service pass raised, the loop continues", error = exc.msg
     ## TODO: add circuit breaker to avoid infinite looping in case of persistent failures
     ## Use OnlineStateChange observers to pause/resume the loop
     await sleepAsync(ServiceLoopInterval)
@@ -524,17 +523,17 @@ proc send*(self: SendService, task: DeliveryTask) {.async.} =
   defer:
     dec self.inFlightSends
 
-  # Yield once, so no event reaches the caller before its request id: the
-  # messaging API returns the id when `send` suspends, and chronos runs this
-  # expired timer after the queued callbacks that carry the id back. Counted
-  # before the yield, so the API's `isFull()` sees every send of a burst.
-  await sleepAsync(ZeroDuration)
-
-  self.waku.subscribe(task.msg.contentTopic).isOkOr:
-    debug "SendService.send: failed to subscribe to content topic",
-      contentTopic = task.msg.contentTopic, error = error
-
   try:
+    # Yield once, so no event reaches the caller before its request id: the
+    # messaging API returns the id when `send` suspends, and chronos runs this
+    # expired timer after the queued callbacks that carry the id back. Counted
+    # before the yield, so the API's `isFull()` sees every send of a burst.
+    await sleepAsync(ZeroDuration)
+
+    self.waku.subscribe(task.msg.contentTopic).isOkOr:
+      debug "SendService.send: failed to subscribe to content topic",
+        contentTopic = task.msg.contentTopic, error = error
+
     if not (await self.admitAndProve(task)):
       if task.state == DeliveryState.FailedToDeliver:
         self.reportTaskResult(task)
@@ -557,12 +556,8 @@ proc send*(self: SendService, task: DeliveryTask) {.async.} =
   except CatchableError as exc:
     # A raise must not leave `send`: chronos turns a failed spawned future into
     # a `FutureDefect` that ends the process. Keep the task for the next round.
-    if task.selfMixedAnnounced:
-      error "Send attempt raised, the task waits for the next round",
-        requestId = task.requestId, error = exc.msg
-    else:
-      error "Send attempt raised, the task waits for the next round",
-        requestId = task.requestId, msgHash = task.msgHash.to0xHex(), error = exc.msg
+    error "Send attempt raised, the task waits for the next round",
+      requestId = task.requestId, msgHash = task.loggedHash(), error = exc.msg
     if task.state == DeliveryState.FallbackRetry or task.state == DeliveryState.Entry:
       task.state = DeliveryState.NextRoundRetry
     # Fall through to the tail, so a task that reached a terminal state before

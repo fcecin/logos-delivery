@@ -1,5 +1,6 @@
 {.used.}
 
+import std/sequtils
 import chronos, chronicles, testutils/unittests, results, stew/byteutils
 
 import
@@ -141,14 +142,13 @@ suite "SendService - batched send pass":
       state: DeliveryState.Entry,
     )
 
-  proc newService(
-      processor: ScriptedProcessor, maxSendsInFlight = MaxSendsInFlight
-  ): SendService =
+  proc newService(processor: ScriptedProcessor): SendService =
     let manager =
       RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
-    return SendService
-      .new(false, waku, manager, processor, maxSendsInFlight = maxSendsInFlight)
-      .expect("SendService.new")
+    return SendService.new(false, waku, manager, processor).expect("SendService.new")
+
+  proc names(prefix: string, count: int): seq[string] =
+    return (0 ..< count).toSeq().mapIt(prefix & $it)
 
   proc queue(service: SendService, tasks: seq[DeliveryTask]) {.async.} =
     ## `send()` parks each task in the cache (the processor's first call).
@@ -177,32 +177,23 @@ suite "SendService - batched send pass":
     await pass
     check a.state == DeliveryState.SuccessfullyPropagated
 
-  asyncTest "a pass starts at most maxSendsInFlight sends before waiting for them":
-    let processor = newScripted(stalled = @["a", "b", "c"])
-    let service = newService(processor, maxSendsInFlight = 2)
-    await service.queue(@[buildTask("a"), buildTask("b"), buildTask("c")])
+  asyncTest "a pass starts at most MaxSendsInFlight sends before waiting for them":
+    let ids = names("t", MaxSendsInFlight + 1)
+    let processor = newScripted(stalled = ids)
+    let service = newService(processor)
+    await service.queue(ids.mapIt(buildTask(it)))
 
     let pass = service.trySendMessages()
     await sleepAsync(chronos.milliseconds(50))
     check:
-      processor.retries == @["a", "b"] # c waits for the first batch
-      processor.peakRunning == 2
+      processor.retries == ids[0 ..< MaxSendsInFlight] # the last waits for the batch
+      processor.peakRunning == MaxSendsInFlight
 
     processor.gate.complete()
     await pass
     check:
-      processor.retries == @["a", "b", "c"]
-      processor.peakRunning == 2
-
-  asyncTest "with a batch of one the pass is the old sequential loop":
-    let processor = newScripted()
-    let service = newService(processor, maxSendsInFlight = 1)
-    await service.queue(@[buildTask("a"), buildTask("b"), buildTask("c")])
-
-    await service.trySendMessages()
-    check:
-      processor.retries == @["a", "b", "c"]
-      processor.peakRunning == 1
+      processor.retries == ids
+      processor.peakRunning == MaxSendsInFlight
 
   asyncTest "admission stays sequential and in order":
     ## With a budget of one per epoch, the pass sends the first task and parks the
@@ -291,9 +282,8 @@ suite "SendService - batched send pass":
     let manager =
       RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
     let processor = RaisingProcessor()
-    let service = SendService
-      .new(false, waku, manager, processor, maxSendsInFlight = 1)
-      .expect("SendService.new")
+    let service =
+      SendService.new(false, waku, manager, processor).expect("SendService.new")
 
     let task = buildTask("raise-in-send")
     let fut = service.send(task)
@@ -307,19 +297,18 @@ suite "SendService - batched send pass":
   asyncTest "a stop ends a directly driven pass, not only its batch":
     ## After the stop cancels the batch, a directly driven pass resumes with tasks
     ## left in its list, and must not start them.
-    let processor = newScripted(stalled = @["s1", "s2", "s3", "s4"])
-    let service = newService(processor, maxSendsInFlight = 2)
-    await service.queue(
-      @[buildTask("s1"), buildTask("s2"), buildTask("s3"), buildTask("s4")]
-    )
+    let ids = names("s", 2 * MaxSendsInFlight)
+    let processor = newScripted(stalled = ids)
+    let service = newService(processor)
+    await service.queue(ids.mapIt(buildTask(it)))
 
-    let pass = service.trySendMessages() # parks on the first batch, s1 and s2
+    let pass = service.trySendMessages() # parks on the first batch
     await sleepAsync(chronos.milliseconds(50))
-    check processor.retries == @["s1", "s2"]
+    check processor.retries == ids[0 ..< MaxSendsInFlight]
 
     await service.stopSendService()
     check await pass.withTimeout(chronos.seconds(2))
-    check processor.retries == @["s1", "s2"] # s3 and s4 were never started
+    check processor.retries == ids[0 ..< MaxSendsInFlight] # the rest never started
 
   asyncTest "a raise in a fallback processor still leaves the task for the next round":
     ## A raise skips the tail of `process` that moves a hand-off to
@@ -371,9 +360,8 @@ suite "SendService - batched send pass":
     let manager =
       RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
     let stalling = StallingProcessor(gate: newFuture[void]("never-replied"))
-    let service = SendService
-      .new(false, waku, manager, stalling, maxSendsInFlight = 1)
-      .expect("SendService.new")
+    let service =
+      SendService.new(false, waku, manager, stalling).expect("SendService.new")
 
     let task = buildTask("cancelled-in-send")
     let fut = service.send(task)
