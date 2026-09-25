@@ -54,6 +54,16 @@ lib = ffi.dlopen(str(_repo_root / "lib" / "liblogosdelivery.so"))
 
 CallbackType = ffi.callback("void(int, const char*, size_t, void*)")
 
+# The library can answer after its caller stopped waiting, so every callback
+# lives as long as the process.
+_live_callbacks = []
+
+
+def _keep_alive(cb):
+    _live_callbacks.append(cb)
+    return cb
+
+
 # Non-terminal progress tick (~every 5s while a request is in flight), always
 # followed by a terminal RET_OK/RET_ERR. The waiting callbacks drop it so a slow
 # call (start_node most of all) is not latched as a result.
@@ -161,7 +171,7 @@ class NodeWrapper:
                 state["msg"] = msg
                 state["done"].set()
 
-        return CallbackType(c_cb)
+        return _keep_alive(CallbackType(c_cb))
 
     @staticmethod
     def _make_event_cb(py_callback):
@@ -169,7 +179,7 @@ class NodeWrapper:
             msg = ffi.buffer(char_p, length)[:] if char_p != ffi.NULL else b""
             py_callback(int(ret), msg)
 
-        return CallbackType(c_cb)
+        return _keep_alive(CallbackType(c_cb))
 
     @classmethod
     def create_node(
