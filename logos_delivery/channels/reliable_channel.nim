@@ -62,8 +62,10 @@ type
       ## for this `channelReqId`. Set once in `send`, never mutated.
     inflightMessagingIds: seq[RequestId]
       ## Messaging-layer ids minted by the send handler that have not
-      ## yet produced a final event. Removed on `MessageSentEvent` / `MessageErrorEvent`.
+      ## yet produced a final event. The first `MessagePropagatedEvent`,
+      ## `MessageSentEvent` or `MessageErrorEvent` for an id removes it.
     confirmedCount: int
+      ## Segments that got `MessagePropagatedEvent` or `MessageSentEvent` first.
     failedCount: int
 
   ChannelReqs = Table[RequestId, ChannelReqState]
@@ -87,6 +89,7 @@ type
     brokerCtx: BrokerContext
     crypto: Opt[ChannelCrypto] ## `none` means the channel is not encrypted
     receivedListener: MessageReceivedEventListener
+    propagatedListener: MessagePropagatedEventListener
     sentListener: MessageSentEventListener
     errorListener: MessageErrorEventListener
     closed: bool
@@ -118,6 +121,7 @@ proc stop*(self: ReliableChannel) {.async: (raises: []).} =
   ## `closed` gates any in-flight receive handler that survives the listener drop.
   self.closed = true
   await MessageReceivedEvent.dropListener(self.brokerCtx, self.receivedListener)
+  await MessagePropagatedEvent.dropListener(self.brokerCtx, self.propagatedListener)
   await MessageSentEvent.dropListener(self.brokerCtx, self.sentListener)
   await MessageErrorEvent.dropListener(self.brokerCtx, self.errorListener)
   if not self.cleanupFut.isNil():
@@ -432,6 +436,18 @@ proc new*(
   ## `requestId` — globally unique, so we don't need any channel filter
   ## up front. The handler scans this channel's pending entries for a
   ## match and is a no-op when the id belongs to a different channel.
+  ##
+  ## A segment is final when it propagates or fails. The first final event for a
+  ## segment sets its outcome. `MessageSentEvent` can arrive without a prior
+  ## `MessagePropagatedEvent`, so all three listeners stay.
+  chn.propagatedListener = MessagePropagatedEvent.listen(
+    chn.brokerCtx,
+    proc(evt: MessagePropagatedEvent): Future[void] {.async: (raises: []).} =
+      chn.onMessageFinal(evt.requestId, MessagingOutcome.Sent),
+  ).valueOr:
+    error "MessagePropagatedEvent.listen failed", channelId = channelId, error = error
+    MessagePropagatedEventListener()
+
   chn.sentListener = MessageSentEvent.listen(
     chn.brokerCtx,
     proc(evt: MessageSentEvent): Future[void] {.async: (raises: []).} =

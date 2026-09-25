@@ -366,6 +366,322 @@ suite "Reliable Channel - send state machine":
 
     (await waku.stop()).expect("stop")
 
+  asyncTest "MessagePropagatedEvent finalises the channelReqId as Sent":
+    ## With reliability off, or for an ephemeral message, the send service
+    ## emits no `MessageSentEvent`.
+    const
+      channelId = ChannelId("sm-propagated-channel")
+      contentTopic = ContentTopic("/reliable-channel/test/sm-propagated")
+      fakeMsgReqId = RequestId("fake-msg-req-propagated")
+
+    var waku: LogosDelivery
+    var manager: ReliableChannelManager
+    var brokerCtx: BrokerContext
+    lockNewGlobalBrokerContext:
+      brokerCtx = globalBrokerContext()
+      waku = (await LogosDelivery.new(createApiNodeConf())).expect("LogosDelivery.new")
+      manager = waku.reliableChannelManager
+
+    var sendCalls = 0
+    MessagingSend.replaceProvider(
+      brokerCtx,
+      proc(envelope: MessageEnvelope): Future[Result[RequestId, string]] {.async.} =
+        sendCalls.inc
+        return ok(fakeMsgReqId),
+    ).isOkOr:
+      raiseAssert "replaceProvider failed: " & error
+
+    discard manager
+      .createReliableChannel(channelId, contentTopic, SdsParticipantID("local"))
+      .expect("createReliableChannel")
+
+    let sentFut = newFuture[RequestId]("channel-sent")
+    discard ChannelMessageSentEvent
+      .listen(
+        brokerCtx,
+        proc(evt: ChannelMessageSentEvent) {.async: (raises: []).} =
+          if not sentFut.finished() and evt.channelId == channelId:
+            sentFut.complete(evt.requestId)
+        ,
+      )
+      .expect("listen ChannelMessageSentEvent")
+
+    let channelReqId = (await manager.send(channelId, "hello".toBytes())).expect("send")
+
+    let dispatchDeadline = Moment.now() + 1.seconds
+    while Moment.now() < dispatchDeadline and sendCalls == 0:
+      await sleepAsync(5.milliseconds)
+    check sendCalls == 1
+
+    waku_message_events.MessagePropagatedEvent.emit(
+      brokerCtx,
+      waku_message_events.MessagePropagatedEvent(
+        requestId: fakeMsgReqId, messageHash: ""
+      ),
+    )
+
+    let finalised = await sentFut.withTimeout(1.seconds)
+    check finalised
+    if finalised:
+      check sentFut.read() == channelReqId
+
+    (await waku.stop()).expect("stop")
+
+  asyncTest "a closed channel ignores MessagePropagatedEvent for its pending send":
+    ## `closeChannel` drops the channel's listeners. A later
+    ## `MessagePropagatedEvent` for a pending segment emits no channel event.
+    const
+      channelId = ChannelId("sm-closed-propagated-channel")
+      contentTopic = ContentTopic("/reliable-channel/test/sm-closed-propagated")
+      fakeMsgReqId = RequestId("fake-msg-req-closed-propagated")
+
+    var waku: LogosDelivery
+    var manager: ReliableChannelManager
+    var brokerCtx: BrokerContext
+    lockNewGlobalBrokerContext:
+      brokerCtx = globalBrokerContext()
+      waku = (await LogosDelivery.new(createApiNodeConf())).expect("LogosDelivery.new")
+      manager = waku.reliableChannelManager
+
+    var sendCalls = 0
+    MessagingSend.replaceProvider(
+      brokerCtx,
+      proc(envelope: MessageEnvelope): Future[Result[RequestId, string]] {.async.} =
+        sendCalls.inc
+        return ok(fakeMsgReqId),
+    ).isOkOr:
+      raiseAssert "replaceProvider failed: " & error
+
+    discard manager
+      .createReliableChannel(channelId, contentTopic, SdsParticipantID("local"))
+      .expect("createReliableChannel")
+
+    var sentCount = 0
+    var errorCount = 0
+    discard ChannelMessageSentEvent
+      .listen(
+        brokerCtx,
+        proc(evt: ChannelMessageSentEvent) {.async: (raises: []).} =
+          if evt.channelId == channelId:
+            sentCount.inc
+        ,
+      )
+      .expect("listen ChannelMessageSentEvent")
+    discard ChannelMessageErrorEvent
+      .listen(
+        brokerCtx,
+        proc(evt: ChannelMessageErrorEvent) {.async: (raises: []).} =
+          if evt.channelId == channelId:
+            errorCount.inc
+        ,
+      )
+      .expect("listen ChannelMessageErrorEvent")
+
+    discard (await manager.send(channelId, "hello".toBytes())).expect("send")
+
+    let dispatchDeadline = Moment.now() + 1.seconds
+    while Moment.now() < dispatchDeadline and sendCalls == 0:
+      await sleepAsync(5.milliseconds)
+    check sendCalls == 1
+
+    (await manager.closeChannel(channelId)).expect("closeChannel")
+
+    waku_message_events.MessagePropagatedEvent.emit(
+      brokerCtx,
+      waku_message_events.MessagePropagatedEvent(
+        requestId: fakeMsgReqId, messageHash: ""
+      ),
+    )
+
+    await sleepAsync(200.milliseconds)
+    check:
+      sentCount == 0
+      errorCount == 0
+
+    (await waku.stop()).expect("stop")
+
+  asyncTest "a MessageErrorEvent after propagation leaves the channelReqId Sent":
+    ## With reliability on, the send service emits `MessageErrorEvent` for a
+    ## propagated segment that no store node confirms. The first event,
+    ## `MessagePropagatedEvent`, sets the outcome.
+    const
+      channelId = ChannelId("sm-propagated-then-error-channel")
+      contentTopic = ContentTopic("/reliable-channel/test/sm-propagated-then-error")
+      fakeMsgReqId = RequestId("fake-msg-req-propagated-then-error")
+
+    var waku: LogosDelivery
+    var manager: ReliableChannelManager
+    var brokerCtx: BrokerContext
+    lockNewGlobalBrokerContext:
+      brokerCtx = globalBrokerContext()
+      waku = (await LogosDelivery.new(createApiNodeConf())).expect("LogosDelivery.new")
+      manager = waku.reliableChannelManager
+
+    var sendCalls = 0
+    MessagingSend.replaceProvider(
+      brokerCtx,
+      proc(envelope: MessageEnvelope): Future[Result[RequestId, string]] {.async.} =
+        sendCalls.inc
+        return ok(fakeMsgReqId),
+    ).isOkOr:
+      raiseAssert "replaceProvider failed: " & error
+
+    discard manager
+      .createReliableChannel(channelId, contentTopic, SdsParticipantID("local"))
+      .expect("createReliableChannel")
+
+    var sentCount = 0
+    var errorCount = 0
+    discard ChannelMessageSentEvent
+      .listen(
+        brokerCtx,
+        proc(evt: ChannelMessageSentEvent) {.async: (raises: []).} =
+          if evt.channelId == channelId:
+            sentCount.inc
+        ,
+      )
+      .expect("listen ChannelMessageSentEvent")
+    discard ChannelMessageErrorEvent
+      .listen(
+        brokerCtx,
+        proc(evt: ChannelMessageErrorEvent) {.async: (raises: []).} =
+          if evt.channelId == channelId:
+            errorCount.inc
+        ,
+      )
+      .expect("listen ChannelMessageErrorEvent")
+
+    discard (await manager.send(channelId, "hello".toBytes())).expect("send")
+
+    let dispatchDeadline = Moment.now() + 1.seconds
+    while Moment.now() < dispatchDeadline and sendCalls == 0:
+      await sleepAsync(5.milliseconds)
+    check sendCalls == 1
+
+    waku_message_events.MessagePropagatedEvent.emit(
+      brokerCtx,
+      waku_message_events.MessagePropagatedEvent(
+        requestId: fakeMsgReqId, messageHash: ""
+      ),
+    )
+    waku_message_events.MessageErrorEvent.emit(
+      brokerCtx,
+      waku_message_events.MessageErrorEvent(
+        requestId: fakeMsgReqId,
+        messageHash: "",
+        error:
+          "Propagated but not confirmed by a store node within the store validation window",
+      ),
+    )
+
+    await sleepAsync(200.milliseconds)
+    check:
+      sentCount == 1
+      errorCount == 0
+
+    (await waku.stop()).expect("stop")
+
+  asyncTest "a late MessageErrorEvent on a propagated segment does not fail a pending send":
+    ## Two segments. Segment 1 propagates, then gets the store validation
+    ## timeout error. Segment 2 is in flight. The send stays pending until
+    ## segment 2 propagates, then finalises as Sent.
+    const
+      channelId = ChannelId("sm-late-error-multi-channel")
+      contentTopic = ContentTopic("/reliable-channel/test/sm-late-error-multi")
+
+    var waku: LogosDelivery
+    var manager: ReliableChannelManager
+    var brokerCtx: BrokerContext
+    lockNewGlobalBrokerContext:
+      brokerCtx = globalBrokerContext()
+      waku = (await LogosDelivery.new(createApiNodeConf())).expect("LogosDelivery.new")
+      manager = waku.reliableChannelManager
+
+    var msgReqIds: seq[RequestId]
+    MessagingSend.replaceProvider(
+      brokerCtx,
+      proc(envelope: MessageEnvelope): Future[Result[RequestId, string]] {.async.} =
+        let id = RequestId("late-error-msg-req-" & $(msgReqIds.len + 1))
+        msgReqIds.add(id)
+        return ok(id),
+    ).isOkOr:
+      raiseAssert "replaceProvider failed: " & error
+
+    discard manager
+      .createReliableChannel(channelId, contentTopic, SdsParticipantID("local"))
+      .expect("createReliableChannel")
+
+    var sentCount = 0
+    var errorCount = 0
+    discard ChannelMessageSentEvent
+      .listen(
+        brokerCtx,
+        proc(evt: ChannelMessageSentEvent) {.async: (raises: []).} =
+          if evt.channelId == channelId:
+            sentCount.inc
+        ,
+      )
+      .expect("listen ChannelMessageSentEvent")
+    discard ChannelMessageErrorEvent
+      .listen(
+        brokerCtx,
+        proc(evt: ChannelMessageErrorEvent) {.async: (raises: []).} =
+          if evt.channelId == channelId:
+            errorCount.inc
+        ,
+      )
+      .expect("listen ChannelMessageErrorEvent")
+
+    let segHandler = SegmentationHandler
+      .new(
+        ChannelSegmentationConfig.init(ReliableChannelManagerConf()),
+        channelId,
+        brokerCtx,
+      )
+      .expect("SegmentationHandler.new")
+
+    ## Just over one chunk -> two data segments.
+    let payload = newSeq[byte](segHandler.chunkSize() + 1)
+    discard (await manager.send(channelId, payload)).expect("send")
+
+    let dispatchDeadline = Moment.now() + 5.seconds
+    while Moment.now() < dispatchDeadline and msgReqIds.len < 2:
+      await sleepAsync(5.milliseconds)
+    check msgReqIds.len == 2
+
+    waku_message_events.MessagePropagatedEvent.emit(
+      brokerCtx,
+      waku_message_events.MessagePropagatedEvent(
+        requestId: msgReqIds[0], messageHash: ""
+      ),
+    )
+    waku_message_events.MessageErrorEvent.emit(
+      brokerCtx,
+      waku_message_events.MessageErrorEvent(
+        requestId: msgReqIds[0],
+        messageHash: "",
+        error:
+          "Propagated but not confirmed by a store node within the store validation window",
+      ),
+    )
+    await sleepAsync(100.milliseconds)
+    check:
+      sentCount == 0
+      errorCount == 0
+
+    waku_message_events.MessagePropagatedEvent.emit(
+      brokerCtx,
+      waku_message_events.MessagePropagatedEvent(
+        requestId: msgReqIds[1], messageHash: ""
+      ),
+    )
+    await sleepAsync(100.milliseconds)
+    check:
+      sentCount == 1
+      errorCount == 0
+
+    (await waku.stop()).expect("stop")
+
   asyncTest "two independent channelReqIds are finalised independently":
     ## Two `send()` calls -> two independent `channelReqId`s, each a
     ## single segment because both payloads fit one chunk (the

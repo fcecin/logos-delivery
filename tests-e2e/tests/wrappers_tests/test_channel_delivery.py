@@ -2,6 +2,8 @@ import base64
 import re
 import time
 
+import pytest
+
 from src.libs.common import delay, to_base64
 from src.node.subprocess_node import ChannelSenderProcess
 from src.node.wrappers_manager import WrapperManager
@@ -11,6 +13,7 @@ from src.node.wrapper_helpers import (
     get_node_multiaddr,
     unique_channel_id,
     wait_for_connected,
+    wait_for_event,
 )
 
 RC05_CHANNEL_PREFIX = "rc05-channel"
@@ -48,6 +51,11 @@ SENDER_C = "rc12-sender-c"
 
 RC13_CHANNEL_PREFIX = "rc13-channel"
 RC13_CONTENT_TOPIC = "/test/1/rc13-channel/proto"
+
+RC14_CHANNEL_PREFIX = "rc14-channel"
+RC14_CONTENT_TOPIC = "/test/1/rc14-channel/proto"
+CHANNEL_SENT_EVENT = "channel_message_sent"
+CHANNEL_ERROR_EVENT = "channel_message_error"
 
 CLOSED_CHANNEL_PREFIX = "rc-closed-channel"
 CLOSED_CONTENT_TOPIC = "/test/1/rc-closed-channel/proto"
@@ -683,6 +691,68 @@ class TestChannelDelivery:
                 # A third event could only be a replayed m1 from the re-created channel.
                 settled = wait_for_channel_received_count(receiver_collector, channel_id, 3, NO_CHANNEL_DELIVERY_WINDOW_S)
                 assert len(settled) == 2, f"re-create must not re-deliver m1; got: {channel_payloads(settled)!r}"
+
+    @pytest.mark.parametrize(
+        "reliability_enabled, ephemeral",
+        [(False, False), (True, True)],
+        ids=["reliability-off", "ephemeral"],
+    )
+    def test_rc14_channel_send_finalises_once_propagated(self, node_config, reliability_enabled, ephemeral):
+        """RC14: a channel send ends in channel_message_sent when its message propagates.
+
+        With reliability off (as in the twn and status.prod presets), or for an
+        ephemeral message, the sender gets no message_sent. The peer is relay-only. The sender is the
+        node under test and runs in this process.
+        """
+        channel_id = unique_channel_id(RC14_CHANNEL_PREFIX)
+
+        node_config.update(
+            {
+                "relay": True,
+                "store": False,
+                "reliabilityEnabled": reliability_enabled,
+                "numShardsInNetwork": 1,
+            }
+        )
+
+        peer_result = WrapperManager.create_and_start(config=node_config)
+        assert peer_result.is_ok(), f"Failed to start relay peer: {peer_result.err()}"
+
+        with peer_result.ok_value as peer:
+            sender_collector = EventCollector()
+            sender_config = {
+                **node_config,
+                "staticnodes": [get_node_multiaddr(peer)],
+                "portsShift": 1,
+            }
+            sender_result = WrapperManager.create_and_start(config=sender_config, event_cb=sender_collector.event_callback)
+            assert sender_result.is_ok(), f"Failed to start sender: {sender_result.err()}"
+
+            with sender_result.ok_value as sender:
+                assert wait_for_connected(sender_collector) is not None, "Sender did not reach Connected/PartiallyConnected state"
+
+                create_result = sender.channel_create(channel_id, RC14_CONTENT_TOPIC, SENDER_A)
+                assert create_result.is_ok(), f"sender channel_create failed: {create_result.err()}"
+
+                send_result = sender.channel_send(
+                    channel_id,
+                    create_message_bindings(payload=to_base64("rc14 finality"), ephemeral=ephemeral),
+                )
+                assert send_result.is_ok(), f"sender channel_send failed: {send_result.err()}"
+                request_id = send_result.ok_value
+                assert request_id, "channel_send returned an empty handle"
+
+                sent = wait_for_event(
+                    sender_collector,
+                    request_id,
+                    lambda event: event.get("eventType") == CHANNEL_SENT_EVENT,
+                    DELIVERY_TIMEOUT_S,
+                )
+                assert sent is not None, f"No {CHANNEL_SENT_EVENT} for {request_id} within {DELIVERY_TIMEOUT_S}s: {sender_collector.snapshot()}"
+                assert sent["channelId"] == channel_id, f"{CHANNEL_SENT_EVENT} names the wrong channel: {sent!r}"
+
+                errors = [e for e in sender_collector.get_events_for_request(request_id) if e.get("eventType") == CHANNEL_ERROR_EVENT]
+                assert not errors, f"a sent channel message must not also fail: {errors!r}"
 
     def test_receive_after_close_emits_no_channel_event(self, node_config):
         """A closed channel must not deliver: B closes its channel, then A sends a

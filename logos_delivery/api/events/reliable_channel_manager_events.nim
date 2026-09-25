@@ -11,16 +11,16 @@ EventBroker:
     payload*: seq[byte]
 
 EventBroker:
-  ## Emitted when every segment of a channel-level `send()` reached
-  ## `Confirmed`. Channel-level analogue of `MessageSentEvent`; the
-  ## `requestId` is the channel-layer parent returned by `send()`.
+  ## The channel emits this event when all segments of a `send()` propagate.
+  ## `requestId` is the value that `send()` returns.
   type ChannelMessageSentEvent* = object
     channelId*: ChannelId
     requestId*: RequestId
 
 EventBroker:
-  ## Emitted when a channel-level `send()` finalises with at least one
-  ## segment in `Failed`. Channel-level analogue of `MessageErrorEvent`.
+  ## The channel emits this event when all segments of a `send()` are final and
+  ## at least one segment failed before it propagated. An error for a segment
+  ## that already propagated does not count.
   type ChannelMessageErrorEvent* = object
     channelId*: ChannelId
     requestId*: RequestId
