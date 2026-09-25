@@ -97,6 +97,11 @@ CONTENT_TOPICS_SHARD_7 = [
 ]
 
 DEFAULT_CLUSTER_ID = "198"
+
+FLEET_PRESET = "logos.test"
+# Autosharding maps the fleet tests' content topics, /fleet-test/1/..., to shard 6.
+FLEET_SHARDS = ["6"]
+
 VALID_PUBSUB_TOPICS = [
     f"/waku/2/rs/{DEFAULT_CLUSTER_ID}/0",
     f"/waku/2/rs/{DEFAULT_CLUSTER_ID}/1",
