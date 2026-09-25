@@ -3,4 +3,5 @@
 import ./test_channel_lifecycle
 import ./test_channel_encryption
 import ./test_reliable_channel_send_receive
+import ./test_reliable_channel_send_finality
 import ./test_segmentation
