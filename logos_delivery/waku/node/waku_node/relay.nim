@@ -248,20 +248,19 @@ proc setRlnValidator*(
     spamHandler = Opt.none(SpamHandler),
     registrationHandler = Opt.none(RegistrationHandler),
 ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
-  ## Compatibility entry for callers that construct the on-chain backend
-  ## inline (tests, example apps): mounts it, records its handle on the node
-  ## and registers the RLN validator.
+  ## Mounts the on-chain backend from `rlnConf`, stores it on the node
+  ## (`node.rln`, `node.rlnPlugin`) and registers the RLN validator. For
+  ## callers that configure the backend directly (tests, example apps);
+  ## nodes built from configuration are mounted by the factory.
   let rlnRes =
     try:
-      await RlnEvm.new(rlnConf, registrationHandler)
+      await mountOnchain(rlnConf, registrationHandler)
     except CancelledError as e:
       raise e
     except CatchableError as e:
       return err("failed to set rln validator: " & e.msg)
   let rln = rlnRes.valueOr:
     return err("failed to set rln validator: " & error)
-  if (rlnConf.userMessageLimit > rln.groupManager.rlnRelayMaxMessageLimit):
-    error "Rln-user-message-limit can't exceed the MAX_MESSAGE_LIMIT in the rln contract"
 
   node.rln = rln
   let plugin = rln.toRlnPlugin()
