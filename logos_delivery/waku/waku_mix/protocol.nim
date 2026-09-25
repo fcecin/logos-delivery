@@ -9,6 +9,7 @@ import
   libp2p_mix/mix_node,
   libp2p_mix/mix_protocol,
   libp2p_mix/mix_metrics,
+  libp2p_mix/multiaddr as mix_multiaddr,
   libp2p_mix/delay_strategy,
   libp2p/[multiaddress, peerid],
   eth/common/keys
@@ -31,6 +32,10 @@ type
     peerManager*: PeerManager
     clusterId: uint16
     pubKey*: Curve25519Key
+    hopMissing: bool
+      ## `true` when the last hop derivation found no address the encoder accepts.
+      ## The hop that mix still holds is then a leftover, unusable even if it
+      ## encodes.
 
   WakuMixResult*[T] = Result[T, string]
 
@@ -113,5 +118,31 @@ proc new*(
 
 proc poolSize*(mix: WakuMix): int =
   mix.nodePool.len
+
+proc selfHopMissing*(mix: WakuMix): bool =
+  ## True when the last derivation of this node's own hop found nothing to set.
+  mix.hopMissing
+
+proc selfHopUsable*(mix: WakuMix): bool =
+  ## True when the encoder accepts this node's own hop (IPv4 TCP or QUIC-v1, or
+  ## a circuit relay over one) and `hopMissing` is not set. Every reply path and
+  ## cover packet fails at build time on a hop that the encoder rejects.
+  if mix.hopMissing:
+    return false
+  let info = mix.localMixPubInfo()
+  return mix_multiaddr.multiAddrToBytes(info.peerId, info.multiAddr).isOk()
+
+proc updateSelfHop*(
+    mix: WakuMix, preferred: seq[MultiAddress], fallback: seq[MultiAddress]
+): Opt[MultiAddress] =
+  ## Sets this node's own hop to the first candidate in `preferred`, then in
+  ## `fallback`, that the library accepts, and returns it. When none encodes,
+  ## the hop stays as it was, `hopMissing` is set, and the result is none.
+  for candidate in preferred & fallback:
+    if mix.setLocalMultiAddr(candidate).isOk():
+      mix.hopMissing = false
+      return Opt.some(candidate)
+  mix.hopMissing = true
+  return Opt.none(MultiAddress)
 
 # Mix Protocol

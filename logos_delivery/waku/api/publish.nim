@@ -150,10 +150,12 @@ proc selectMixLightpushPeer*(self: Waku, shard: PubsubTopic): Opt[RemotePeerInfo
   return Opt.none(RemotePeerInfo)
 
 proc mixReady*(self: Waku): bool =
-  ## True when mix is mounted and the pool has enough nodes for a path. This
-  ## proc does not look for an exit node. `lightpushPublishToAny` selects one
-  ## and reports SERVICE_NOT_AVAILABLE when it finds none.
+  ## True when mix is mounted, mix can encode this node's own hop, and the pool
+  ## has enough nodes for a path. `lightpushPublishToAny` selects the exit and
+  ## reports SERVICE_NOT_AVAILABLE when it finds none.
   if self.node.wakuMix.isNil():
+    return false
+  if not self.node.wakuMix.selfHopUsable():
     return false
   return self.node.getMixNodePoolSize() >= MinMixPoolSize
 

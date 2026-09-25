@@ -319,6 +319,13 @@ proc getMixHealth(hm: NodeHealthMonitor): ProtocolHealth =
   let poolSize = hm.node.getMixNodePoolSize()
   hm.strength[WakuProtocol.MixProtocol] = poolSize
 
+  # Checked before the pool: discovery cannot fix a hop that the encoder
+  # rejects, and every reply path and cover packet fails on it.
+  if not hm.node.wakuMix.selfHopUsable():
+    return p.notReady(
+      "This node's announced address is not one mix can route replies to (IPv4 TCP or QUIC-v1)"
+    )
+
   # Same threshold as `mixReady`, so health and the send path agree.
   if poolSize < MinMixPoolSize:
     return p.notReady("Mix pool too small: " & $poolSize & " < " & $MinMixPoolSize)
