@@ -253,7 +253,7 @@ proc setRlnValidator*(
   ## and registers the RLN validator.
   let rlnRes =
     try:
-      await RlnEvm.new(rlnConf, registrationHandler, node.brokerCtx)
+      await RlnEvm.new(rlnConf, registrationHandler)
     except CancelledError as e:
       raise e
     except CatchableError as e:
