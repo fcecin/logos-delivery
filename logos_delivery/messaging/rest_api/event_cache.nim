@@ -13,9 +13,12 @@
 {.push raises: [].}
 
 import std/[tables, deques, options]
-import results
+import results, metrics
 import logos_delivery/waku/waku_core/time
 import ./types
+
+declarePublicCounter logos_delivery_rest_received_dropped,
+  "received messages evicted from the messaging REST buffer before a poll took them"
 
 const
   DefaultMaxReceived* = 50 ## Received messages kept between polls (spec default).
@@ -31,6 +34,7 @@ type MessagingEventCache* = ref object
   # Received messages, bounded ring. Cleared on poll.
   received: Deque[ReceivedMessageRecord]
   maxReceived: int
+  nextReceivedSeq: uint64 ## the `seq` of the newest received record; 0 before the first
 
 proc new*(
     T: type MessagingEventCache,
@@ -79,12 +83,19 @@ proc recordReceived*(
     source: MessageSource,
 ) =
   ## Buffer a received message, dropping the oldest past the ring capacity.
+  inc self.nextReceivedSeq
   self.received.addLast(
-    ReceivedMessageRecord(messageHash: messageHash, message: message, source: source)
+    ReceivedMessageRecord(
+      seq: self.nextReceivedSeq,
+      messageHash: messageHash,
+      message: message,
+      source: source,
+    )
   )
 
   while self.received.len > self.maxReceived:
     discard self.received.popFirst()
+    logos_delivery_rest_received_dropped.inc()
 
 proc pollAllSend*(self: MessagingEventCache): seq[SendStatus] =
   ## Return all buffered send statuses and clear the store (evict-after-poll).

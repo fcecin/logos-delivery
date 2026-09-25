@@ -81,13 +81,16 @@ proc installEventListeners(brokerCtx: BrokerContext, cache: MessagingEventCache)
       cache.recordReceived(evt.messageHash, toRelayWakuMessage(evt.message), evt.source),
   )
 
-proc installMessagingApiHandlers*(router: var RestRouter, client: MessagingClient) =
+proc installMessagingApiHandlers*(
+    router: var RestRouter, client: MessagingClient, maxReceived = DefaultMaxReceived
+) =
   ## Mounts the MessagingClient subscribe / unsubscribe / send operations as
   ## REST endpoints onto the given (kernel-owned) router. Subscriptions are
   ## keyed by content topic, matching the messaging layer's content-topic API.
+  ## `maxReceived` bounds the received messages kept between polls.
 
   # Event observability: buffer send/received events for the poll-based GETs.
-  let eventCache = MessagingEventCache.new()
+  let eventCache = MessagingEventCache.new(maxReceived = maxReceived)
   installEventListeners(client.waku.brokerCtx, eventCache)
 
   # Without autosharding, content topics resolve to no shard: answer 503.
@@ -222,7 +225,12 @@ proc mountRestApi*(client: MessagingClient) =
   if not client.waku.restServer.isNil():
     # The BTree route table is ref-backed, so mutating the copied router persists
     # (same pattern as the waku REST builder).
+    let capacity =
+      if client.waku.conf.restServerConf.isSome():
+        int(client.waku.conf.restServerConf.get().messagingCacheCapacity)
+      else:
+        DefaultMaxReceived
     var router = client.waku.restServer.router
-    installMessagingApiHandlers(router, client)
+    installMessagingApiHandlers(router, client, maxReceived = capacity)
     rest_server_builder.markRestApiInstalled(rest_server_builder.RestRootMessaging)
     info "Mounted messaging REST API endpoints"
