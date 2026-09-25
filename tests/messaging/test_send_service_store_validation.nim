@@ -51,7 +51,7 @@ suite "SendService - store validation and mix":
       msg: msg,
       msgHash: computeMessageHash(pubsubTopic, msg),
       state: DeliveryState.SuccessfullyPropagated,
-      propagatedOverMix: overMix,
+      propagatedAnonymously: overMix,
       firstPropagatedTime: Opt.some(Moment.now()),
     )
 
@@ -98,7 +98,7 @@ type ScriptedProc = ref object of BaseSendProcessor
 
 method process(self: ScriptedProc, task: DeliveryTask): Future[void] {.async.} =
   task.state = DeliveryState.SuccessfullyPropagated
-  task.propagatedOverMix = self.overMix
+  task.propagatedAnonymously = self.overMix
   task.deliveryTime = Moment.now()
   if task.firstPropagatedTime.isNone():
     task.firstPropagatedTime = Opt.some(Moment.now())

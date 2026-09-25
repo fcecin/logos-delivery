@@ -139,7 +139,7 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
   # Mark before the attempt: the exit publishes before it replies, so a message
   # whose reply is lost is still on the network. From here on, the send service
   # logs no hash for this task at INFO or ERROR.
-  task.selfMixedAnnounced = true
+  task.anonymized = true
 
   task.errorDesc = "" # the attempt reports its own outcome
   task.heldRounds = 0
@@ -173,7 +173,7 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
     debug "Message propagated via Mix",
       requestId = task.requestId, msgHash = task.msgHash.to0xHex()
     task.state = DeliveryState.SuccessfullyPropagated
-    task.propagatedOverMix = true
+    task.propagatedAnonymously = true
     task.deliveryTime = Moment.now()
     if task.firstPropagatedTime.isNone():
       task.firstPropagatedTime = Opt.some(Moment.now())

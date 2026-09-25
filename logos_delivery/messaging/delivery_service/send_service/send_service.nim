@@ -175,7 +175,7 @@ proc awaitsStoreValidation*(self: SendService, task: DeliveryTask): bool =
   ## clear from this node's own address. Every store confirmation passes here.
   return
     self.storeConfirmationExpected(task) and
-    task.state == DeliveryState.SuccessfullyPropagated and not task.propagatedOverMix
+    task.state == DeliveryState.SuccessfullyPropagated and not task.propagatedAnonymously
 
 proc checkMsgsInStore(self: SendService, tasksToValidate: seq[DeliveryTask]) {.async.} =
   if tasksToValidate.len() == 0:
@@ -232,25 +232,28 @@ proc checkStoredMessages(self: SendService) {.async.} =
   self.lastStoreCheckTime = Moment.now()
   await self.checkMsgsInStore(tasksToValidate)
 
+proc loggedHash(task: DeliveryTask): string =
+  ## The hash for INFO and ERROR records, withheld once the task is anonymized.
+  if task.anonymized:
+    "withheld"
+  else:
+    task.msgHash.to0xHex()
+
 proc reportTaskResult(self: SendService, task: DeliveryTask) =
   case task.state
   of DeliveryState.SuccessfullyPropagated:
     # TODO: in case of unable to strore check messages shall we report success instead?
     if not task.propagateEventEmitted:
-      # Omit the hash once the task is marked `selfMixedAnnounced`: INFO lines
-      # reach log collectors, and the hash would tie this node to a mixed message.
-      # `MixSendProcessor` still logs the hash at DEBUG.
-      if task.selfMixedAnnounced:
-        info "Message successfully propagated", requestId = task.requestId
-      else:
-        info "Message successfully propagated",
-          requestId = task.requestId, msgHash = task.msgHash.to0xHex()
+      # INFO lines reach log collectors, where a hash would tie this node to an
+      # anonymized message; `MixSendProcessor` still logs it at DEBUG.
+      info "Message successfully propagated",
+        requestId = task.requestId, msgHash = task.loggedHash()
       MessagePropagatedEvent.emit(
         self.brokerCtx, task.requestId, task.msgHash.to0xHex()
       )
       task.propagateEventEmitted = true
 
-    if task.propagatedOverMix and not task.sentEventEmitted and
+    if task.propagatedAnonymously and not task.sentEventEmitted and
         self.storeConfirmationExpected(task):
       # The exit's reply completes a mixed send when a plain send would wait for
       # a store confirmation, so both paths end with the same event.
@@ -260,26 +263,17 @@ proc reportTaskResult(self: SendService, task: DeliveryTask) =
       task.sentEventEmitted = true
     return
   of DeliveryState.SuccessfullyValidated:
-    # A marked task reaches this only through the clear republish of a
-    # `Preferred` send whose mix reply was lost; the hash is omitted as above.
-    if task.selfMixedAnnounced:
-      info "Message successfully sent", requestId = task.requestId
-    else:
-      info "Message successfully sent",
-        requestId = task.requestId, msgHash = task.msgHash.to0xHex()
+    # An anonymized task reaches this only through the clear republish of a
+    # `Preferred` send whose mix reply was lost.
+    info "Message successfully sent",
+      requestId = task.requestId, msgHash = task.loggedHash()
     MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
     task.sentEventEmitted = true
     return
   of DeliveryState.FailedToDeliver:
-    # Omit the hash for a marked task: the exit may have published the message
-    # even though its reply was lost.
-    if task.selfMixedAnnounced:
-      error "Failed to send message", requestId = task.requestId, error = task.errorDesc
-    else:
-      error "Failed to send message",
-        requestId = task.requestId,
-        msgHash = task.msgHash.to0xHex(),
-        error = task.errorDesc
+    # The exit may have published the message even though its reply was lost.
+    error "Failed to send message",
+      requestId = task.requestId, msgHash = task.loggedHash(), error = task.errorDesc
     MessageErrorEvent.emit(
       self.brokerCtx, task.requestId, task.msgHash.to0xHex(), task.errorDesc
     )
@@ -296,31 +290,21 @@ proc reportTaskResult(self: SendService, task: DeliveryTask) =
     # Report that reason if set.
     if task.errorDesc.len == 0:
       task.errorDesc = "Unable to send within retry time window"
-    if task.selfMixedAnnounced:
-      error "Failed to send message",
-        requestId = task.requestId, error = task.errorDesc, age = task.admissionAge()
-    else:
-      error "Failed to send message",
-        requestId = task.requestId,
-        msgHash = task.msgHash.to0xHex(),
-        error = task.errorDesc,
-        age = task.admissionAge()
+    error "Failed to send message",
+      requestId = task.requestId,
+      msgHash = task.loggedHash(),
+      error = task.errorDesc,
+      age = task.admissionAge()
     task.state = DeliveryState.FailedToDeliver
     MessageErrorEvent.emit(
       self.brokerCtx, task.requestId, task.msgHash.to0xHex(), task.errorDesc
     )
   elif task.isParkedExpired(self.maxParkedAge):
-    if task.selfMixedAnnounced:
-      error "Failed to send message",
-        requestId = task.requestId,
-        error = "Parked message too old",
-        age = task.messageAge()
-    else:
-      error "Failed to send message",
-        requestId = task.requestId,
-        msgHash = task.msgHash.to0xHex(),
-        error = "Parked message too old",
-        age = task.messageAge()
+    error "Failed to send message",
+      requestId = task.requestId,
+      msgHash = task.loggedHash(),
+      error = "Parked message too old",
+      age = task.messageAge()
     task.state = DeliveryState.FailedToDeliver
     MessageErrorEvent.emit(
       self.brokerCtx,
@@ -371,9 +355,8 @@ proc reportTaskQueued(self: SendService, task: DeliveryTask) =
   if task.queuedEventEmitted:
     return
 
-  # No hash for any send: a task that an RLN proof refresh parks after a mix
-  # attempt comes here marked. The event below gives the hash to the application.
-  info "Message queued for rate-limit budget", requestId = task.requestId
+  info "Message queued for rate-limit budget",
+    requestId = task.requestId, msgHash = task.loggedHash()
   MessageQueuedEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
   task.queuedEventEmitted = true
 
@@ -449,9 +432,7 @@ proc send*(self: SendService, task: DeliveryTask) {.async.} =
 
   if self.isFull():
     error "Failed to send message",
-      requestId = task.requestId,
-      msgHash = task.msgHash.to0xHex(),
-      error = "Send queue full"
+      requestId = task.requestId, msgHash = task.loggedHash(), error = "Send queue full"
     MessageErrorEvent.emit(
       self.brokerCtx, task.requestId, task.msgHash.to0xHex(), "Send queue full"
     )

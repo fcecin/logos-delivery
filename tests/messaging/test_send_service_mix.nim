@@ -534,7 +534,7 @@ suite "SendService - anonymity level with a mounted mix":
 
     check:
       task.state != DeliveryState.SuccessfullyPropagated # no reply ever came
-      task.selfMixedAnnounced # ... and it was marked anyway
+      task.anonymized # ... and it was marked anyway
 
   asyncTest "a usable mix is attempted, not decided against":
     ## A routable pool with an exit passes the pre-check. `tryCount` grows before
