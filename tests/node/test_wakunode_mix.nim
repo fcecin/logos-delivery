@@ -1,9 +1,9 @@
 {.used.}
 
 import std/[sequtils, strutils]
-import testutils/unittests, chronos, results
+import testutils/unittests, chronos, results, metrics
 import libp2p/[crypto/crypto, peerid, multiaddress]
-import libp2p_mix, libp2p_mix/curve25519
+import libp2p_mix, libp2p_mix/[curve25519, mix_metrics]
 
 import
   logos_delivery/waku/[
@@ -11,6 +11,7 @@ import
     common/waku_protocol,
     net/net_config,
     node/enr_addresses,
+    node/peer_manager,
     node/waku_node,
     node/health_monitor/health_status,
     node/health_monitor/protocol_health,
@@ -311,3 +312,112 @@ suite "Waku Mix - the node's own hop":
       node.selfHop() == node.announcedAddresses[0]
       node.wakuMix.selfHopUsable()
     await node.stop()
+
+## `poolSize` counts the live pool members a path can use; `mixReady` and the
+## `mix_pool_size` gauge read it. The cases that read the gauge publish it first
+## with `updatePoolSize`, as the mount and the health pass do.
+
+suite "Waku Mix - pool size":
+  var node {.threadvar.}: WakuNode
+
+  asyncSetup:
+    node = newTestWakuNode(generateSecp256k1Key())
+
+    # Mount before start, as the node factory does: a switch that runs cannot
+    # mount a new protocol.
+    let mixKeys = generateKeyPair().expect("mix key pair")
+    (await node.mountMix(DefaultClusterId, mixKeys.privateKey, @[])).isOkOr:
+      raiseAssert "Failed to mount mix: " & $error
+
+    await node.start()
+
+  asyncTeardown:
+    await node.stop()
+
+  proc addMixPeer(address: string): PeerId =
+    ## Stores a mix key and its address in the peer store, as discovery does.
+    ## The pool reads the peer store.
+    let peerId = PeerId.init(generateSecp256k1Key()).tryGet()
+    let mixKeys = generateKeyPair().expect("mix key pair")
+    node.peerManager.addPeer(
+      RemotePeerInfo.init(
+        peerId,
+        @[MultiAddress.init(address).tryGet()],
+        mixPubKey = Opt.some(mixKeys.publicKey),
+      )
+    )
+    return peerId
+
+  asyncTest "a node with no mix peers has an empty pool":
+    check node.getMixNodePoolSize() == 0
+
+  asyncTest "only the peers mix can route count towards the pool":
+    ## Mix routes IPv4 TCP and QUIC-v1. The `dns4` and `ip6` peers have a mix key
+    ## and no address that a path can use.
+    discard addMixPeer("/ip4/127.0.0.1/tcp/60001")
+    discard addMixPeer("/ip4/127.0.0.1/udp/60002/quic-v1")
+    discard addMixPeer("/dns4/node.test/tcp/60003")
+    discard addMixPeer("/ip6/::1/tcp/60004")
+
+    updatePoolSize(node.getMixNodePoolSize())
+    check:
+      node.getMixNodePoolSize() == 2
+      mix_pool_size.value() == 2.0
+
+  asyncTest "the pool follows the peers discovery brings in":
+    ## The count is the live pool, so it grows as mix keys arrive.
+    check node.getMixNodePoolSize() == 0
+
+    for port in 60010 .. 60012:
+      discard addMixPeer("/ip4/127.0.0.1/tcp/" & $port)
+    check node.getMixNodePoolSize() == 3
+
+    discard addMixPeer("/ip4/127.0.0.1/tcp/60013")
+    updatePoolSize(node.getMixNodePoolSize())
+    check:
+      node.getMixNodePoolSize() == 4
+      mix_pool_size.value() == 4.0
+
+  asyncTest "mix is not ready until enough peers can carry a packet":
+    ## `mixReady` needs `poolSize() >= MinMixPoolSize`, so an unroutable peer
+    ## must not count toward it.
+    for port in 60020 .. 60022:
+      discard addMixPeer("/ip4/127.0.0.1/tcp/" & $port)
+    discard addMixPeer("/dns4/node.test/tcp/60023")
+
+    check node.getMixNodePoolSize() == 3 # the `dns4` peer does not count
+
+    discard addMixPeer("/ip4/127.0.0.1/tcp/60024")
+    check node.getMixNodePoolSize() == MinMixPoolSize
+
+  asyncTest "the gauge at mount counts routable bootnodes, not parsed ones":
+    ## A `/dns4` bootnode parses at mount and mix cannot route it. The gauge and
+    ## the pool size count only the routable bootnode.
+    proc bootnode(address: string): MixNodePubInfo =
+      let peerId = PeerId.init(generateSecp256k1Key()).tryGet()
+      let keys = generateKeyPair().expect("mix key pair")
+      return
+        MixNodePubInfo(multiAddr: address & "/p2p/" & $peerId, pubKey: keys.publicKey)
+
+    let other = newTestWakuNode(generateSecp256k1Key())
+    let mixKeys = generateKeyPair().expect("mix key pair")
+    (
+      await other.mountMix(
+        DefaultClusterId,
+        mixKeys.privateKey,
+        @[bootnode("/ip4/127.0.0.1/tcp/60030"), bootnode("/dns4/node.test/tcp/60031")],
+      )
+    ).isOkOr:
+      raiseAssert "Failed to mount mix: " & $error
+    await other.start()
+
+    check:
+      other.getMixNodePoolSize() == 1
+      mix_pool_size.value() == 1.0
+
+    await other.stop()
+
+suite "Waku Mix - pool size without mix":
+  asyncTest "a node that never mounted mix reports an empty pool":
+    let node = newTestWakuNode(generateSecp256k1Key())
+    check node.getMixNodePoolSize() == 0

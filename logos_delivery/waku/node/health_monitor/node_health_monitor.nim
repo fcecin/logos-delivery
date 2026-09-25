@@ -571,6 +571,12 @@ proc healthLoop(hm: NodeHealthMonitor) {.async.} =
 
       hm.publishProtocolHealth(await hm.getAllProtocolHealthInfo())
 
+      # A `MixPubKeyBook` change wakes this loop, so the gauge follows the pool
+      # as it fills, with no traffic. The loop publishes it, so a health read, as
+      # from the REST endpoint, has no side effect.
+      if not isNil(hm.node.wakuMix):
+        updatePoolSize(hm.strength.getOrDefault(WakuProtocol.MixProtocol, 0))
+
       let newConnectionStatus = hm.calculateConnectionState()
 
       if newConnectionStatus != hm.connectionStatus:

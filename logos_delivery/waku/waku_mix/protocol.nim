@@ -43,6 +43,22 @@ type
     multiAddr*: string
     pubKey*: Curve25519Key
 
+proc poolSize*(mix: WakuMix): int =
+  ## The number of pool members a path can use. `nodePool.get` needs an IPv4 TCP
+  ## or QUIC-v1 address and a secp256k1 key; `MixNodePool.len` checks neither.
+  ## Walks the pool; `mixReady` calls it once per send attempt.
+  var routable = 0
+  for peerId in mix.nodePool.peerIds():
+    if mix.nodePool.get(peerId).isSome():
+      routable.inc()
+  return routable
+
+proc updatePoolSize*(size: int) =
+  ## Sets `mix_pool_size`; this is its only writer. The mount and each health
+  ## pass publish the count they just read: routability can change when no
+  ## peer-store handler fires, as when an `AddressBook` entry's TTL runs out.
+  mix_pool_size.set(size)
+
 proc processBootNodes(
     bootnodes: seq[MixNodePubInfo], peermgr: PeerManager, mix: WakuMix
 ) =
@@ -78,7 +94,6 @@ proc processBootNodes(
         peerId, @[multiAddr], publicKey = peerPubKey, mixPubKey = Opt.some(node.pubKey)
       )
     )
-  mix_pool_size.set(count)
   info "using mix bootstrap nodes ", count = count
 
 proc new*(
@@ -111,13 +126,13 @@ proc new*(
 
   processBootNodes(bootnodes, peermgr, m)
 
-  if m.nodePool.len < MinMixPoolSize:
-    info "Mix cannot publish yet, waiting for more mix nodes",
-      poolSize = m.nodePool.len, required = MinMixPoolSize
-  return ok(m)
+  let usable = m.poolSize()
+  updatePoolSize(usable)
 
-proc poolSize*(mix: WakuMix): int =
-  mix.nodePool.len
+  if usable < MinMixPoolSize:
+    info "Mix cannot publish yet, waiting for more mix nodes",
+      poolSize = usable, required = MinMixPoolSize
+  return ok(m)
 
 proc selfHopMissing*(mix: WakuMix): bool =
   ## True when the last derivation of this node's own hop found nothing to set.
