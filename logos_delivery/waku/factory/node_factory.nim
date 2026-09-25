@@ -345,9 +345,9 @@ proc setupProtocols(
       commonConf: RlnCommonConf
   ): Future[Result[RlnPlugin, string]] {.async.} =
     node.rlnLez = RlnLez.init()
-    (await node.setRlnValidator(commonConf)).isOkOr:
-      return err("failed to mount waku RLN relay protocol: " & error)
-    return ok(RlnPlugin(name: "external"))
+    let plugin = node.rlnLez.toRlnPlugin()
+    node.registerRlnValidator(plugin, commonConf)
+    return ok(plugin)
 
   proc onchainRlnPresent(): bool =
     conf.rlnEvmConf.isSome()
@@ -370,7 +370,11 @@ proc setupProtocols(
     )
     (await node.setRlnValidator(rlnConf)).isOkOr:
       return err("failed to mount waku RLN relay protocol: " & error)
-    return ok(RlnPlugin(name: "onchain"))
+
+    # setRlnValidator mounts the backend and records its handle on the node
+    let plugin = node.rlnPlugin.valueOr:
+      return err("on-chain RLN backend mounted without a plugin record")
+    return ok(plugin)
 
   let rlnDescriptors = [
     RlnPluginDescriptor(
