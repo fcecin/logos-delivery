@@ -159,6 +159,16 @@ proc mixReady*(self: Waku): bool =
     return false
   return self.node.getMixNodePoolSize() >= MinMixPoolSize
 
+proc mixMounted*(self: Waku): bool =
+  ## True when mix is mounted. A short pool or a missing exit can clear with
+  ## time; a node without mix never sends over mix.
+  return not self.node.wakuMix.isNil()
+
+proc mixSelfHopUsable*(self: Waku): bool =
+  ## True when mix is mounted and can encode this node's own hop. `mixReady`
+  ## also checks this; the send path reads it alone to name the reason.
+  return not self.node.wakuMix.isNil() and self.node.wakuMix.selfHopUsable()
+
 proc lightpushPublishToAny*(
     self: Waku, shard: PubsubTopic, message: WakuMessage, mixify: bool = false
 ): Future[WakuLightPushResult] {.async.} =
