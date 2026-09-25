@@ -11,7 +11,7 @@ import logos_delivery/waku/waku
 import
   logos_delivery/waku/
     [node/waku_node, rln, rln/rln_evm/protocol_types, rln/rln_evm/nonce_manager]
-import logos_delivery/waku/rln/rln_lez/types as rln_api_types
+import logos_delivery/waku/rln/types as rln_api_types
 import logos_delivery/waku/rln/rln_lez/rln_lez
 
 export rln_api_types
