@@ -946,8 +946,8 @@ proc stop*(node: WakuNode) {.async.} =
 
   node.peerManager.stop()
 
-  if not node.rln.isNil():
-    await node.rln.stop()
+  if node.rlnPlugin.isSome() and not node.rlnPlugin.get().stop.isNil():
+    await node.rlnPlugin.get().stop()
 
   if not node.wakuArchive.isNil():
     await node.wakuArchive.stopWait()
@@ -967,8 +967,10 @@ proc stop*(node: WakuNode) {.async.} =
   node.explicitAnnounced = @[]
   node.enrLearnedEndpoint = Opt.none(DiscoveryEndpoint)
 
-proc isReady*(node: WakuNode): Future[bool] {.async: (raises: [CancelledError]).} =
-  if node.rln == nil:
+proc isReady*(node: WakuNode): Future[bool] {.async: (raises: [Exception]).} =
+  let plugin = node.rlnPlugin.valueOr:
     return true
-  return await node.rln.isReady()
+  if plugin.isReady.isNil():
+    return true
+  return await plugin.isReady()
   ## TODO: add other protocol `isReady` checks
