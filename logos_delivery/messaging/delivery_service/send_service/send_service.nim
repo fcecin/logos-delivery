@@ -248,8 +248,9 @@ proc reportTaskResult(self: SendService, task: DeliveryTask) =
   # Fail a task that passed admission and did not propagate in its window.
   # evaluateAndCleanUp fails propagated tasks that no store node confirms.
   if task.isDeliveryTimedOut(self.maxDeliveryTime):
-    # A processor that holds a task writes its reason in `errorDesc`, as the mix
-    # processor does while it waits out the window. Report that reason if set.
+    # A processor that leaves a task for the next round can write why in
+    # `errorDesc`, as the mix processor does for a `Required` task it holds.
+    # Report that reason if set.
     if task.errorDesc.len == 0:
       task.errorDesc = "Unable to send within retry time window"
     error "Failed to send message",
@@ -392,12 +393,6 @@ proc send*(self: SendService, task: DeliveryTask) {.async.} =
   debug "SendService.send: processing delivery task",
     requestId = task.requestId, msgHash = task.msgHash.to0xHex()
 
-  # Yield once, so no event reaches the caller before its request id: the
-  # messaging API returns the id when `send` suspends, and chronos runs this
-  # expired timer after the queued callbacks that carry the id back.
-  # TODO: have `send` only mint the id, enqueue the task and wake the loop.
-  await sleepAsync(ZeroDuration)
-
   if self.isFull():
     error "Failed to send message",
       requestId = task.requestId,
@@ -411,6 +406,12 @@ proc send*(self: SendService, task: DeliveryTask) {.async.} =
   inc self.inFlightSends
   defer:
     dec self.inFlightSends
+
+  # Yield once, so no event reaches the caller before its request id: the
+  # messaging API returns the id when `send` suspends, and chronos runs this
+  # expired timer after the queued callbacks that carry the id back. Counted
+  # before the yield, so the API's `isFull()` sees every send of a burst.
+  await sleepAsync(ZeroDuration)
 
   self.waku.subscribe(task.msg.contentTopic).isOkOr:
     debug "SendService.send: failed to subscribe to content topic",
