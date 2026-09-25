@@ -38,6 +38,16 @@ type DeliveryTask* = ref object
   queuedEventEmitted*: bool
     ## Set once the task has reported itself queued for rate-limit budget, so
     ## the event fires on the first park only and not on every retry round.
+  sentEventEmitted*: bool
+    ## Set when this task emits `MessageSent`, so the event fires once. A mixed
+    ## completion checks this flag, so an earlier `MessagePropagated` cannot hide
+    ## the completion.
+  anonymized*: bool
+    ## Set at the first anonymous send attempt and never cleared; from then on,
+    ## the INFO and ERROR records of this task withhold the hash.
+  propagatedAnonymously*: bool
+    ## Set when an anonymous path propagated the message. No store node confirms
+    ## it: the query would name the message from this node's own address.
   errorDesc*: string
 
 proc new*(
