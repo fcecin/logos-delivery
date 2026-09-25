@@ -8,7 +8,7 @@ on:
         default: "12"
   push:
     branches:
-      - fix/sigill-hunt
+      - 'fix/sigill-hunt*'
 
 env:
   NPROC: 2
