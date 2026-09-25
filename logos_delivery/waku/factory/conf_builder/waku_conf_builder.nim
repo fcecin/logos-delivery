@@ -490,8 +490,8 @@ proc applyNetworkPresetConf(builder: var WakuConfBuilder) =
     info "Mix setting differs from the network conf, the user's setting wins",
       used = builder.mix.get(), preset = networkPresetConf.mix
 
-  # The preset's mix nodes seed the pool at mount, so a preset node can build a
-  # path before discovery finds `MinMixPoolSize` peers with a mix key.
+  # The preset's mix nodes seed the pool after the mount, so a preset node can
+  # build a path before discovery finds `MinMixPoolSize` peers with a mix key.
   var presetMixNodes: seq[MixNodePubInfo]
   for entry in networkPresetConf.mixnodes:
     let mixNode = parseMixNode(entry).valueOr:

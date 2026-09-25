@@ -56,8 +56,8 @@ const RoutableMixTransport = mapOr(
 
 proc parseMixNode*(entry: string): Result[MixNodePubInfo, string] =
   ## Parses a `multiaddr:mixPublicKey` entry from `--mixnode` or a preset. It
-  ## accepts a `dns4` name, which `mountMix` resolves, and refuses an address on
-  ## a transport that the pool cannot route.
+  ## accepts a `dns4` name, which the node resolves after the mount, and refuses
+  ## an address on a transport that the pool cannot route.
   # Split on the last colon: an address can hold colons (IPv6), a key cannot.
   let parts = entry.rsplit(':', maxsplit = 1)
   if parts.len != 2:
@@ -88,7 +88,7 @@ proc parseMixNode*(entry: string): Result[MixNodePubInfo, string] =
     return err("mix cannot read the transport of the mix node entry: " & parts[0])
   if not RoutableMixTransport.match(base):
     return err(
-      "mix routes IPv4 TCP or QUIC-v1 only, directly or through a circuit relay (a dns4 name is resolved at mount), got: " &
+      "mix routes IPv4 TCP or QUIC-v1 only, directly or through a circuit relay (a dns4 name is resolved after the mount), got: " &
         parts[0]
     )
 
@@ -109,9 +109,10 @@ proc poolSize*(mix: WakuMix): int =
   return routable
 
 proc updatePoolSize*(size: int) =
-  ## Sets `mix_pool_size`; this is its only writer. The mount and each health
-  ## pass publish the count they just read: routability can change when no
-  ## peer-store handler fires, as when an `AddressBook` entry's TTL runs out.
+  ## Sets `mix_pool_size`; this is its only writer. The mount, `addBootNodes`
+  ## and each health pass publish the count they just read: routability can
+  ## change when no peer-store handler fires, as when an `AddressBook` entry's
+  ## TTL runs out.
   mix_pool_size.set(size)
 
 proc processBootNodes(
@@ -159,6 +160,11 @@ proc processBootNodes(
   # `count` is the accepted entries; the addresses of one peer make one member.
   let routable = mix.poolSize()
   info "Using mix bootstrap nodes", entries = count, poolSize = routable
+
+proc addBootNodes*(mix: WakuMix, bootnodes: seq[MixNodePubInfo]) =
+  ## Adds bootstrap nodes resolved after the mount, and publishes the pool size.
+  processBootNodes(bootnodes, mix.peerManager, mix)
+  updatePoolSize(mix.poolSize())
 
 proc new*(
     T: typedesc[WakuMix],

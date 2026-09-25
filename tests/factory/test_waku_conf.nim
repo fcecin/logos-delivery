@@ -509,7 +509,7 @@ suite "Waku Conf - mix node entries":
   const PeerId = "16Uiu2HAmTUbnxLGT9JvV6mu9oPyDjqHK4Phs1VDJNUgESgNSkuby"
 
   test "a name is accepted, because a preset pins names":
-    ## The fleets publish `dns4`; `mountMix` resolves before the pool is built.
+    ## The fleets publish `dns4`; the node resolves the names after the mount.
     check parseMixNode(
       "/dns4/delivery-01.do-ams3.logos.dev.status.im/tcp/30303/p2p/" & PeerId & ":" & Key
     )

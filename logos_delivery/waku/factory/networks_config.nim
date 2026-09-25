@@ -38,7 +38,7 @@ type NetworkPresetConf* = object
   mixnodes*: seq[string]
     ## Mix bootstrap nodes as `multiaddr:mixPublicKey`, the `--mixnode` form. The
     ## addresses are `dns4` names, which stay valid when a fleet node moves hosts;
-    ## `mountMix` resolves them.
+    ## the node resolves them in the background after the mount.
   p2pReliability*: bool
   maxPureLibp2pPeers*: int
 

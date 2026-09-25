@@ -498,8 +498,8 @@ method resolveIp(
   return @[initTAddress("127.0.0.1", port), initTAddress("127.0.0.2", port)]
 
 suite "Waku Mix - bootstrap nodes":
-  ## Presets pin `dns4` names, and `mountMix` resolves them before it builds the
-  ## pool: mix routes literal IPv4 TCP and QUIC-v1 addresses only.
+  ## Presets pin `dns4` names. The mount seeds the pool with the literal entries
+  ## and resolves the names in the background: mix routes literal addresses only.
 
   proc mountWith(
       bootnodes: seq[MixNodePubInfo], nameResolver: NameResolver = nil
@@ -509,6 +509,7 @@ suite "Waku Mix - bootstrap nodes":
     (await node.mountMix(DefaultClusterId, mixKeys.privateKey, bootnodes)).isOkOr:
       raiseAssert "Failed to mount mix: " & $error
     await node.start()
+    await node.mixNodesResolved()
     return node
 
   asyncTest "literal addresses seed the pool at mount":
@@ -650,16 +651,51 @@ method resolveIp(
   await wait
   return @[]
 
-suite "Waku Mix - name resolution at mount":
-  ## The mount drops a name that does not answer within `MixNodeResolveTimeout`,
-  ## keeps the literal and succeeds. The first case takes the full 10 s.
-  asyncTest "a name that never answers is dropped, the mount survives":
+type SlowNameResolver = ref object of NameResolver
+  ## Answers at once, except a `slow-*` name, which never answers.
+
+method resolveTxt(
+    self: SlowNameResolver, address: string
+): Future[seq[string]] {.async: (raises: [CancelledError]).} =
+  return @[]
+
+method resolveIp(
+    self: SlowNameResolver,
+    address: string,
+    port: Port,
+    domain: Domain = Domain.AF_UNSPEC,
+): Future[seq[TransportAddress]] {.
+    async: (raises: [CancelledError, TransportAddressError])
+.} =
+  if address.startsWith("slow-"):
+    await sleepAsync(chronos.minutes(10))
+  return @[initTAddress("127.0.0.1", port)]
+
+type GatedResolver = ref object of NameResolver ## Answers once `gate` completes.
+  gate: Future[void]
+
+method resolveTxt(
+    self: GatedResolver, address: string
+): Future[seq[string]] {.async: (raises: [CancelledError]).} =
+  return @[]
+
+method resolveIp(
+    self: GatedResolver, address: string, port: Port, domain: Domain = Domain.AF_UNSPEC
+): Future[seq[TransportAddress]] {.
+    async: (raises: [CancelledError, TransportAddressError])
+.} =
+  # `join` so a cancelled lookup leaves the gate open for the next one.
+  await self.gate.join()
+  return @[initTAddress("127.0.0.1", port)]
+
+suite "Waku Mix - name resolution in the background":
+  ## The mount does not wait for the names. A name that does not answer within
+  ## `MixNodeResolveTimeout` is dropped; the first case takes the full 10 s.
+  asyncTest "a name that never answers is dropped, and the mount does not wait for it":
     let resolver = NeverResolver()
     let node = newTestWakuNode(generateSecp256k1Key(), nameResolver = resolver)
     let keys = generateKeyPair().expect("mix key pair")
     let pid = PeerId.init(generateSecp256k1Key()).tryGet()
-    # A limit well above the 10 s budget, so a mount that leaves its lookups
-    # running fails here in seconds.
     let mount = node.mountMix(
       DefaultClusterId,
       keys.privateKey,
@@ -677,47 +713,101 @@ suite "Waku Mix - name resolution at mount":
         ),
       ],
     )
-    check await mount.withTimeout(chronos.seconds(30))
+    check await mount.withTimeout(chronos.seconds(1)) # no wait on the names
     if mount.finished():
       mount.read().isOkOr:
         raiseAssert "mount failed: " & error
-    check node.getMixNodePoolSize() == 1 # the literal survived
-    # The mount cancelled every lookup.
-    check resolver.waits.len == 2
+    check node.getMixNodePoolSize() == 1 # the literal, at once
+
+    # A limit well above the 10 s budget, so a lookup left running fails here.
+    check await node.mixNodesResolved().withTimeout(chronos.seconds(30))
+    check:
+      node.getMixNodePoolSize() == 1
+      resolver.waits.len == 2
     for wait in resolver.waits:
       check wait.cancelled()
     await node.stop()
 
-  asyncTest "a mount cancelled from outside cancels its lookups and mounts nothing":
-    ## An outside cancel of the mount also cancels every lookup, so no DNS
-    ## request outlives the mount.
+  asyncTest "stopping the node cancels a lookup still pending":
+    ## No DNS request outlives the node.
     let resolver = NeverResolver()
     let node = newTestWakuNode(generateSecp256k1Key(), nameResolver = resolver)
     let keys = generateKeyPair().expect("mix key pair")
     let pid = PeerId.init(generateSecp256k1Key()).tryGet()
-    let mount = node.mountMix(
-      DefaultClusterId,
-      keys.privateKey,
-      @[
-        MixNodePubInfo(
-          multiAddr: "/ip4/127.0.0.1/tcp/60402/p2p/" & $pid, pubKey: keys.publicKey
-        ),
-        MixNodePubInfo(
-          multiAddr: "/dns4/never-03.invalid/tcp/30303/p2p/" & $pid,
-          pubKey: keys.publicKey,
-        ),
-        MixNodePubInfo(
-          multiAddr: "/dns4/never-04.invalid/tcp/30303/p2p/" & $pid,
-          pubKey: keys.publicKey,
-        ),
-      ],
-    )
+    (
+      await node.mountMix(
+        DefaultClusterId,
+        keys.privateKey,
+        @[
+          MixNodePubInfo(
+            multiAddr: "/ip4/127.0.0.1/tcp/60402/p2p/" & $pid, pubKey: keys.publicKey
+          ),
+          MixNodePubInfo(
+            multiAddr: "/dns4/never-03.invalid/tcp/30303/p2p/" & $pid,
+            pubKey: keys.publicKey,
+          ),
+          MixNodePubInfo(
+            multiAddr: "/dns4/never-04.invalid/tcp/30303/p2p/" & $pid,
+            pubKey: keys.publicKey,
+          ),
+        ],
+      )
+    ).isOkOr:
+      raiseAssert "mount failed: " & error
     await sleepAsync(chronos.milliseconds(50))
-    check await mount.cancelAndWait().withTimeout(chronos.seconds(5))
-    check:
-      mount.cancelled()
-      resolver.waits.len == 2
-      node.wakuMix.isNil() # the mount never reached `WakuMix.new`
+    check resolver.waits.len == 2
+
+    check await node.stop().withTimeout(chronos.seconds(5))
+    check node.mixNodeResolution.cancelled()
     for wait in resolver.waits:
       check wait.cancelled()
+
+  asyncTest "each node joins the pool when its own name answers":
+    ## A name that never answers does not hold back the others.
+    let node =
+      newTestWakuNode(generateSecp256k1Key(), nameResolver = SlowNameResolver())
+    let keys = generateKeyPair().expect("mix key pair")
+    (
+      await node.mountMix(
+        DefaultClusterId,
+        keys.privateKey,
+        @[
+          mixBootnode("/dns4/fast-01.invalid/tcp/30303"),
+          mixBootnode("/dns4/fast-02.invalid/tcp/30303"),
+          mixBootnode("/dns4/fast-03.invalid/tcp/30303"),
+          mixBootnode("/dns4/fast-04.invalid/tcp/30303"),
+          mixBootnode("/dns4/slow-01.invalid/tcp/30303"),
+        ],
+      )
+    ).isOkOr:
+      raiseAssert "mount failed: " & error
+    await sleepAsync(chronos.milliseconds(100))
+
+    check:
+      node.getMixNodePoolSize() == 4
+      not node.mixNodeResolution.finished()
+    await node.stop()
+
+  asyncTest "a start after a stop resumes the names still pending":
+    let resolver = GatedResolver(gate: newFuture[void]("gate"))
+    let node = newTestWakuNode(generateSecp256k1Key(), nameResolver = resolver)
+    let keys = generateKeyPair().expect("mix key pair")
+    (
+      await node.mountMix(
+        DefaultClusterId,
+        keys.privateKey,
+        @[mixBootnode("/dns4/gated-01.invalid/tcp/30303")],
+      )
+    ).isOkOr:
+      raiseAssert "mount failed: " & error
+    await node.start()
+    await node.stop()
+    check:
+      node.mixNodeResolution.cancelled()
+      node.getMixNodePoolSize() == 0
+
+    await node.start()
+    resolver.gate.complete()
+    check await node.mixNodesResolved().withTimeout(chronos.seconds(5))
+    check node.getMixNodePoolSize() == 1
     await node.stop()

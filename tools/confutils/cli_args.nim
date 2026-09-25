@@ -653,7 +653,7 @@ hence would have reachability issues.""",
 
   mixnodes* {.
     desc:
-      "A mix node to seed the pool with, as multiaddr:mixPubKey. The multiaddress carries a /p2p/<peer id> on TCP or QUIC-v1 over IPv4 (directly or through a circuit relay), or names its host (dns4), which is resolved at mount. Argument may be repeated.",
+      "A mix node to seed the pool with, as multiaddr:mixPubKey. The multiaddress carries a /p2p/<peer id> on TCP or QUIC-v1 over IPv4 (directly or through a circuit relay), or names its host (dns4), which is resolved after the mount. Argument may be repeated.",
     name: "mixnode"
   .}: seq[MixNodePubInfo]
 
