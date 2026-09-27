@@ -4,6 +4,9 @@ import chronos, chronicles, testutils/unittests, results, stew/byteutils
 
 import
   logos_delivery/waku/waku,
+  logos_delivery/waku/waku_node,
+  logos_delivery/waku/waku_store,
+  logos_delivery/waku/node/peer_manager,
   logos_delivery/waku/api/store,
   logos_delivery/waku/waku_core,
   logos_delivery/api/types,
@@ -12,7 +15,8 @@ import
   logos_delivery/messaging/delivery_service/send_service/
     [send_service, send_processor, delivery_task],
   logos_delivery/api/events/messaging_client_events
-import ../testlib/[testasync, wakunodeconf]
+import ../testlib/[testasync, wakunodeconf, wakucore, wakunode]
+import ../waku_store/store_utils
 
 ## Store-based reliability asks a store node for a propagated message's hash, in
 ## clear from this node's own address. It must never ask for a mixed message.
@@ -95,8 +99,10 @@ suite "SendService - store validation and mix":
 ## tests drive the completion events with no live mixnet.
 type ScriptedProc = ref object of BaseSendProcessor
   overMix: bool
+  calls: int
 
 method process(self: ScriptedProc, task: DeliveryTask): Future[void] {.async.} =
+  inc self.calls
   task.state = DeliveryState.SuccessfullyPropagated
   task.propagatedAnonymously = self.overMix
   task.deliveryTime = Moment.now()
@@ -217,3 +223,89 @@ suite "SendService - mix completion":
     await sleepAsync(chronos.milliseconds(20))
     await service.stopSendService()
     check sent == 0
+
+suite "SendService - store validation answers":
+  ## The Store node answers with the hashes listed in `storedHashes`.
+  var waku {.threadvar.}: Waku
+  var storeNode {.threadvar.}: WakuNode
+  var storedHashes {.threadvar.}: seq[WakuMessageHash]
+  var answered {.threadvar.}: AsyncEvent
+
+  proc storeHandler(
+      req: StoreQueryRequest
+  ): Future[StoreQueryResult] {.async, gcsafe.} =
+    var resp = StoreQueryResponse(
+      requestId: req.requestId, statusCode: uint32(StatusCode.SUCCESS)
+    )
+    for hash in req.messageHashes:
+      if hash in storedHashes:
+        resp.messages.add(WakuMessageKeyValue(messageHash: hash))
+    answered.fire()
+    return ok(resp)
+
+  asyncSetup:
+    waku = (await Waku.new(testConf())).expect("Waku.new")
+    (await waku.start()).isOkOr:
+      raiseAssert "waku.start: " & error
+    storedHashes = @[]
+    answered = newAsyncEvent()
+    storeNode = newTestWakuNode(generateSecp256k1Key())
+    storeNode.mountMetadata(TestClusterId, @[0'u16]).isOkOr:
+      raiseAssert "mountMetadata: " & error
+    discard await newTestWakuStore(storeNode.switch, storeHandler)
+    await storeNode.start()
+    waku.node.peerManager.addServicePeer(
+      storeNode.peerInfo.toRemotePeerInfo(), WakuStoreCodec
+    )
+
+  asyncTeardown:
+    await storeNode.stop()
+    discard await waku.stop()
+
+  asyncTest "a message the Store does not report yet is asked again, never sent again":
+    let sentEvent = newAsyncEvent()
+    let listener = MessageSentEvent
+      .listen(
+        waku.brokerCtx,
+        proc(e: MessageSentEvent) {.async: (raises: []).} =
+          sentEvent.fire(),
+      )
+      .expect("listen")
+    defer:
+      await MessageSentEvent.dropListener(waku.brokerCtx, listener)
+    let manager =
+      RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
+    let processor = ScriptedProc(overMix: false)
+    let service =
+      SendService.new(true, waku, manager, processor).expect("SendService.new")
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+
+    let msg = WakuMessage(
+      contentTopic: "/test/1/store-answers/proto",
+      payload: "hi".toBytes(),
+      timestamp: 1_700_000_000_000_000_000,
+    )
+    let shard = PubsubTopic("/waku/2/rs/3/0")
+    let task = DeliveryTask(
+      requestId: RequestId("not-yet-stored"),
+      pubsubTopic: shard,
+      msg: msg,
+      msgHash: computeMessageHash(shard, msg),
+      state: DeliveryState.Entry,
+    )
+    await service.send(task)
+    check processor.calls == 1
+    # Make the task old enough for the next Store check.
+    task.firstPropagatedTime = Opt.some(Moment.now() - chronos.seconds(10))
+
+    # The first answer does not list the hash.
+    check await answered.wait().withTimeout(chronos.seconds(10))
+
+    # The next answer lists it.
+    storedHashes.add(task.msgHash)
+    check:
+      await sentEvent.wait().withTimeout(chronos.seconds(10))
+      task.state == DeliveryState.SuccessfullyValidated
+      processor.calls == 1

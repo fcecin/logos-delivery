@@ -199,32 +199,31 @@ proc checkMsgsInStore(self: SendService, tasksToValidate: seq[DeliveryTask]) {.a
       messageCount = tasksToValidate.len(), error = "no store peer available"
     return
 
-  var hashesToValidate = tasksToValidate.mapIt(it.msgHash)
-  # TODO: confirm hash format for store query!!!
+  const batchSize = int(MaxPageSize)
+  for start in countup(0, tasksToValidate.high, batchSize):
+    let batch = tasksToValidate[start ..< min(start + batchSize, tasksToValidate.len)]
+    let storeResp: StoreQueryResponse = (
+      await self.waku.storeQueryToAny(
+        StoreQueryRequest(
+          includeData: false,
+          messageHashes: batch.mapIt(it.msgHash),
+          paginationLimit: Opt.some(uint64(batch.len)),
+        )
+      )
+    ).valueOr:
+      debug "Failed to get store validation for messages",
+        hashCount = batch.len, error = $error
+      return
 
-  let storeResp: StoreQueryResponse = (
-    await self.waku.storeQueryToAny(
-      StoreQueryRequest(includeData: false, messageHashes: hashesToValidate)
-    )
-  ).valueOr:
-    debug "Failed to get store validation for messages",
-      hashes = hashesToValidate.mapIt(shortLog(it)), error = $error
-    return
+    let storedItems = storeResp.messages.mapIt(it.messageHash)
 
-  let storedItems = storeResp.messages.mapIt(it.messageHash)
-
-  # Set success state for the tasks found in store that the policy admits: the
-  # store peer chooses its answer, so a hash match alone must not confirm a task.
-  # The retry below uses only the hashes that this node asked about.
-  self.taskCache.applyItIf(
-    self.awaitsStoreValidation(it) and storedItems.contains(it.msgHash)
-  ):
-    it.state = DeliveryState.SuccessfullyValidated
-
-  # set retry state for messages not found in store
-  hashesToValidate.keepItIf(not storedItems.contains(it))
-  self.taskCache.applyItIf(hashesToValidate.contains(it.msgHash)):
-    it.state = DeliveryState.NextRoundRetry
+    # The Store peer decides which hashes its answer lists, and it can list hashes
+    # that this node did not ask about. Confirm only the tasks that still wait for
+    # a Store confirmation, so that a message sent over mix is never confirmed.
+    self.taskCache.applyItIf(
+      self.awaitsStoreValidation(it) and storedItems.contains(it.msgHash)
+    ):
+      it.state = DeliveryState.SuccessfullyValidated
 
 proc checkStoredMessages(self: SendService) {.async.} =
   if not self.checkStoreForMessages:
