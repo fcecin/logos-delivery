@@ -75,6 +75,7 @@ suite "SendService RLN proof attach":
 suite "SendService RLN proof attach - RLN mounted":
   var
     waku {.threadvar.}: Waku
+    onchainRln {.threadvar.}: RlnEvm
     anvilProc {.threadvar.}: Process
     manager {.threadvar.}: RlnEvmGroupManager
 
@@ -83,30 +84,28 @@ suite "SendService RLN proof attach - RLN mounted":
     manager = await setupRlnEvm(deployContracts = false)
 
     waku = (await Waku.new(testConf())).expect("Waku.new")
-    (
-      await waku.node.setRlnValidator(
-        getWakuRlnConfig(
-          manager = manager,
-          userMessageLimit = 20,
-          index = MembershipIndex(1),
-          epochSizeSec = 600,
-        )
+    onchainRln = await waku.node.mountOnchainRln(
+      getWakuRlnConfig(
+        manager = manager,
+        userMessageLimit = 20,
+        index = MembershipIndex(1),
+        epochSizeSec = 600,
       )
-    ).expect("setRlnValidator")
+    )
 
     let credentials = generateCredentials()
     (
-      await cast[RlnEvmGroupManager](waku.node.rln.groupManager).register(
+      await cast[RlnEvmGroupManager](onchainRln.groupManager).register(
         credentials, UserMessageLimit(20)
       )
     ).isOkOr:
       assert false, "failed to register RLN credentials: " & error
 
   asyncTeardown:
-    ## The RLN proof-generator provider is registered on the global broker
-    ## context; without stopping RLN it leaks into the next test's setup.
+    ## Stops the on-chain backend's background work (group sync, epoch
+    ## monitor) so it does not outlive the test.
     try:
-      await waku.node.rln.stop()
+      await onchainRln.stop()
     except Exception:
       assert false, "failed to stop RLN: " & getCurrentExceptionMsg()
     stopAnvil(anvilProc)

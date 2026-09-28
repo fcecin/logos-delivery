@@ -51,7 +51,6 @@ import
     waku_lightpush as lightpush_protocol,
     waku_enr,
     waku_peer_exchange,
-    rln,
     rln/rln_plugin,
     common/rate_limit/setting,
     common/callbacks,
@@ -119,7 +118,6 @@ type
     wakuStoreTransfer*: SyncTransfer
     wakuFilter*: waku_filter_v2.WakuFilter
     wakuFilterClient*: filter_client.WakuFilterClient
-    rln*: RlnEvm
     rlnPlugin*: Opt[RlnPlugin]
     wakuLegacyLightPush*: WakuLegacyLightPush
     wakuLegacyLightpushClient*: WakuLegacyLightPushClient

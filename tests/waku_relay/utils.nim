@@ -64,15 +64,14 @@ proc subscribeCompletionHandler*(node: WakuNode, pubsubTopic: string): Future[bo
 
 proc sendRlnMessage*(
     client: WakuNode,
+    rln: RlnEvm,
     pubsubTopic: string,
     contentTopic: string,
     completionFuture: Future[bool],
     payload: seq[byte] = "Hello".toBytes(),
 ): Future[bool] {.async.} =
   var message = WakuMessage(payload: payload, contentTopic: contentTopic)
-  message.proof = (
-    await client.rln.generateRLNProof(message.toRLNSignal(), epochTime())
-  ).valueOr:
+  message.proof = (await rln.generateRLNProof(message.toRLNSignal(), epochTime())).valueOr:
     raiseAssert "generateRLNProof failed: " & error
   discard await client.publish(Opt.some(pubsubTopic), message)
   let isCompleted = await completionFuture.withTimeout(FUTURE_TIMEOUT)
@@ -80,16 +79,17 @@ proc sendRlnMessage*(
 
 proc sendRlnMessageWithInvalidProof*(
     client: WakuNode,
+    rln: RlnEvm,
     pubsubTopic: string,
     contentTopic: string,
     completionFuture: Future[bool],
     payload: seq[byte] = "Hello".toBytes(),
 ): Future[bool] {.async.} =
   let extraBytes: seq[byte] = @[byte(1), 2, 3]
-  let rateLimitProofRes = await client.rln.groupManager.generateProof(
+  let rateLimitProofRes = await rln.groupManager.generateProof(
     concat(payload, extraBytes),
       # we add extra bytes to invalidate proof verification against original payload
-    client.rln.getCurrentEpoch(),
+    rln.getCurrentEpoch(),
     messageId = MessageId(0),
   )
   let

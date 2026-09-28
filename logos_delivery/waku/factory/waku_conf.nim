@@ -28,8 +28,7 @@ import
   ../waku_mix,
   ./conf_builder/kademlia_discovery_conf_builder
 
-export
-  RlnConf, RlnCreds, RlnCommonConf, RestServerConf, Discv5Conf, MetricsServerConf
+export RlnConf, RlnCreds, RlnCommonConf, RestServerConf, Discv5Conf, MetricsServerConf
 # Export only the NatStrategy type and its parse and render procs.
 # The mapper machinery stays in net/nat_config.
 export nat_strategy

@@ -336,14 +336,8 @@ proc setupProtocols(
   # RLN backend selected by configuration source: each descriptor probes
   # whether its own source is present — host callbacks installed over the C
   # ABI (`logosdelivery_rln_set_plugin`) for the external backend, CLI/preset
-  # configuration for the on-chain one. 
-  proc setNodeRln(rln: RlnEvm) {.gcsafe, raises: [].} =
-    ## Stores the mounted on-chain backend on the node (`node.rln`) for code
-    ## that uses it directly: tests, example apps and tools.
-    node.rln = rln
-
-  let rlnDescriptors =
-    [rlnLezDescriptor(), rlnEvmDescriptor(conf.rlnEvmConf, setNodeRln)]
+  # configuration for the on-chain one.
+  let rlnDescriptors = [rlnLezDescriptor(), rlnEvmDescriptor(conf.rlnEvmConf)]
 
   let selectedRln = selectRlnPlugin(rlnDescriptors).valueOr:
     return err(error)
@@ -361,8 +355,7 @@ proc setupProtocols(
       )
       let mounted = (await descriptor.mount(rlnCommonConf)).valueOr:
         return err(error)
-      node.rlnPlugin = Opt.some(mounted)
-      node.registerRlnValidator(mounted, rlnCommonConf)
+      node.mountRln(mounted, rlnCommonConf)
 
   # NOTE Must be mounted after relay
   if conf.lightPush:

@@ -99,6 +99,7 @@ suite "Waku Legacy Lightpush - End To End":
 suite "RLN Proofs as a Lightpush Service":
   var
     server {.threadvar.}: WakuNode
+    serverRln {.threadvar.}: RlnEvm
     client {.threadvar.}: WakuNode
     anvilProc {.threadvar.}: Process
     manager {.threadvar.}: RlnEvmGroupManager
@@ -134,11 +135,11 @@ suite "RLN Proofs as a Lightpush Service":
 
     (await server.mountRelay()).isOkOr:
       assert false, "Failed to mount relay"
-    (await server.setRlnValidator(wakuRlnConfig)).expect("setRlnValidator")
+    serverRln = await server.mountOnchainRln(wakuRlnConfig)
     check (await server.mountLegacyLightPush()).isOk()
     client.mountLegacyLightPushClient()
 
-    let manager1 = cast[RlnEvmGroupManager](server.rln.groupManager)
+    let manager1 = cast[RlnEvmGroupManager](serverRln.groupManager)
     let idCredentials1 = generateCredentials()
 
     (await manager1.register(idCredentials1, UserMessageLimit(20))).isOkOr:

@@ -21,6 +21,11 @@ import
 export results
 
 type
+  SpamHandler* =
+    proc(wakuMessage: WakuMessage): void {.gcsafe, closure, raises: [Defect].}
+    ## Called by the RLN relay validator for a message whose proof shows a
+    ## rate-limit violation.
+
   RlnPlugin* = object
     ## Node core's handle on the mounted RLN backend. Closure fields may be
     ## nil when the backend has no such concept.

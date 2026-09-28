@@ -345,18 +345,16 @@ proc new*(
 proc mountOnchain*(
     conf: WakuRlnConfig, registrationHandler = Opt.none(RegistrationHandler)
 ): Future[Result[RlnEvm, string]] {.async.} =
-  ## `RlnEvm.new` plus the contract-limit check, shared by the factory's
-  ## descriptor and `setRlnValidator`.
+  ## `RlnEvm.new` plus the contract-limit check, shared by this backend's
+  ## descriptor and code that mounts the backend directly (tests, example
+  ## apps).
   let rln = ?(await RlnEvm.new(conf, registrationHandler))
   if conf.userMessageLimit > rln.groupManager.rlnRelayMaxMessageLimit:
     error "Rln-user-message-limit can't exceed the MAX_MESSAGE_LIMIT in the rln contract"
   return ok(rln)
 
-proc rlnEvmDescriptor*(
-    conf: Opt[RlnConf], onMounted: proc(rln: RlnEvm) {.gcsafe, raises: [].}
-): RlnPluginDescriptor =
+proc rlnEvmDescriptor*(conf: Opt[RlnConf]): RlnPluginDescriptor =
   ## Selected when on-chain RLN configuration came from the CLI or a preset.
-  ## `onMounted` receives the mounted instance before the record is returned.
   proc present(): bool =
     conf.isSome()
 
@@ -378,7 +376,6 @@ proc rlnEvmDescriptor*(
       return err(
         "failed to mount waku RLN relay protocol: failed to set rln validator: " & error
       )
-    onMounted(rln)
     return ok(rln.toRlnPlugin())
 
   return RlnPluginDescriptor(name: "onchain", matches: present, mount: mount)
