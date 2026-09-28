@@ -10,7 +10,6 @@ import
     rln/rln_evm/conversion_utils,
     rln/rln_evm/group_manager,
     rln/rln_evm/nonce_manager,
-    waku_core,
   ]
 import ../signal
 
