@@ -27,7 +27,8 @@ import
     waku_filter_v2,
     waku_archive,
     waku_store_sync,
-    rln,
+    rln/markers,
+    rln/protocol_metrics,
     rln/rln_plugin,
     node/waku_node,
     node/subscription_manager,
@@ -185,7 +186,7 @@ proc mountRelay*(
 
   ## Waku RLN Relay
 
-proc registerRlnValidator*(
+proc registerRlnValidator(
     node: WakuNode,
     plugin: RlnPlugin,
     commonConf: RlnCommonConf,
@@ -242,36 +243,13 @@ proc registerRlnValidator*(
   debug "Registering RLN validator"
   node.wakuRelay.addValidator(validator, RlnValidatorErrorMsg)
 
-proc setRlnValidator*(
+proc mountRln*(
     node: WakuNode,
-    rlnConf: WakuRlnConfig,
+    plugin: RlnPlugin,
+    commonConf: RlnCommonConf,
     spamHandler = Opt.none(SpamHandler),
-    registrationHandler = Opt.none(RegistrationHandler),
-): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
-  ## Mounts the on-chain backend from `rlnConf`, stores it on the node
-  ## (`node.rln`, `node.rlnPlugin`) and registers the RLN validator. For
-  ## callers that configure the backend directly (tests, example apps);
-  ## nodes built from configuration are mounted by the factory.
-  let rlnRes =
-    try:
-      await mountOnchain(rlnConf, registrationHandler)
-    except CancelledError as e:
-      raise e
-    except CatchableError as e:
-      return err("failed to set rln validator: " & e.msg)
-  let rln = rlnRes.valueOr:
-    return err("failed to set rln validator: " & error)
-
-  node.rln = rln
-  let plugin = rln.toRlnPlugin()
+) =
+  ## Mounts an RLN backend on `node`: records its plugin and registers the
+  ## RLN relay validator.
   node.rlnPlugin = Opt.some(plugin)
-
-  node.registerRlnValidator(
-    plugin,
-    RlnCommonConf(
-      onFatalErrorAction: rlnConf.onFatalErrorAction,
-      disableValidation: rlnConf.disableValidation,
-    ),
-    spamHandler,
-  )
-  return ok()
+  node.registerRlnValidator(plugin, commonConf, spamHandler)

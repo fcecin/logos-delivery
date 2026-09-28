@@ -280,10 +280,10 @@ suite "Waku v2 Rest API - Relay":
       assert false, "Failed to mount relay"
     let wakuRlnConfig = getWakuRlnConfig(manager = manager, index = MembershipIndex(1))
 
-    (await node.setRlnValidator(wakuRlnConfig)).expect("setRlnValidator")
+    let rln = await node.mountOnchainRln(wakuRlnConfig)
     await node.start()
     # Registration is mandatory before sending messages with rln-relay
-    let manager = cast[RlnEvmGroupManager](node.rln.groupManager)
+    let manager = cast[RlnEvmGroupManager](rln.groupManager)
     let idCredentials = generateCredentials()
 
     (await manager.register(idCredentials, UserMessageLimit(20))).isOkOr:
@@ -587,7 +587,7 @@ suite "Waku v2 Rest API - Relay":
       let wakuRlnConfig =
         getWakuRlnConfig(manager = manager, index = MembershipIndex(1))
 
-      (await meshNode.setRlnValidator(wakuRlnConfig)).expect("setRlnValidator")
+      discard await meshNode.mountOnchainRln(wakuRlnConfig)
       await meshNode.start()
       const testPubsubTopic = PubsubTopic("/waku/2/rs/1/0")
       proc dummyHandler(
@@ -599,6 +599,7 @@ suite "Waku v2 Rest API - Relay":
         raiseAssert "Failed to subscribe meshNode: " & error
 
     var node: WakuNode
+    var rln: RlnEvm
     lockNewGlobalBrokerContext:
       node = testWakuNode()
       (await node.mountRelay()).isOkOr:
@@ -608,12 +609,12 @@ suite "Waku v2 Rest API - Relay":
       let wakuRlnConfig =
         getWakuRlnConfig(manager = manager, index = MembershipIndex(1))
 
-      (await node.setRlnValidator(wakuRlnConfig)).expect("setRlnValidator")
+      rln = await node.mountOnchainRln(wakuRlnConfig)
       await node.start()
       await node.connectToNodes(@[meshNode.peerInfo.toRemotePeerInfo()])
 
     # Registration is mandatory before sending messages with rln-relay
-    let manager = cast[RlnEvmGroupManager](node.rln.groupManager)
+    let manager = cast[RlnEvmGroupManager](rln.groupManager)
     let idCredentials = generateCredentials()
 
     (await manager.register(idCredentials, UserMessageLimit(20))).isOkOr:
@@ -678,11 +679,11 @@ suite "Waku v2 Rest API - Relay":
     require node.mountAutoSharding(1, 8).isOk
 
     let wakuRlnConfig = getWakuRlnConfig(manager = manager, index = MembershipIndex(1))
-    (await node.setRlnValidator(wakuRlnConfig)).expect("setRlnValidator")
+    let rln = await node.mountOnchainRln(wakuRlnConfig)
     await node.start()
 
     # Registration is mandatory before sending messages with rln-relay
-    let manager = cast[RlnEvmGroupManager](node.rln.groupManager)
+    let manager = cast[RlnEvmGroupManager](rln.groupManager)
     let idCredentials = generateCredentials()
 
     (await manager.register(idCredentials, UserMessageLimit(20))).isOkOr:
@@ -737,11 +738,11 @@ suite "Waku v2 Rest API - Relay":
     (await node.mountRelay()).isOkOr:
       assert false, "Failed to mount relay"
     let wakuRlnConfig = getWakuRlnConfig(manager = manager, index = MembershipIndex(1))
-    (await node.setRlnValidator(wakuRlnConfig)).expect("setRlnValidator")
+    let rln = await node.mountOnchainRln(wakuRlnConfig)
     await node.start()
 
     # Registration is mandatory before sending messages with rln-relay
-    let manager = cast[RlnEvmGroupManager](node.rln.groupManager)
+    let manager = cast[RlnEvmGroupManager](rln.groupManager)
     let idCredentials = generateCredentials()
 
     (await manager.register(idCredentials, UserMessageLimit(20))).isOkOr:
@@ -809,11 +810,11 @@ suite "Waku v2 Rest API - Relay":
     require node.mountAutoSharding(1, 8).isOk
 
     let wakuRlnConfig = getWakuRlnConfig(manager = manager, index = MembershipIndex(1))
-    (await node.setRlnValidator(wakuRlnConfig)).expect("setRlnValidator")
+    let rln = await node.mountOnchainRln(wakuRlnConfig)
     await node.start()
 
     # Registration is mandatory before sending messages with rln-relay
-    let manager = cast[RlnEvmGroupManager](node.rln.groupManager)
+    let manager = cast[RlnEvmGroupManager](rln.groupManager)
     let idCredentials = generateCredentials()
 
     (await manager.register(idCredentials, UserMessageLimit(20))).isOkOr:
@@ -888,10 +889,10 @@ suite "Waku v2 Rest API - Relay":
       epochSizeSec = 600,
       userMessageLimit = 20,
     )
-    (await node.setRlnValidator(wakuRlnConfig)).expect("setRlnValidator")
+    let rln = await node.mountOnchainRln(wakuRlnConfig)
     await node.start()
 
-    let manager = cast[RlnEvmGroupManager](node.rln.groupManager)
+    let manager = cast[RlnEvmGroupManager](rln.groupManager)
     let idCredentials = generateCredentials()
     (await manager.register(idCredentials, UserMessageLimit(20))).isOkOr:
       assert false, "Failed to register: " & getCurrentExceptionMsg()
@@ -981,6 +982,7 @@ suite "Waku v2 Rest API - Relay":
       assert false, "Failed to subscribe mesh node"
 
     var node: WakuNode
+    var rln: RlnEvm
     lockNewGlobalBrokerContext:
       node = testWakuNode()
       (await node.mountRelay()).isOkOr:
@@ -993,11 +995,11 @@ suite "Waku v2 Rest API - Relay":
         epochSizeSec = 600,
         userMessageLimit = 20,
       )
-      (await node.setRlnValidator(wakuRlnConfig)).expect("setRlnValidator")
+      rln = await node.mountOnchainRln(wakuRlnConfig)
       await node.start()
       await node.connectToNodes(@[meshNode.peerInfo.toRemotePeerInfo()])
 
-    let manager = cast[RlnEvmGroupManager](node.rln.groupManager)
+    let manager = cast[RlnEvmGroupManager](rln.groupManager)
     let idCredentials = generateCredentials()
     (await manager.register(idCredentials, UserMessageLimit(20))).isOkOr:
       assert false, "Failed to register: " & getCurrentExceptionMsg()

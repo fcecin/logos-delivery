@@ -131,8 +131,5 @@ func encode*(x: UInt32): seq[byte] =
   let paddingZeros = newSeq[byte](paddingBytes)
   paddingZeros & @(stint.toBytesBE(x))
 
-type
-  SpamHandler* =
-    proc(wakuMessage: WakuMessage): void {.gcsafe, closure, raises: [Defect].}
-  RegistrationHandler* =
-    proc(txHash: string): void {.gcsafe, closure, raises: [Defect].}
+type RegistrationHandler* =
+  proc(txHash: string): void {.gcsafe, closure, raises: [Defect].}

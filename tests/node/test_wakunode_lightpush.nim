@@ -104,6 +104,7 @@ suite "Waku Lightpush - End To End":
 suite "RLN Proofs as a Lightpush Service":
   var
     server {.threadvar.}: WakuNode
+    serverRln {.threadvar.}: RlnEvm
     client {.threadvar.}: WakuNode
     anvilProc {.threadvar.}: Process
     manager {.threadvar.}: RlnEvmGroupManager
@@ -139,11 +140,11 @@ suite "RLN Proofs as a Lightpush Service":
 
     (await server.mountRelay()).isOkOr:
       assert false, "Failed to mount relay"
-    (await server.setRlnValidator(wakuRlnConfig)).expect("setRlnValidator")
+    serverRln = await server.mountOnchainRln(wakuRlnConfig)
     check (await server.mountLightPush()).isOk()
     client.mountLightPushClient()
 
-    let manager1 = cast[RlnEvmGroupManager](server.rln.groupManager)
+    let manager1 = cast[RlnEvmGroupManager](serverRln.groupManager)
     let idCredentials1 = generateCredentials()
 
     (await manager1.register(idCredentials1, UserMessageLimit(20))).isOkOr:
@@ -201,7 +202,7 @@ suite "RLN Proofs as a Lightpush Service":
 
       # Corrupt the cache to model a stale/invalid witness — the same state a
       # 420/504 rejection would leave us in.
-      let manager = cast[RlnEvmGroupManager](server.rln.groupManager)
+      let manager = cast[RlnEvmGroupManager](serverRln.groupManager)
       let goodCache = manager.merkleProofCache
       manager.merkleProofCache = newSeq[byte](goodCache.len)
       check manager.merkleProofCache != goodCache
@@ -238,7 +239,7 @@ suite "RLN Proofs as a Lightpush Service":
           lighpushErrorResult(LightPushErrorCode.INVALID_MESSAGE, RlnValidatorErrorMsg)
       server.wakuLightPush.pushHandler = stub
 
-      let manager = cast[RlnEvmGroupManager](server.rln.groupManager)
+      let manager = cast[RlnEvmGroupManager](serverRln.groupManager)
       let goodCache = manager.merkleProofCache
       check goodCache.len > 0
 

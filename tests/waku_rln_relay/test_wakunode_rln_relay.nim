@@ -20,10 +20,10 @@ import
 
 from std/times import epochTime
 
-proc waitForNullifierLog(node: WakuNode, expectedLen: int): Future[bool] {.async.} =
+proc waitForNullifierLog(rln: RlnEvm, expectedLen: int): Future[bool] {.async.} =
   ## Helper function
   for i in 0 .. 100: # Try for up to 50 seconds (100 * 500ms)
-    if node.rln.nullifierLog.len() == expectedLen:
+    if rln.nullifierLog.len() == expectedLen:
       return true
     await sleepAsync(500.millis)
   return false
@@ -42,6 +42,7 @@ procSuite "WakuNode - RLN relay":
 
   asyncTest "testing rln-relay with valid proof":
     var node1, node2, node3: WakuNode # publisher node
+    var rln1, rln2, rln3: RlnEvm
     let contentTopic = ContentTopic("/waku/2/default-content/proto")
     # set up three nodes
     lockNewGlobalBrokerContext:
@@ -54,11 +55,11 @@ procSuite "WakuNode - RLN relay":
       let wakuRlnConfig1 =
         getWakuRlnConfig(manager = manager, index = MembershipIndex(1))
 
-      (await node1.setRlnValidator(wakuRlnConfig1)).expect("setRlnValidator")
+      rln1 = await node1.mountOnchainRln(wakuRlnConfig1)
       await node1.start()
 
       # Registration is mandatory before sending messages with rln-relay
-      let manager1 = cast[RlnEvmGroupManager](node1.rln.groupManager)
+      let manager1 = cast[RlnEvmGroupManager](rln1.groupManager)
       let idCredentials1 = generateCredentials()
 
       (await manager1.register(idCredentials1, UserMessageLimit(20))).isOkOr:
@@ -78,10 +79,10 @@ procSuite "WakuNode - RLN relay":
       let wakuRlnConfig2 =
         getWakuRlnConfig(manager = manager, index = MembershipIndex(2))
 
-      (await node2.setRlnValidator(wakuRlnConfig2)).expect("setRlnValidator")
+      rln2 = await node2.mountOnchainRln(wakuRlnConfig2)
       await node2.start()
 
-      let manager2 = cast[RlnEvmGroupManager](node2.rln.groupManager)
+      let manager2 = cast[RlnEvmGroupManager](rln2.groupManager)
       let rootUpdated2 = await manager2.updateRoots()
       info "Updated root for node2", rootUpdated2
 
@@ -96,10 +97,10 @@ procSuite "WakuNode - RLN relay":
       let wakuRlnConfig3 =
         getWakuRlnConfig(manager = manager, index = MembershipIndex(3))
 
-      (await node3.setRlnValidator(wakuRlnConfig3)).expect("setRlnValidator")
+      rln3 = await node3.mountOnchainRln(wakuRlnConfig3)
       await node3.start()
 
-      let manager3 = cast[RlnEvmGroupManager](node3.rln.groupManager)
+      let manager3 = cast[RlnEvmGroupManager](rln3.groupManager)
       let rootUpdated3 = await manager3.updateRoots()
       info "Updated root for node3", rootUpdated3
 
@@ -137,9 +138,7 @@ procSuite "WakuNode - RLN relay":
     var message =
       WakuMessage(payload: @payload, contentTopic: contentTopic, timestamp: now())
     message = (
-      await node1.rln.unsafeAppendRLNProof(
-        message, node1.rln.getCurrentEpoch(), MessageId(0)
-      )
+      await rln1.unsafeAppendRLNProof(message, rln1.getCurrentEpoch(), MessageId(0))
     ).valueOr:
       raiseAssert $error
 
@@ -161,6 +160,7 @@ procSuite "WakuNode - RLN relay":
   asyncTest "testing rln-relay is applied in all rln shards/content topics":
     # create 3 nodes
     var node1, node2, node3: WakuNode
+    var rln1, rln2, rln3: RlnEvm
     lockNewGlobalBrokerContext:
       let nodeKey1 = generateSecp256k1Key()
       node1 = newTestWakuNode(nodeKey1)
@@ -168,9 +168,9 @@ procSuite "WakuNode - RLN relay":
         assert false, "Failed to mount relay"
       let wakuRlnConfig1 =
         getWakuRlnConfig(manager = manager, index = MembershipIndex(1))
-      (await node1.setRlnValidator(wakuRlnConfig1)).expect("setRlnValidator")
+      rln1 = await node1.mountOnchainRln(wakuRlnConfig1)
       await node1.start()
-      let manager1 = cast[RlnEvmGroupManager](node1.rln.groupManager)
+      let manager1 = cast[RlnEvmGroupManager](rln1.groupManager)
       let idCredentials1 = generateCredentials()
 
       (await manager1.register(idCredentials1, UserMessageLimit(20))).isOkOr:
@@ -185,9 +185,9 @@ procSuite "WakuNode - RLN relay":
         assert false, "Failed to mount relay"
       let wakuRlnConfig2 =
         getWakuRlnConfig(manager = manager, index = MembershipIndex(2))
-      (await node2.setRlnValidator(wakuRlnConfig2)).expect("setRlnValidator")
+      rln2 = await node2.mountOnchainRln(wakuRlnConfig2)
       await node2.start()
-      let manager2 = cast[RlnEvmGroupManager](node2.rln.groupManager)
+      let manager2 = cast[RlnEvmGroupManager](rln2.groupManager)
       let idCredentials2 = generateCredentials()
 
       (await manager2.register(idCredentials2, UserMessageLimit(20))).isOkOr:
@@ -202,9 +202,9 @@ procSuite "WakuNode - RLN relay":
         assert false, "Failed to mount relay"
       let wakuRlnConfig3 =
         getWakuRlnConfig(manager = manager, index = MembershipIndex(3))
-      (await node3.setRlnValidator(wakuRlnConfig3)).expect("setRlnValidator")
+      rln3 = await node3.mountOnchainRln(wakuRlnConfig3)
       await node3.start()
-      let manager3 = cast[RlnEvmGroupManager](node3.rln.groupManager)
+      let manager3 = cast[RlnEvmGroupManager](rln3.groupManager)
       let idCredentials3 = generateCredentials()
 
       (await manager3.register(idCredentials3, UserMessageLimit(20))).isOkOr:
@@ -266,8 +266,8 @@ procSuite "WakuNode - RLN relay":
       )
 
       message = (
-        await node1.rln.unsafeAppendRLNProof(
-          message, node1.rln.getCurrentEpoch(), MessageId(i.uint8)
+        await rln1.unsafeAppendRLNProof(
+          message, rln1.getCurrentEpoch(), MessageId(i.uint8)
         )
       ).valueOr:
         raiseAssert $error
@@ -281,8 +281,8 @@ procSuite "WakuNode - RLN relay":
       )
 
       message = (
-        await node2.rln.unsafeAppendRLNProof(
-          message, node2.rln.getCurrentEpoch(), MessageId(i.uint8)
+        await rln2.unsafeAppendRLNProof(
+          message, rln2.getCurrentEpoch(), MessageId(i.uint8)
         )
       ).valueOr:
         raiseAssert $error
@@ -310,6 +310,7 @@ procSuite "WakuNode - RLN relay":
 
   asyncTest "testing rln-relay with invalid proof":
     var node1, node2, node3: WakuNode
+    var rln1, rln2, rln3: RlnEvm
     let contentTopic = ContentTopic("/waku/2/default-content/proto")
     lockNewGlobalBrokerContext:
       # publisher node
@@ -322,10 +323,10 @@ procSuite "WakuNode - RLN relay":
       let wakuRlnConfig1 =
         getWakuRlnConfig(manager = manager, index = MembershipIndex(1))
 
-      (await node1.setRlnValidator(wakuRlnConfig1)).expect("setRlnValidator")
+      rln1 = await node1.mountOnchainRln(wakuRlnConfig1)
       await node1.start()
 
-      let manager1 = cast[RlnEvmGroupManager](node1.rln.groupManager)
+      let manager1 = cast[RlnEvmGroupManager](rln1.groupManager)
       let idCredentials1 = generateCredentials()
 
       (await manager1.register(idCredentials1, UserMessageLimit(20))).isOkOr:
@@ -343,10 +344,10 @@ procSuite "WakuNode - RLN relay":
       let wakuRlnConfig2 =
         getWakuRlnConfig(manager = manager, index = MembershipIndex(2))
 
-      (await node2.setRlnValidator(wakuRlnConfig2)).expect("setRlnValidator")
+      rln2 = await node2.mountOnchainRln(wakuRlnConfig2)
       await node2.start()
 
-      let manager2 = cast[RlnEvmGroupManager](node2.rln.groupManager)
+      let manager2 = cast[RlnEvmGroupManager](rln2.groupManager)
       let rootUpdated2 = await manager2.updateRoots()
       info "Updated root for node2", rootUpdated2
     lockNewGlobalBrokerContext:
@@ -359,10 +360,10 @@ procSuite "WakuNode - RLN relay":
       let wakuRlnConfig3 =
         getWakuRlnConfig(manager = manager, index = MembershipIndex(3))
 
-      (await node3.setRlnValidator(wakuRlnConfig3)).expect("setRlnValidator")
+      rln3 = await node3.mountOnchainRln(wakuRlnConfig3)
       await node3.start()
 
-      let manager3 = cast[RlnEvmGroupManager](node3.rln.groupManager)
+      let manager3 = cast[RlnEvmGroupManager](rln3.groupManager)
       let rootUpdated3 = await manager3.updateRoots()
       info "Updated root for node3", rootUpdated3
 
@@ -397,12 +398,12 @@ procSuite "WakuNode - RLN relay":
     # prepare the message payload
     let payload = "valid".toBytes()
     # prepare the epoch
-    let epoch = node1.rln.getCurrentEpoch()
+    let epoch = rln1.getCurrentEpoch()
 
     var message =
       WakuMessage(payload: @payload, contentTopic: DefaultPubsubTopic, timestamp: now())
 
-    message = (await node1.rln.unsafeAppendRLNProof(message, epoch, MessageId(0))).valueOr:
+    message = (await rln1.unsafeAppendRLNProof(message, epoch, MessageId(0))).valueOr:
       raiseAssert "Failed to append rln proof: " & $error
 
     # message.payload = "Invalid".toBytes()
@@ -421,6 +422,7 @@ procSuite "WakuNode - RLN relay":
 
   asyncTest "testing rln-relay double-signaling detection":
     var node1, node2, node3: WakuNode
+    var rln1, rln2, rln3: RlnEvm
     let contentTopic = ContentTopic("/waku/2/default-content/proto")
     lockNewGlobalBrokerContext:
       # publisher node
@@ -433,11 +435,11 @@ procSuite "WakuNode - RLN relay":
       let wakuRlnConfig1 =
         getWakuRlnConfig(manager = manager, index = MembershipIndex(1))
 
-      (await node1.setRlnValidator(wakuRlnConfig1)).expect("setRlnValidator")
+      rln1 = await node1.mountOnchainRln(wakuRlnConfig1)
       await node1.start()
 
       # Registration is mandatory before sending messages with rln-relay
-      let manager1 = cast[RlnEvmGroupManager](node1.rln.groupManager)
+      let manager1 = cast[RlnEvmGroupManager](rln1.groupManager)
       let idCredentials1 = generateCredentials()
 
       (await manager1.register(idCredentials1, UserMessageLimit(20))).isOkOr:
@@ -456,11 +458,11 @@ procSuite "WakuNode - RLN relay":
       let wakuRlnConfig2 =
         getWakuRlnConfig(manager = manager, index = MembershipIndex(2))
 
-      (await node2.setRlnValidator(wakuRlnConfig2)).expect("setRlnValidator")
+      rln2 = await node2.mountOnchainRln(wakuRlnConfig2)
       await node2.start()
 
       # Registration is mandatory before sending messages with rln-relay
-      let manager2 = cast[RlnEvmGroupManager](node2.rln.groupManager)
+      let manager2 = cast[RlnEvmGroupManager](rln2.groupManager)
       let rootUpdated2 = await manager2.updateRoots()
       info "Updated root for node2", rootUpdated2
     lockNewGlobalBrokerContext:
@@ -474,11 +476,11 @@ procSuite "WakuNode - RLN relay":
       let wakuRlnConfig3 =
         getWakuRlnConfig(manager = manager, index = MembershipIndex(3))
 
-      (await node3.setRlnValidator(wakuRlnConfig3)).expect("setRlnValidator")
+      rln3 = await node3.mountOnchainRln(wakuRlnConfig3)
       await node3.start()
 
       # Registration is mandatory before sending messages with rln-relay
-      let manager3 = cast[RlnEvmGroupManager](node3.rln.groupManager)
+      let manager3 = cast[RlnEvmGroupManager](rln3.groupManager)
       let rootUpdated3 = await manager3.updateRoots()
       info "Updated root for node3", rootUpdated3
 
@@ -487,7 +489,7 @@ procSuite "WakuNode - RLN relay":
     await node3.connectToNodes(@[node2.switch.peerInfo.toRemotePeerInfo()])
 
     # get the current epoch time
-    let epoch_1 = node1.rln.getCurrentEpoch()
+    let epoch_1 = rln1.getCurrentEpoch()
 
     #  create some messages with rate limit proofs
     var
@@ -505,7 +507,7 @@ procSuite "WakuNode - RLN relay":
       #  wm3 points to the next epoch
 
     await sleepAsync(1000.millis)
-    let epoch_2 = node1.rln.getCurrentEpoch()
+    let epoch_2 = rln1.getCurrentEpoch()
 
     var
       wm3 = WakuMessage(
@@ -519,12 +521,12 @@ procSuite "WakuNode - RLN relay":
         contentTopic: DefaultPubsubTopic,
       )
 
-    wm1 = (await node1.rln.unsafeAppendRLNProof(wm1, epoch_1, MessageId(0))).valueOr:
+    wm1 = (await rln1.unsafeAppendRLNProof(wm1, epoch_1, MessageId(0))).valueOr:
       raiseAssert $error
-    wm2 = (await node1.rln.unsafeAppendRLNProof(wm2, epoch_1, MessageId(0))).valueOr:
+    wm2 = (await rln1.unsafeAppendRLNProof(wm2, epoch_1, MessageId(0))).valueOr:
       raiseAssert $error
 
-    wm3 = (await node1.rln.unsafeAppendRLNProof(wm3, epoch_2, MessageId(2))).valueOr:
+    wm3 = (await rln1.unsafeAppendRLNProof(wm3, epoch_2, MessageId(2))).valueOr:
       raiseAssert $error
 
     #  relay handler for node3
@@ -591,6 +593,7 @@ procSuite "WakuNode - RLN relay":
     ## This is skipped because is flaky and made CI randomly fail but is useful to run manually
     # Given two nodes
     var node1, node2: WakuNode
+    var rln1, rln2: RlnEvm
     let
       contentTopic = ContentTopic("/waku/2/default-content/proto")
       shardSeq = @[DefaultRelayShard]
@@ -602,11 +605,11 @@ procSuite "WakuNode - RLN relay":
         assert false, "Failed to mount relay"
       let wakuRlnConfig1 =
         getWakuRlnConfig(manager = manager, index = MembershipIndex(1))
-      (await node1.setRlnValidator(wakuRlnConfig1)).expect("setRlnValidator")
+      rln1 = await node1.mountOnchainRln(wakuRlnConfig1)
       await node1.start()
 
       # Registration is mandatory before sending messages with rln-relay
-      let manager1 = cast[RlnEvmGroupManager](node1.rln.groupManager)
+      let manager1 = cast[RlnEvmGroupManager](rln1.groupManager)
       let idCredentials1 = generateCredentials()
 
       (waitFor manager1.register(idCredentials1, UserMessageLimit(20))).isOkOr:
@@ -621,11 +624,11 @@ procSuite "WakuNode - RLN relay":
         assert false, "Failed to mount relay"
       let wakuRlnConfig2 =
         getWakuRlnConfig(manager = manager, index = MembershipIndex(2))
-      (await node2.setRlnValidator(wakuRlnConfig2)).expect("setRlnValidator")
+      rln2 = await node2.mountOnchainRln(wakuRlnConfig2)
       await node2.start()
 
       # Registration is mandatory before sending messages with rln-relay
-      let manager2 = cast[RlnEvmGroupManager](node2.rln.groupManager)
+      let manager2 = cast[RlnEvmGroupManager](rln2.groupManager)
       let rootUpdated2 = waitFor manager2.updateRoots()
       info "Updated root for node2", rootUpdated2
 
@@ -678,34 +681,30 @@ procSuite "WakuNode - RLN relay":
 
     # Given all messages have an rln proof and are published by the node 1
     let publishSleepDuration: Duration = 5000.millis
-    let epoch_1 = node1.rln.calcEpoch(epochTime().float64)
-    let epoch_2 =
-      node1.rln.calcEpoch(epochTime().float64 + node1.rln.rlnEpochSizeSec.float64 * 1)
-    let epoch_3 =
-      node1.rln.calcEpoch(epochTime().float64 + node1.rln.rlnEpochSizeSec.float64 * 2)
-    let epoch_4 =
-      node1.rln.calcEpoch(epochTime().float64 + node1.rln.rlnEpochSizeSec.float64 * 3)
-    let epoch_5 =
-      node1.rln.calcEpoch(epochTime().float64 + node1.rln.rlnEpochSizeSec.float64 * 4)
+    let epoch_1 = rln1.calcEpoch(epochTime().float64)
+    let epoch_2 = rln1.calcEpoch(epochTime().float64 + rln1.rlnEpochSizeSec.float64 * 1)
+    let epoch_3 = rln1.calcEpoch(epochTime().float64 + rln1.rlnEpochSizeSec.float64 * 2)
+    let epoch_4 = rln1.calcEpoch(epochTime().float64 + rln1.rlnEpochSizeSec.float64 * 3)
+    let epoch_5 = rln1.calcEpoch(epochTime().float64 + rln1.rlnEpochSizeSec.float64 * 4)
 
     # Epoch 1
-    wm1 = (await node1.rln.unsafeAppendRLNProof(wm1, epoch_1, MessageId(0))).valueOr:
+    wm1 = (await rln1.unsafeAppendRLNProof(wm1, epoch_1, MessageId(0))).valueOr:
       raiseAssert $error
 
     # Message wm2 is published in the same epoch as wm1, so it'll be considered spam
-    wm2 = (await node1.rln.unsafeAppendRLNProof(wm2, epoch_1, MessageId(0))).valueOr:
+    wm2 = (await rln1.unsafeAppendRLNProof(wm2, epoch_1, MessageId(0))).valueOr:
       raiseAssert $error
 
     discard await node1.publish(Opt.some(DefaultPubsubTopic), wm1)
     discard await node1.publish(Opt.some(DefaultPubsubTopic), wm2)
     await sleepAsync(publishSleepDuration)
     check:
-      await node1.waitForNullifierLog(0)
-      await node2.waitForNullifierLog(1)
+      await rln1.waitForNullifierLog(0)
+      await rln2.waitForNullifierLog(1)
 
     # Epoch 2
 
-    wm3 = (await node1.rln.unsafeAppendRLNProof(wm3, epoch_2, MessageId(0))).valueOr:
+    wm3 = (await rln1.unsafeAppendRLNProof(wm3, epoch_2, MessageId(0))).valueOr:
       raiseAssert $error
 
     discard await node1.publish(Opt.some(DefaultPubsubTopic), wm3)
@@ -713,38 +712,38 @@ procSuite "WakuNode - RLN relay":
     await sleepAsync(publishSleepDuration)
 
     check:
-      await node1.waitForNullifierLog(0)
-      await node2.waitForNullifierLog(2)
+      await rln1.waitForNullifierLog(0)
+      await rln2.waitForNullifierLog(2)
 
     # Epoch 3
-    wm4 = (await node1.rln.unsafeAppendRLNProof(wm4, epoch_3, MessageId(0))).valueOr:
+    wm4 = (await rln1.unsafeAppendRLNProof(wm4, epoch_3, MessageId(0))).valueOr:
       raiseAssert $error
 
     discard await node1.publish(Opt.some(DefaultPubsubTopic), wm4)
     await sleepAsync(publishSleepDuration)
     check:
-      await node1.waitForNullifierLog(0)
-      await node2.waitForNullifierLog(3)
+      await rln1.waitForNullifierLog(0)
+      await rln2.waitForNullifierLog(3)
 
     # Epoch 4
-    wm5 = (await node1.rln.unsafeAppendRLNProof(wm5, epoch_4, MessageId(0))).valueOr:
+    wm5 = (await rln1.unsafeAppendRLNProof(wm5, epoch_4, MessageId(0))).valueOr:
       raiseAssert $error
 
     discard await node1.publish(Opt.some(DefaultPubsubTopic), wm5)
     await sleepAsync(publishSleepDuration)
     check:
-      await node1.waitForNullifierLog(0)
-      await node2.waitForNullifierLog(4)
+      await rln1.waitForNullifierLog(0)
+      await rln2.waitForNullifierLog(4)
 
     # Epoch 5
-    wm6 = (await node1.rln.unsafeAppendRLNProof(wm6, epoch_5, MessageId(0))).valueOr:
+    wm6 = (await rln1.unsafeAppendRLNProof(wm6, epoch_5, MessageId(0))).valueOr:
       raiseAssert $error
 
     discard await node1.publish(Opt.some(DefaultPubsubTopic), wm6)
     await sleepAsync(publishSleepDuration)
     check:
-      await node1.waitForNullifierLog(0)
-      await node2.waitForNullifierLog(4)
+      await rln1.waitForNullifierLog(0)
+      await rln2.waitForNullifierLog(4)
 
     # Then the node 2 should have cleared the nullifier log for epochs > MaxEpochGap
     # Therefore, with 4 max epochs, the first 4 messages will be published (except wm2, which shares epoch with wm1)
@@ -776,10 +775,10 @@ procSuite "WakuNode - RLN relay":
         epochSizeSec = 600,
         userMessageLimit = 20,
       )
-      (await node.setRlnValidator(wakuRlnConfig)).expect("setRlnValidator")
+      let rln = await node.mountOnchainRln(wakuRlnConfig)
       await node.start()
 
-      let rlnManager = cast[RlnEvmGroupManager](node.rln.groupManager)
+      let rlnManager = cast[RlnEvmGroupManager](rln.groupManager)
       let idCredentials = generateCredentials()
       (await rlnManager.register(idCredentials, UserMessageLimit(20))).isOkOr:
         assert false, "Failed to register: " & error
@@ -805,7 +804,7 @@ procSuite "WakuNode - RLN relay":
       check rlnManager.merkleProofCache == goodCache
       # The returned proof carries a Merkle root that is in the valid-roots window
       let rlnProof = RateLimitProof.init(proofResult.get()).get()
-      let rootValid = await node.rln.groupManager.validateRoot(rlnProof.merkleRoot)
+      let rootValid = await rln.groupManager.validateRoot(rlnProof.merkleRoot)
       check rootValid
 
       await node.stop()
