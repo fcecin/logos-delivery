@@ -133,6 +133,9 @@ proc toRlnPlugin*(lez: RlnLez): RlnPlugin =
       return err(toRlnError(error))
     return parseRlnGeneratedProof(response)
 
+  proc quota(timestamp: uint64): Future[Result[EpochQuota, RlnError]] {.async.} =
+    return await lez.getEpochQuota(timestamp)
+
   proc nodeStarted(): Future[void] {.async.} =
     ## Membership only gates sending, so verify it non-fatally: a validate-only
     ## node is legitimate, and a Pending membership can settle later. A pass is
@@ -155,6 +158,7 @@ proc toRlnPlugin*(lez: RlnLez): RlnPlugin =
     name: "external",
     validateProof: validate,
     generateProof: generate,
+    getEpochQuota: quota,
     onNodeStarted: nodeStarted,
   )
 

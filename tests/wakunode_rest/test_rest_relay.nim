@@ -7,7 +7,8 @@ import
   testutils/unittests,
   presto,
   presto/client as presto_client,
-  libp2p/crypto/crypto
+  libp2p/crypto/crypto,
+  libp2p/protocols/pubsub/pubsub
 import brokers/broker_context
 import
   logos_delivery/waku/[
@@ -39,6 +40,21 @@ proc testWakuNode(): WakuNode =
     port = Port(0)
 
   newTestWakuNode(privkey, bindIp, port, Opt.some(extIp), Opt.some(port))
+
+proc rejectFirstMessageAsRlnInvalid(node: WakuNode) =
+  ## Registers a relay validator that rejects the first message it sees with
+  ## the RLN validator's error marker, then accepts everything.
+  var rejected = false
+  node.wakuRelay.addValidator(
+    proc(
+        pubsubTopic: PubsubTopic, message: WakuMessage
+    ): Future[pubsub.ValidationResult] {.async.} =
+      if rejected:
+        return pubsub.ValidationResult.Accept
+      rejected = true
+      return pubsub.ValidationResult.Reject,
+    RlnValidatorErrorMsg & ": simulated",
+  )
 
 suite "Waku v2 Rest API - Relay":
   var anvilProc {.threadVar.}: Process
@@ -856,12 +872,13 @@ suite "Waku v2 Rest API - Relay":
     await restServer.closeWait()
     await node.stop()
 
-  asyncTest "Stale RLN proof returns 503 and schedules a refresh - POST /relay/v1/messages/{topic}":
-    ## When the cached Merkle proof path is stale the handler generates a proof
-    ## whose root the local RLN validator rejects. The handler must detect the
-    ## RlnValidatorErrorMsg, schedule a background merkle proof refresh, and
-    ## fail early with 503 + RlnProofRefreshScheduledMsg. A client retry then
-    ## succeeds against the refreshed path.
+  asyncTest "RLN rejection returns 503 and schedules a refresh - POST /relay/v1/messages/{topic}":
+    ## When the local validator rejects the published message as RLN-invalid,
+    ## the handler must detect the RlnValidatorErrorMsg, schedule a background
+    ## merkle proof refresh, and fail early with 503 +
+    ## RlnProofRefreshScheduledMsg. A client retry then succeeds. The proof
+    ## generator repairs a stale cached path before validation, so the
+    ## rejection is injected with a one-shot validator.
     let node = testWakuNode()
     (await node.mountRelay()).isOkOr:
       assert false, "Failed to mount relay"
@@ -887,10 +904,7 @@ suite "Waku v2 Rest API - Relay":
     let goodCache = proofRes.get()
     manager.merkleProofCache = goodCache
 
-    # Corrupt the cache with zeros so the first generateRLNProof call produces a
-    # proof with a Merkle root that is not in the valid-roots window.
-    # validateMessage will return RlnValidatorErrorMsg.
-    manager.merkleProofCache = newSeq[byte](goodCache.len)
+    node.rejectFirstMessageAsRlnInvalid()
 
     var restPort = Port(0)
     let restAddress = parseIpAddress("0.0.0.0")
@@ -947,7 +961,7 @@ suite "Waku v2 Rest API - Relay":
     await restServer.closeWait()
     await node.stop()
 
-  asyncTest "Stale RLN proof returns 503 and schedules a refresh - POST /relay/v1/auto/messages/{topic}":
+  asyncTest "RLN rejection returns 503 and schedules a refresh - POST /relay/v1/auto/messages/{topic}":
     ## Same fail-fast behavior as the static-sharding handler, exercised via
     ## the auto-sharding endpoint. A relay-only mesh node is connected so that
     ## node.publish() has a gossipsub peer and the client retry can return
@@ -996,8 +1010,7 @@ suite "Waku v2 Rest API - Relay":
     let goodCache = proofRes.get()
     manager.merkleProofCache = goodCache
 
-    # Corrupt the cache to produce a proof with a bad Merkle root
-    manager.merkleProofCache = newSeq[byte](goodCache.len)
+    node.rejectFirstMessageAsRlnInvalid()
 
     var restPort = Port(0)
     let restAddress = parseIpAddress("0.0.0.0")

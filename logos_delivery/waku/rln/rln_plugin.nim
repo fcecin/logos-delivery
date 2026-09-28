@@ -45,6 +45,12 @@ type
     onNodeStarted*: proc(): Future[void] {.gcsafe, raises: [].}
       ## Called once the node has started. Nil for backends with nothing to do
       ## at that point.
+    getEpochQuota*: proc(timestamp: uint64): Future[Result[EpochQuota, RlnError]] {.
+      gcsafe, raises: []
+    .}
+      ## Budget snapshot for the epoch derived from `timestamp` (Unix seconds),
+      ## so the epoch and the remaining budget cannot straddle an epoch
+      ## boundary. Nil for backends that keep no budget.
 
   RlnCommonConf* = object
     ## Node-local settings shared by every backend. A backend's own
@@ -80,5 +86,47 @@ proc selectRlnPlugin*(
       )
     selected = Opt.some(descriptor)
   return ok(selected)
+
+proc attachProof*(
+    plugin: Opt[RlnPlugin], message: WakuMessage
+): Future[Result[WakuMessage, RlnError]] {.async.} =
+  ## Returns `message` carrying a proof from the mounted backend. A message
+  ## that already has one is returned untouched, so a retry neither redraws a
+  ## nonce nor changes the bytes. Without a backend that generates proofs the
+  ## message passes through unproven.
+  if message.proof.len > 0:
+    return ok(message)
+
+  let backend = plugin.valueOr:
+    return ok(message)
+  if backend.generateProof.isNil():
+    return ok(message)
+
+  var msgWithProof = message
+  msgWithProof.proof = ?(await backend.generateProof(message))
+  return ok(msgWithProof)
+
+proc epochQuota*(
+    plugin: Opt[RlnPlugin], timestamp: uint64
+): Future[Result[EpochQuota, RlnError]] {.async.} =
+  ## The mounted backend's budget snapshot for the epoch derived from
+  ## `timestamp` (Unix seconds). NotReady without a backend, since one can
+  ## mount later; Permanent when the backend keeps no budget.
+  let backend = plugin.valueOr:
+    return err(RlnError.notReady("no RLN backend is mounted"))
+  if backend.getEpochQuota.isNil():
+    return err(RlnError.permanent("the mounted RLN backend keeps no epoch budget"))
+  return await backend.getEpochQuota(timestamp)
+
+proc notifyProofRejected*(plugin: Opt[RlnPlugin]): bool =
+  ## Tells the mounted backend that a publish was rejected as RLN-invalid, so
+  ## it can refresh whatever proofs are built against. False when there is no
+  ## backend or it has no such hook.
+  let backend = plugin.valueOr:
+    return false
+  if backend.onProofRejected.isNil():
+    return false
+  backend.onProofRejected()
+  return true
 
 {.pop.}

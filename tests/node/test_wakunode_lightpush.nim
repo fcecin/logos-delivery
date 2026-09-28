@@ -341,12 +341,12 @@ suite "RLN Proofs as a Lightpush Service":
         response.isErr()
         response.error.code == LightPushErrorCode.INTERNAL_SERVER_ERROR
 
-    asyncTest "rejection passes through unchanged when node.rln is nil":
-      # Detach RLN so the RLN-rejection branch short-circuits on rln.isNone()
-      # even for a 420. Restore before teardown so server.stop() sees the same
-      # object graph it was constructed with.
-      let savedRln = server.rln
-      server.rln = nil
+    asyncTest "rejection passes through unchanged when RLN is not mounted":
+      # Detach the RLN backend so there is no refresh hook to call, even for an
+      # RLN-tagged 420. Restore before teardown so server.stop() stops the
+      # backend it was constructed with.
+      let savedPlugin = server.rlnPlugin
+      reset(server.rlnPlugin)
 
       var callCount = 0
       let stub: PushMessageHandler = proc(
@@ -354,13 +354,13 @@ suite "RLN Proofs as a Lightpush Service":
       ): Future[WakuLightPushResult] {.async.} =
         inc callCount
         return lighpushErrorResult(
-          LightPushErrorCode.INVALID_MESSAGE, "simulated stale merkle path"
+          LightPushErrorCode.INVALID_MESSAGE, RlnValidatorErrorMsg & ": simulated"
         )
       server.wakuLightPush.pushHandler = stub
 
       let response = await server.lightpushPublish(Opt.some(pubsubTopic), message)
 
-      server.rln = savedRln
+      server.rlnPlugin = savedPlugin
 
       check:
         callCount == 1

@@ -338,8 +338,8 @@ proc setupProtocols(
   # ABI (`logosdelivery_rln_set_plugin`) for the external backend, CLI/preset
   # configuration for the on-chain one. 
   proc setNodeRln(rln: RlnEvm) {.gcsafe, raises: [].} =
-    ## Stores the mounted on-chain backend on the node (`node.rln`), where
-    ## lightpush, the REST relay handlers and `api/rln.nim` call it directly.
+    ## Stores the mounted on-chain backend on the node (`node.rln`) for code
+    ## that uses it directly: tests, example apps and tools.
     node.rln = rln
 
   let rlnDescriptors =
