@@ -4,7 +4,7 @@ import results, chronos, chronicles
 
 import ../waku_core, ../waku_relay, ./common
 
-import std/times, libp2p/peerid, stew/byteutils
+import libp2p/peerid
 
 proc getNilPushHandler*(): PushMessageHandler =
   return proc(

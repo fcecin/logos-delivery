@@ -478,7 +478,7 @@ method withdrawBatch*(
 
 proc getRootFromProofAndIndex(
     g: RlnEvmGroupManager, elements: seq[byte], bits: seq[byte]
-): RlnEvmGroupManagerResult[array[32, byte]] =
+): Result[array[32, byte], string] =
   # this is a helper function to get root from merkle proof elements and index
   # it's currently not used anywhere, but can be used to verify the root from the proof and index
   # Compute leaf hash from idCommitment and messageLimit
@@ -506,7 +506,7 @@ method generateProof*(
     epoch: Epoch,
     messageId: MessageId,
     rlnIdentifier = DefaultRlnIdentifier,
-): Future[RlnEvmGroupManagerResult[RateLimitProof]] {.async.} =
+): Future[Result[RateLimitProof, string]] {.async.} =
   ## Generates an RLN proof using the cached Merkle proof and custom witness
   # Ensure identity credentials and membership index are set
   if g.idCredentials.isNone():
@@ -566,7 +566,7 @@ method generateProof*(
 
 method verifyProof*(
     g: RlnEvmGroupManager, input: seq[byte], proof: RateLimitProof
-): RlnEvmGroupManagerResult[bool] {.gcsafe.} =
+): Result[bool, string] {.gcsafe.} =
   let validProof = verifyRlnProof(
     g.rlnInstance, proof, input, g.validRoots.items().toSeq()
   ).valueOr:
@@ -583,7 +583,7 @@ method onWithdraw*(g: RlnEvmGroupManager, cb: OnWithdrawCallback) {.gcsafe.} =
 
 proc establishConnection(
     g: RlnEvmGroupManager
-): Future[RlnEvmGroupManagerResult[Web3]] {.async.} =
+): Future[Result[Web3, string]] {.async.} =
   let ethRpc = (
     await retryWrapper(
       RetryStrategy.new(),
@@ -612,7 +612,7 @@ proc establishConnection(
 
   return ok(ethRpc)
 
-method init*(g: RlnEvmGroupManager): Future[RlnEvmGroupManagerResult[void]] {.async.} =
+method init*(g: RlnEvmGroupManager): Future[Result[void, string]] {.async.} =
   # check if the Ethereum client is reachable
   let ethRpc: Web3 = (await establishConnection(g)).valueOr:
     return err("failed to connect to Ethereum clients: " & $error)
