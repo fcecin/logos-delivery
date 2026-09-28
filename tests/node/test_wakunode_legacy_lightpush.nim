@@ -235,13 +235,12 @@ suite "RLN Proofs as a Lightpush Service":
         response.isErr()
         response.error == "unrelated failure"
 
-    asyncTest "no refresh scheduled when node.rln is nil":
-      # Detach RLN so the RLN-rejection branch short-circuits on rln.isNone()
-      # even when the error string carries RlnValidatorErrorMsg. Restore before
-      # teardown so server.stop() sees the same object graph it was
-      # constructed with.
-      let savedRln = server.rln
-      server.rln = nil
+    asyncTest "no refresh scheduled when RLN is not mounted":
+      # Detach the RLN backend so there is no refresh hook to call, even when
+      # the error string carries RlnValidatorErrorMsg. Restore before teardown
+      # so server.stop() stops the backend it was constructed with.
+      let savedPlugin = server.rlnPlugin
+      reset(server.rlnPlugin)
 
       var callCount = 0
       let stub: PushMessageHandler = proc(
@@ -255,11 +254,12 @@ suite "RLN Proofs as a Lightpush Service":
         Opt.some(pubsubTopic), message, server.peerInfo.toRemotePeerInfo()
       )
 
-      server.rln = savedRln
+      server.rlnPlugin = savedPlugin
 
       check:
         callCount == 1
         response.isErr()
+        not response.error.contains(RlnProofRefreshScheduledMsg)
 
 suite "Waku Legacy Lightpush message delivery":
   asyncTest "Legacy lightpush message flow succeed":

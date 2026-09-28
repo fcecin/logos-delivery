@@ -15,6 +15,7 @@ import
   logos_delivery/waku/[
     waku_core,
     node/waku_node,
+    rln/rln_api,
     rln/rln_plugin,
     node/waku_node/lightpush,
     node/peer_manager,
@@ -45,23 +46,20 @@ proc relayPushHandler*(self: Waku): PushMessageHandler =
   ## proof is attached by the messaging layer via `attachRlnProof`.
   return getRelayPushHandler(self.node.wakuRelay)
 
+proc rlnEpochQuota*(
+    self: Waku, timestamp: uint64
+): Future[Result[EpochQuota, RlnError]] {.async.} =
+  ## The mounted RLN backend's budget snapshot for the epoch derived from
+  ## `timestamp` (Unix seconds). An error without a backend that keeps one.
+  return await epochQuota(self.node.rlnPlugin, timestamp)
+
 proc attachRlnProof*(
     self: Waku, message: WakuMessage
 ): Future[Result[WakuMessage, string]] {.async.} =
   ## Returns `message` carrying an RLN proof. A message that already has one is
   ## returned untouched, so retrying a task neither redraws a nonce nor changes
   ## the bytes. Without RLN mounted the message passes through unproven.
-
-  if message.proof.len > 0:
-    return ok(message)
-
-  let plugin = self.node.rlnPlugin.valueOr:
-    return ok(message)
-  if plugin.generateProof.isNil():
-    return ok(message)
-
-  var msgWithProof = message
-  msgWithProof.proof = (await plugin.generateProof(message)).valueOr:
+  let msgWithProof = (await attachProof(self.node.rlnPlugin, message)).valueOr:
     return err("Failed to attach RLN proof: " & $error)
   return ok(msgWithProof)
 
@@ -86,10 +84,7 @@ proc onRlnProofRejected*(self: Waku) =
   ## generated for the message is built fresh. Non-blocking: the send
   ## service's own loop is what retries, and it must not stall waiting on an
   ## RPC round trip. A backend without a refresh concept installs no hook.
-  let plugin = self.node.rlnPlugin.valueOr:
-    return
-  if not plugin.onProofRejected.isNil():
-    plugin.onProofRejected()
+  discard self.node.rlnPlugin.notifyProofRejected()
 
 proc lightpushPeerAvailable*(self: Waku, shard: PubsubTopic): bool =
   ## True if a lightpush service peer is available for `shard`.

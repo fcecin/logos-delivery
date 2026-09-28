@@ -6,7 +6,7 @@ import
   logos_delivery/api/conf/messaging_conf,
   logos_delivery/api/messaging_client_api,
   logos_delivery/waku/waku,
-  logos_delivery/waku/api/[publish, health, rln],
+  logos_delivery/waku/api/[publish, health],
   logos_delivery/waku/node/health_monitor,
   logos_delivery/waku/factory/conf_builder/waku_conf_builder,
   logos_delivery/waku/persistency/persistency,
@@ -34,7 +34,7 @@ proc rlnQuotaProvider(waku: Waku): QuotaProvider =
   return proc(): Future[Opt[EpochQuota]] {.async: (raises: []), gcsafe.} =
     let res =
       try:
-        await waku.rlnEpochQuota(MembershipScope(), uint64(getTime().toUnix()))
+        await waku.rlnEpochQuota(uint64(getTime().toUnix()))
       except CatchableError:
         return Opt.none(EpochQuota)
     let quota = res.valueOr:

@@ -296,6 +296,29 @@ proc toRlnPlugin*(rlnEvm: RlnEvm): RlnPlugin =
       return err(RlnError.transient(error))
     return ok(proof)
 
+  proc quota(timestamp: uint64): Future[Result[EpochQuota, RlnError]] {.async.} =
+    ## The membership has a single implicit scope, and the nonce manager
+    ## tracks spent budget only for the current epoch.
+    let limit = rlnEvm.groupManager.userMessageLimit.valueOr:
+      return err(RlnError.notReady("the user message limit is not set"))
+
+    let rateLimit = uint64(limit)
+    let epoch = rlnEvm.calcEpoch(timestamp.float64)
+    let nm = rlnEvm.nonceManager
+    let spent =
+      if epoch != rlnEvm.getCurrentEpoch():
+        0'u64
+      elif getTime().toUnixFloat() - nm.lastNonceTime >= nm.epoch:
+        0'u64
+      else:
+        min(nm.nextNonce, rateLimit)
+
+    return ok(
+      EpochQuota(
+        epochIndex: fromEpoch(epoch), rateLimit: rateLimit, remaining: rateLimit - spent
+      )
+    )
+
   return RlnPlugin(
     name: "onchain",
     stop: stopBackend,
@@ -303,6 +326,7 @@ proc toRlnPlugin*(rlnEvm: RlnEvm): RlnPlugin =
     onProofRejected: proofRejected,
     validateProof: validate,
     generateProof: generate,
+    getEpochQuota: quota,
   )
 
 proc new*(
