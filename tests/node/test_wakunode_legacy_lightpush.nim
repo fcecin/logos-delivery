@@ -17,6 +17,7 @@ import
     waku_lightpush_legacy/common,
     waku_lightpush_legacy/protocol_metrics,
     rln,
+    rln/rln_plugin,
     rln/rln_evm/constants,
   ],
   ../testlib/[wakucore, wakunode, testasync, futures, testutils],
@@ -169,9 +170,8 @@ suite "RLN Proofs as a Lightpush Service":
 
       # Attach the RLN proof. In production the client mounts RLN and generates the
       # proof in legacyLightpushPublish; here we generate it using the server's RLN
-      # instance since both ends share group state via the in-memory manager.
-      let msgWithProof =
-        (await checkAndGenerateRLNProof(Opt.some(server.rln), message)).get()
+      # plugin since both ends share group state via the in-memory manager.
+      let msgWithProof = (await attachProof(server.rlnPlugin, message)).get()
 
       # When the client publishes a message
       let publishResponse = await lightpushClient.legacyLightpushPublish(
