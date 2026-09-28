@@ -16,6 +16,7 @@ import
     waku_node,
     waku_lightpush,
     rln,
+    rln/rln_plugin,
   ],
   ../testlib/[wakucore, wakunode, testasync, futures],
   ../resources/payloads,
@@ -173,10 +174,9 @@ suite "RLN Proofs as a Lightpush Service":
       lightpushClient.mountLightPushClient()
 
       # Attach the RLN proof. In production the client mounts RLN and generates the
-      # proof in lightpushPublish; here we generate it using the server's RLN instance
+      # proof in lightpushPublish; here we generate it using the server's RLN plugin
       # since both ends share group state via the in-memory manager.
-      let msgWithProof =
-        (await checkAndGenerateRLNProof(Opt.some(server.rln), message)).get()
+      let msgWithProof = (await attachProof(server.rlnPlugin, message)).get()
 
       # When the client publishes a message
       let publishResponse = await lightpushClient.lightpushPublish(
@@ -191,13 +191,12 @@ suite "RLN Proofs as a Lightpush Service":
       check publishResponse.error.code == LightPushErrorCode.NO_PEERS_TO_RELAY
 
     asyncTest "invalidate + regenerate refetches merkle path and rebuilds proof":
-      # Exercises the primitive pair that lightpushPublish leans on after a
-      # 420 (INVALID_MESSAGE) or 504 (OUT_OF_RLN_PROOF) rejection: calling
-      # invalidateMerkleProofCache empties the cached path so the next
-      # proof-gen refetches from chain, and attachRLNProof rebuilds the proof
-      # even though the message already carries one.
-      let firstMsg =
-        (await checkAndGenerateRLNProof(Opt.some(server.rln), message)).get()
+      # Exercises what a retry after a 420 (INVALID_MESSAGE) or 504
+      # (OUT_OF_RLN_PROOF) rejection relies on: invalidateMerkleProofCache
+      # empties the cached path so the next proof generation refetches it from
+      # chain, and the backend's generateProof builds a new proof even for a
+      # message that already carries one.
+      let firstMsg = (await attachProof(server.rlnPlugin, message)).get()
       check firstMsg.proof.len > 0
 
       # Corrupt the cache to model a stale/invalid witness — the same state a
@@ -210,7 +209,8 @@ suite "RLN Proofs as a Lightpush Service":
       # Retry path: invalidate the cache so the next proof-gen refetches from
       # chain, then regenerate the proof.
       manager.invalidateMerkleProofCache()
-      let secondMsg = (await attachRLNProof(server.rln, firstMsg)).get()
+      var secondMsg = firstMsg
+      secondMsg.proof = (await server.rlnPlugin.get().generateProof(firstMsg)).get()
 
       check:
         secondMsg.proof.len > 0

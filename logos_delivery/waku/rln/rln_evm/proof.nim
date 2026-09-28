@@ -104,30 +104,3 @@ proc generateRLNProofWithRootRefresh*(
   debug "RLN: stale merkle root detected; refreshing merkle path and regenerating proof"
   rlnEvm.groupManager.invalidateMerkleProofCache()
   return await rlnEvm.generateRLNProofWithNonce(input, senderEpochTime, nonce)
-
-proc attachRLNProof*(
-    rlnEvm: RlnEvm, message: WakuMessage
-): Future[Result[WakuMessage, string]] {.async.} =
-  ## Returns the message with a freshly generated RLN proof, replacing any
-  ## existing one and drawing a new message id. Retry paths suspecting a stale
-  ## path should call `invalidateMerkleProofCache` first.
-  var msgWithProof = message
-  msgWithProof.proof = (
-    await rlnEvm.generateRLNProof(message.toRLNSignal(), float64(getTime().toUnix()))
-  ).valueOr:
-    return err("error in attachRLNProof: " & error)
-  return ok(msgWithProof)
-
-proc checkAndGenerateRLNProof*(
-    rlnEvm: Opt[RlnEvm], message: WakuMessage
-): Future[Result[WakuMessage, string]] {.async.} =
-  ## Returns the message with an attached RLN proof, or unchanged when it
-  ## already carries a proof or RLN is not configured.
-  if message.proof.len > 0:
-    return ok(message)
-
-  if rlnEvm.isNone():
-    debug "Publishing message without RLN proof"
-    return ok(message)
-
-  return await attachRLNProof(rlnEvm.get(), message)
