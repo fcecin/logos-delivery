@@ -11,8 +11,7 @@ import std/json
 import chronos, chronicles, results
 import stew/byteutils
 import logos_delivery/waku/waku_core/message/message
-from logos_delivery/waku/rln/rln_evm/proof import toRLNSignal
-import ../types, ./transport
+import ../types, ../signal, ./transport
 import ../rln_api, ../rln_plugin
 
 export types
