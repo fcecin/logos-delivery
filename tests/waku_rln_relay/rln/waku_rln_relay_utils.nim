@@ -9,7 +9,7 @@ import
     rln_evm/conversion_utils,
     rln_evm/constants,
     rln_evm/protocol_types,
-    rln_evm/protocol_metrics,
+    protocol_metrics,
     rln_evm/nonce_manager,
   ]
 

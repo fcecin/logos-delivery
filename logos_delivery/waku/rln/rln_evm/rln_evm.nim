@@ -18,7 +18,7 @@ import
   ./conversion_utils,
   ./constants,
   ./protocol_types,
-  ./protocol_metrics,
+  ../protocol_metrics,
   ./nonce_manager,
   ./types,
   ./config,

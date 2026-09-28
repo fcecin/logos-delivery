@@ -1,8 +1,8 @@
 {.push raises: [].}
 
-import results
+import results, chronos, chronicles
 
-import ../waku_core, ../waku_relay, ./common, ../rln, ../rln/rln_evm/protocol_types
+import ../waku_core, ../waku_relay, ./common
 
 import std/times, libp2p/peerid, stew/byteutils
 

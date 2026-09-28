@@ -7,7 +7,7 @@ import
     rln/rln_evm/librln_interface,
     rln/rln_evm/conversion_utils,
     rln/rln_evm/protocol_types,
-    rln/rln_evm/protocol_metrics,
+    rln/protocol_metrics,
   ]
 import logos_delivery/waku/[waku_core, waku_keystore]
 
