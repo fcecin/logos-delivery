@@ -6,7 +6,7 @@ import ./types
 
 export chronos, types
 
-## Client-facing surface of the RLN Module API.
+## Client-facing surface of the RLN Module API. Spec at logos-lips `docs/anoncomms/raw/rln-api.md
 ##
 ## The surface is implementation-agnostic: no membership, registry or epoch
 ## size appears in it. Starting, configuring and registering the backend belong
