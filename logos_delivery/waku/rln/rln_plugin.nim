@@ -48,9 +48,10 @@ type
     .}
       ## Proof for an outgoing message, as the bytes its `proof` field carries.
       ## Each backend derives the epoch its own way.
-    onNodeStarted*: proc(): Future[void] {.gcsafe, raises: [].}
-      ## Called once the node has started. Nil for backends with nothing to do
-      ## at that point.
+    onNodeStarted*: proc(): Future[void] {.async: (raises: [CancelledError]), gcsafe.}
+      ## Called once the node has started. The backend handles its own
+      ## failures; only cancellation reaches the caller. Nil for backends with
+      ## nothing to do at that point.
     getEpochQuota*: proc(timestamp: uint64): Future[Result[EpochQuota, RlnError]] {.
       gcsafe, raises: []
     .}

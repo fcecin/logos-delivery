@@ -440,8 +440,8 @@ proc startNode*(
   if node.rlnPlugin.isSome() and not node.rlnPlugin.get().onNodeStarted.isNil():
     try:
       await node.rlnPlugin.get().onNodeStarted()
-    except CatchableError:
-      notice "RLN backend start hook failed", error = getCurrentExceptionMsg()
+    except CancelledError:
+      return err("cancelled during the RLN backend start hook")
 
   # Connect to configured static nodes
   if conf.staticNodes.len > 0:
