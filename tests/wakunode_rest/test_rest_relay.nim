@@ -24,6 +24,8 @@ import
     rest_api/endpoint/relay/client as relay_rest_client,
     waku_relay,
     rln,
+    rln/rln_plugin,
+    rln/types as rln_types,
   ],
   ../testlib/wakucore,
   ../testlib/wakunode,
@@ -55,6 +57,41 @@ proc rejectFirstMessageAsRlnInvalid(node: WakuNode) =
       return pubsub.ValidationResult.Reject,
     RlnValidatorErrorMsg & ": simulated",
   )
+
+type StubRlnCalls = ref object
+  ## How often the node asked the stub RLN backend for a proof or a refresh.
+  generateCalls: int
+  refreshCalls: int
+
+proc mountStubRln(node: WakuNode, validProof: seq[byte]): StubRlnCalls =
+  ## Mounts an RLN backend that accepts only `validProof` and cannot generate
+  ## proofs, like a node without a usable membership.
+  let calls = StubRlnCalls()
+
+  proc validate(
+      message: WakuMessage
+  ): Future[Result[rln_types.ValidationResult, RlnError]] {.async.} =
+    if message.proof == validProof:
+      return ok(rln_types.ValidationResult(verdict: ProofVerdict.Valid))
+    return ok(rln_types.ValidationResult(verdict: ProofVerdict.Invalid))
+
+  proc generate(message: WakuMessage): Future[Result[seq[byte], RlnError]] {.async.} =
+    calls.generateCalls.inc()
+    return err(RlnError.notReady("no usable RLN membership"))
+
+  proc refresh() {.gcsafe, raises: [].} =
+    calls.refreshCalls.inc()
+
+  node.mountRln(
+    RlnPlugin(
+      name: "stub",
+      validateProof: validate,
+      generateProof: generate,
+      onProofRejected: refresh,
+    ),
+    RlnCommonConf(),
+  )
+  return calls
 
 suite "Waku v2 Rest API - Relay":
   var anvilProc {.threadVar.}: Process
@@ -1066,6 +1103,102 @@ suite "Waku v2 Rest API - Relay":
     await restServer.stop()
     await restServer.closeWait()
     await allFutures(node.stop(), meshNode.stop())
+
+  asyncTest "A client-supplied RLN proof is published without generating one - POST /relay/v1/messages/{topic}":
+    ## The node keeps the proof the client sent, so it spends none of its own
+    ## quota and publishes even without a usable membership.
+    let clientProof = @[1'u8, 2, 3]
+    let node = testWakuNode()
+    (await node.mountRelay()).isOkOr:
+      assert false, "Failed to mount relay"
+    let rlnCalls = node.mountStubRln(validProof = clientProof)
+    await node.start()
+
+    var restPort = Port(0)
+    let restAddress = parseIpAddress("0.0.0.0")
+    let restServer = WakuRestServerRef.init(restAddress, restPort).tryGet()
+    restPort = restServer.httpServer.address.port
+    let cache = MessageCache.init()
+    installRelayApiHandlers(restServer.router, node, cache)
+    restServer.start()
+    defer:
+      await restServer.stop()
+      await restServer.closeWait()
+      await node.stop()
+    let client = newRestHttpClient(initTAddress(restAddress, restPort))
+
+    let simpleHandler = proc(
+        topic: PubsubTopic, msg: WakuMessage
+    ): Future[void] {.async, gcsafe.} =
+      await sleepAsync(0.milliseconds)
+
+    node.subscribe((kind: PubsubSub, topic: DefaultPubsubTopic), simpleHandler).isOkOr:
+      assert false, "Failed to subscribe to pubsub topic"
+
+    let response = await client.relayPostMessagesV1(
+      DefaultPubsubTopic,
+      RelayWakuMessage(
+        payload: base64.encode("TEST-PAYLOAD"),
+        contentTopic: Opt.some(DefaultContentTopic),
+        timestamp: Opt.some(now()),
+        proof: Opt.some(base64.encode(clientProof)),
+      ),
+    )
+
+    # The stub validator accepts only the client's proof, so a 200 means it
+    # was published as sent.
+    check:
+      response.status == 200
+      response.data == "OK"
+      rlnCalls.generateCalls == 0
+
+  asyncTest "An RLN-invalid client proof returns 400 and schedules no refresh - POST /relay/v1/messages/{topic}":
+    ## A refresh of the node's own proof state cannot make a client's proof
+    ## valid, so the rejection is final instead of a retry signal.
+    let node = testWakuNode()
+    (await node.mountRelay()).isOkOr:
+      assert false, "Failed to mount relay"
+    let rlnCalls = node.mountStubRln(validProof = @[1'u8, 2, 3])
+    await node.start()
+
+    var restPort = Port(0)
+    let restAddress = parseIpAddress("0.0.0.0")
+    let restServer = WakuRestServerRef.init(restAddress, restPort).tryGet()
+    restPort = restServer.httpServer.address.port
+    let cache = MessageCache.init()
+    installRelayApiHandlers(restServer.router, node, cache)
+    restServer.start()
+    defer:
+      await restServer.stop()
+      await restServer.closeWait()
+      await node.stop()
+    let client = newRestHttpClient(initTAddress(restAddress, restPort))
+
+    let simpleHandler = proc(
+        topic: PubsubTopic, msg: WakuMessage
+    ): Future[void] {.async, gcsafe.} =
+      await sleepAsync(0.milliseconds)
+
+    node.subscribe((kind: PubsubSub, topic: DefaultPubsubTopic), simpleHandler).isOkOr:
+      assert false, "Failed to subscribe to pubsub topic"
+
+    let response = await client.relayPostMessagesV1(
+      DefaultPubsubTopic,
+      RelayWakuMessage(
+        payload: base64.encode("TEST-PAYLOAD"),
+        contentTopic: Opt.some(DefaultContentTopic),
+        timestamp: Opt.some(now()),
+        proof: Opt.some(base64.encode(@[9'u8, 9, 9])),
+      ),
+    )
+
+    check:
+      response.status == 400
+      $response.contentType == $MIMETYPE_TEXT
+      response.data.contains(RlnValidatorErrorMsg)
+      not response.data.contains(RlnProofRefreshScheduledMsg)
+      rlnCalls.generateCalls == 0
+      rlnCalls.refreshCalls == 0
 
   asyncTest "A message published on one node is read back on its relay peer - POST /relay/v1/messages/{topic}, GET /relay/v1/messages/{topic}":
     # Given two relay nodes, each behind its own REST server

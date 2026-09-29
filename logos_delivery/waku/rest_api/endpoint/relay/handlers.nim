@@ -65,13 +65,16 @@ proc attachRlnProofAndValidate(
     pubsubTopic: PubsubTopic,
     message: WakuMessage,
 ): Future[Result[WakuMessage, RlnPublishError]] {.async.} =
-  ## Attaches a fresh RLN proof to `message`, replacing any the client sent,
-  ## and validates it via `wakuRelay`. If the validator rejects it as
-  ## RLN-invalid (error contains RlnValidatorErrorMsg) and the backend can
-  ## refresh what proofs are built against, schedules that refresh and fails
-  ## early with StaleProofSuspected; the caller decides whether to retry.
-  var msg = message
-  msg.proof = (await plugin.generateProof(msg)).valueOr:
+  ## Attaches an RLN proof to `message` unless the client supplied one, and
+  ## validates it via `wakuRelay`. Publishing a client's own proof uses none
+  ## of the node's proof quota and works without a node membership. If the
+  ## validator rejects a node-generated proof as RLN-invalid (error contains
+  ## RlnValidatorErrorMsg) and the backend can refresh what proofs are built
+  ## against, schedules that refresh and fails early with StaleProofSuspected;
+  ## the caller decides whether to retry. A rejected client proof is
+  ## ValidationRejected: no refresh on the node can make it valid.
+  let hasClientProof = message.proof.len > 0
+  let msg = (await attachProof(Opt.some(plugin), message)).valueOr:
     return err(
       RlnPublishError(
         kind: ProofGenFailed, desc: "error appending RLN proof to message: " & $error
@@ -81,7 +84,7 @@ proc attachRlnProofAndValidate(
   let validateResult = await wakuRelay.validateMessage(pubsubTopic, msg)
   if validateResult.isOk():
     return ok(msg)
-  if not validateResult.error.contains(RlnValidatorErrorMsg):
+  if hasClientProof or not validateResult.error.contains(RlnValidatorErrorMsg):
     return err(RlnPublishError(kind: ValidationRejected, desc: validateResult.error))
   if not Opt.some(plugin).notifyProofRejected():
     # no refresh to wait for, so a retry would fail the same way
