@@ -155,7 +155,7 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
     debug "MixSendProcessor.sendImpl failed", error = error.desc.get($error.code)
 
     if error.isRlnRejection():
-      task.parkForRlnProofRefresh(self.waku)
+      task.parkForRlnProofRefresh(self.waku, error.desc.get($error.code))
       return
 
     case error.code
