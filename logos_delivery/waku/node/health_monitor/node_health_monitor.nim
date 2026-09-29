@@ -125,7 +125,7 @@ proc getRlnRelayHealth(hm: NodeHealthMonitor): Future[ProtocolHealth] {.async.} 
   let plugin = hm.node.rlnPlugin.valueOr:
     return p.notMounted()
   if plugin.isReady.isNil():
-    return p.notMounted()
+    return p.notReady("The mounted RLN backend does not report its readiness")
 
   const FutIsReadyTimout = 5.seconds
 

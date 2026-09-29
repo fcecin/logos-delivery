@@ -342,7 +342,7 @@ proc setupProtocols(
     [rlnLezDescriptor(), rlnEvmDescriptor(conf.rlnEvmConf, onFatalErrorAction)]
 
   let selectedRln = selectRlnPlugin(rlnDescriptors).valueOr:
-    return err(error)
+    return err("failed call selectRlnPlugin: " & $error)
 
   if selectedRln.isNone():
     info "No RLN backend configured; RLN is off"
@@ -354,7 +354,7 @@ proc setupProtocols(
       let descriptor = selectedRln.get()
       info "Mounting RLN backend", backend = descriptor.name
       let mounted = (await descriptor.mount()).valueOr:
-        return err(error)
+        return err("failed to mount RLN backend" & $error)
       node.mountRln(
         mounted, RlnCommonConf(disableValidation: conf.rlnDisableValidation)
       )
