@@ -353,12 +353,14 @@ proc mountOnchain*(
     error "Rln-user-message-limit can't exceed the MAX_MESSAGE_LIMIT in the rln contract"
   return ok(rln)
 
-proc rlnEvmDescriptor*(conf: Opt[RlnConf]): RlnPluginDescriptor =
+proc rlnEvmDescriptor*(
+    conf: Opt[RlnConf], onFatalErrorAction: OnFatalErrorHandler
+): RlnPluginDescriptor =
   ## Selected when on-chain RLN configuration came from the CLI or a preset.
   proc present(): bool =
     conf.isSome()
 
-  proc mount(commonConf: RlnCommonConf): Future[Result[RlnPlugin, string]] {.async.} =
+  proc mount(): Future[Result[RlnPlugin, string]] {.async.} =
     let evmConf = conf.get()
     let rlnConf = WakuRlnConfig(
       dynamic: evmConf.dynamic,
@@ -369,8 +371,7 @@ proc rlnEvmDescriptor*(conf: Opt[RlnConf]): RlnPluginDescriptor =
       creds: evmConf.creds,
       userMessageLimit: evmConf.userMessageLimit,
       epochSizeSec: evmConf.epochSizeSec,
-      onFatalErrorAction: commonConf.onFatalErrorAction,
-      disableValidation: commonConf.disableValidation,
+      onFatalErrorAction: onFatalErrorAction,
     )
     let rln = (await mountOnchain(rlnConf)).valueOr:
       return err(

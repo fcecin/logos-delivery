@@ -13,10 +13,7 @@
 
 import chronos, results
 
-import
-  logos_delivery/waku/common/error_handling,
-  logos_delivery/waku/waku_core/message/message,
-  ./types
+import logos_delivery/waku/waku_core/message/message, ./types
 
 export results
 
@@ -60,10 +57,9 @@ type
       ## boundary. Nil for backends that keep no budget.
 
   RlnCommonConf* = object
-    ## Node-local settings shared by every backend. A backend's own
-    ## parameters live in its own config module and are captured by its
-    ## descriptor's closures at the composition root.
-    onFatalErrorAction*: OnFatalErrorHandler
+    ## Node-side RLN relay settings, independent of the mounted backend. A
+    ## backend's own parameters live in its own config module and are
+    ## captured by its descriptor's closures at the composition root.
     disableValidation*: bool
       ## When true, published messages still get proofs attached, but
       ## received messages are not validated — they pass through unchecked.
@@ -73,9 +69,7 @@ type
     name*: string
     matches*: proc(): bool {.gcsafe, raises: [].}
       ## True when this backend's configuration source is present.
-    mount*: proc(commonConf: RlnCommonConf): Future[Result[RlnPlugin, string]] {.
-      gcsafe, raises: []
-    .}
+    mount*: proc(): Future[Result[RlnPlugin, string]] {.gcsafe, raises: [].}
 
 proc selectRlnPlugin*(
     descriptors: openArray[RlnPluginDescriptor]
