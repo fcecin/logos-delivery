@@ -338,7 +338,8 @@ proc setupProtocols(
   # ABI (`logosdelivery_rln_set_plugin`) for the external backend, CLI/preset
   # configuration for the on-chain one. With no source present the node starts
   # without RLN.
-  let rlnDescriptors = [rlnLezDescriptor(), rlnEvmDescriptor(conf.rlnEvmConf)]
+  let rlnDescriptors =
+    [rlnLezDescriptor(), rlnEvmDescriptor(conf.rlnEvmConf, onFatalErrorAction)]
 
   let selectedRln = selectRlnPlugin(rlnDescriptors).valueOr:
     return err(error)
@@ -352,13 +353,11 @@ proc setupProtocols(
     else:
       let descriptor = selectedRln.get()
       info "Mounting RLN backend", backend = descriptor.name
-      let rlnCommonConf = RlnCommonConf(
-        onFatalErrorAction: onFatalErrorAction,
-        disableValidation: conf.rlnDisableValidation,
-      )
-      let mounted = (await descriptor.mount(rlnCommonConf)).valueOr:
+      let mounted = (await descriptor.mount()).valueOr:
         return err(error)
-      node.mountRln(mounted, rlnCommonConf)
+      node.mountRln(
+        mounted, RlnCommonConf(disableValidation: conf.rlnDisableValidation)
+      )
 
   # NOTE Must be mounted after relay
   if conf.lightPush:

@@ -556,14 +556,7 @@ proc processInput(rfd: AsyncFD, rng: crypto.Rng) {.async.} =
       let onchainRln = (waitFor mountOnchain(rlnConf)).valueOr:
         error "failed to set rln validator", error = error
         quit(QuitFailure)
-      node.mountRln(
-        onchainRln.toRlnPlugin(),
-        RlnCommonConf(
-          onFatalErrorAction: rlnConf.onFatalErrorAction,
-          disableValidation: rlnConf.disableValidation,
-        ),
-        Opt.some(spamHandler),
-      )
+      node.mountRln(onchainRln.toRlnPlugin(), RlnCommonConf(), Opt.some(spamHandler))
       chat.rln = onchainRln
 
       let membershipIndex = onchainRln.groupManager.membershipIndex.get()

@@ -423,7 +423,10 @@ suite "SendService - anonymity level with a mounted mix":
 
     # A backend with a refresh hook, so the park waits for the refresh.
     waku.node.rlnPlugin = Opt.some(
-      RlnPlugin(onProofRejected: proc() {.gcsafe, raises: [].} = discard)
+      RlnPlugin(
+        onProofRejected: proc() {.gcsafe, raises: [].} =
+          discard
+      )
     )
 
     let task = buildTask("rln-park", chronos.minutes(2))

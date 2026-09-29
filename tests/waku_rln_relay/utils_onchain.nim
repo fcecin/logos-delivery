@@ -795,14 +795,7 @@ proc mountOnchainRln*(
   ## it, for tests that use the backend directly.
   let rln = (await mountOnchain(conf, registrationHandler)).valueOr:
     raise newException(CatchableError, "failed to set rln validator: " & error)
-  node.mountRln(
-    rln.toRlnPlugin(),
-    RlnCommonConf(
-      onFatalErrorAction: conf.onFatalErrorAction,
-      disableValidation: conf.disableValidation,
-    ),
-    spamHandler,
-  )
+  node.mountRln(rln.toRlnPlugin(), RlnCommonConf(), spamHandler)
   return rln
 
 {.pop.}

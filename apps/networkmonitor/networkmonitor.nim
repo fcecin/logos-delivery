@@ -631,13 +631,7 @@ when isMainModule:
     let onchainRln = (waitFor mountOnchain(rlnConf)).valueOr:
       error "failed to setup RLN", error = error
       quit(QuitFailure)
-    node.mountRln(
-      onchainRln.toRlnPlugin(),
-      RlnCommonConf(
-        onFatalErrorAction: rlnConf.onFatalErrorAction,
-        disableValidation: rlnConf.disableValidation,
-      ),
-    )
+    node.mountRln(onchainRln.toRlnPlugin(), RlnCommonConf())
 
   node.mountMetadata(conf.clusterId, conf.shards).isOkOr:
     error "failed to mount waku metadata protocol: ", error = error

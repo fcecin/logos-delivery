@@ -168,7 +168,7 @@ proc rlnLezDescriptor*(): RlnPluginDescriptor =
   proc present(): bool =
     rlnPluginRegistered()
 
-  proc mount(commonConf: RlnCommonConf): Future[Result[RlnPlugin, string]] {.async.} =
+  proc mount(): Future[Result[RlnPlugin, string]] {.async.} =
     return ok(RlnLez.init().toRlnPlugin())
 
   return RlnPluginDescriptor(name: "external", matches: present, mount: mount)
