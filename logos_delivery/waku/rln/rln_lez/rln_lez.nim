@@ -136,15 +136,18 @@ proc toRlnPlugin*(lez: RlnLez): RlnPlugin =
     return await lez.getEpochQuota(timestamp)
 
   proc nodeStarted(): Future[void] {.async: (raises: [CancelledError]).} =
-    ## Membership only gates sending, so verify it non-fatally: a validate-only
-    ## node is legitimate, and a Pending membership can settle later. A pass is
-    ## cached on `lez` so the send path skips the registry read; anything else
-    ## is retried per send.
+    ## The node's first call to the host. Membership only gates sending, so no
+    ## outcome stops startup: a validate-only node has no membership, and a
+    ## Pending one can settle later. An error means the host did not answer:
+    ## NotReady when its backend is not initialised, Transient for a timeout.
+    ## A pass is cached on `lez` so the send path skips the registry read;
+    ## anything else is retried per send.
     let membershipRes = await lez.verifyMembership()
     if membershipRes.isErr():
-      notice "could not verify RLN membership at startup", error = membershipRes.error
+      warn "RLN backend did not answer the startup membership check; sends and proof validation fail until it does",
+        error = membershipRes.error
     elif not membershipRes.get().isUsable():
-      notice "node has no usable RLN membership; sends will fail until it is active",
+      notice "No usable RLN membership; proof validation is unaffected, sends fail until it is active",
         status = $membershipRes.get()
     else:
       info "RLN membership verified", status = $membershipRes.get()
@@ -160,6 +163,8 @@ proc toRlnPlugin*(lez: RlnLez): RlnPlugin =
 proc rlnLezDescriptor*(): RlnPluginDescriptor =
   ## Selected when the host has installed its RLN plugin over the C ABI
   ## (`logosdelivery_rln_set_plugin`); the host owns the backend's parameters.
+  ## Registration is all that selection checks: mounting makes no call to the
+  ## host, so whether its backend is initialised first shows in `nodeStarted`.
   proc present(): bool =
     rlnPluginRegistered()
 

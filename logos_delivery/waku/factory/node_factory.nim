@@ -336,13 +336,16 @@ proc setupProtocols(
   # RLN backend selected by configuration source: each descriptor probes
   # whether its own source is present — host callbacks installed over the C
   # ABI (`logosdelivery_rln_set_plugin`) for the external backend, CLI/preset
-  # configuration for the on-chain one.
+  # configuration for the on-chain one. With no source present the node starts
+  # without RLN.
   let rlnDescriptors = [rlnLezDescriptor(), rlnEvmDescriptor(conf.rlnEvmConf)]
 
   let selectedRln = selectRlnPlugin(rlnDescriptors).valueOr:
     return err(error)
 
-  if selectedRln.isSome():
+  if selectedRln.isNone():
+    info "No RLN backend configured; RLN is off"
+  else:
     when defined(disable_rln):
       return
         err("the configuration enables RLN relay, but this build has -d:disable_rln")
@@ -436,7 +439,9 @@ proc startNode*(
   except CatchableError:
     return err("failed to start waku node: " & getCurrentExceptionMsg())
 
-  # Backend work that needs a running node, such as a membership check.
+  # Backend work that needs a running node, such as the external backend's
+  # membership check, its first call to the host. The backend handles its own
+  # failures, so the node starts regardless; only cancellation stops startup.
   if node.rlnPlugin.isSome() and not node.rlnPlugin.get().onNodeStarted.isNil():
     try:
       await node.rlnPlugin.get().onNodeStarted()

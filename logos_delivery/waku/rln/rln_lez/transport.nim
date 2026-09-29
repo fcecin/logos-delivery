@@ -214,7 +214,8 @@ proc logosdelivery_rln_set_plugin*(
 
 proc rlnPluginRegistered*(): bool =
   ## Whether the host has installed an RLN plugin. This is what enables RLN
-  ## over it: there is no separate configuration switch.
+  ## over it: there is no separate configuration switch. It says nothing about
+  ## whether the host's backend is ready to answer.
   withLock gLock:
     return gRegistered
 
