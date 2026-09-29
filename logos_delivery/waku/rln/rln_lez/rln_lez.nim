@@ -135,16 +135,12 @@ proc toRlnPlugin*(lez: RlnLez): RlnPlugin =
   proc quota(timestamp: uint64): Future[Result[EpochQuota, RlnError]] {.async.} =
     return await lez.getEpochQuota(timestamp)
 
-  proc nodeStarted(): Future[void] {.async.} =
+  proc nodeStarted(): Future[void] {.async: (raises: [CancelledError]).} =
     ## Membership only gates sending, so verify it non-fatally: a validate-only
     ## node is legitimate, and a Pending membership can settle later. A pass is
     ## cached on `lez` so the send path skips the registry read; anything else
     ## is retried per send.
-    let membershipRes =
-      try:
-        await lez.verifyMembership()
-      except CancelledError:
-        Result[MembershipStatus, string].err("cancelled")
+    let membershipRes = await lez.verifyMembership()
     if membershipRes.isErr():
       notice "could not verify RLN membership at startup", error = membershipRes.error
     elif not membershipRes.get().isUsable():
