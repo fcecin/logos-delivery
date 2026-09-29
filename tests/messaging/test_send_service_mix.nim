@@ -15,6 +15,7 @@ import
   logos_delivery/waku/node/peer_manager,
   logos_delivery/waku/node/peer_manager/waku_peer_store,
   logos_delivery/waku/node/waku_node/lightpush,
+  logos_delivery/waku/rln/rln_plugin,
   logos_delivery/waku/waku_lightpush/common,
   logos_delivery/waku/waku_core,
   logos_delivery/api/types,
@@ -420,18 +421,37 @@ suite "SendService - anonymity level with a mounted mix":
     )
     mix.chain(plain)
 
+    # A backend with a refresh hook, so the park waits for the refresh.
+    waku.node.rlnPlugin = Opt.some(
+      RlnPlugin(onProofRejected: proc() {.gcsafe, raises: [].} = discard)
+    )
+
     let task = buildTask("rln-park", chronos.minutes(2))
     task.msg.proof = @[1'u8, 2, 3] # a proof the service would have rejected
 
     # The park clears the proof and `firstAdmittedTime`, which resets the window.
-    task.parkForRlnProofRefresh(waku)
-    check task.msg.proof.len == 0
+    task.parkForRlnProofRefresh(waku, "rln proof rejected")
+    check:
+      task.state == DeliveryState.NextRoundRetry
+      task.msg.proof.len == 0
 
     let fut = mix.process(task)
     check:
       task.tryCount == 1 # a whole window again, so mix attempts it
       plain.calls == 0 # no hand-over
     await fut.cancelAndWait()
+
+  asyncTest "an RLN rejection fails the task when no backend can refresh":
+    ## No RLN backend is mounted, so no refresh follows and a retry would be
+    ## rejected the same way. The task fails with the rejection instead of
+    ## waiting for the next round.
+    let task = buildTask("rln-no-refresh", chronos.minutes(2))
+    task.msg.proof = @[1'u8, 2, 3] # a proof the service would have rejected
+
+    task.parkForRlnProofRefresh(waku, "rln proof rejected")
+    check:
+      task.state == DeliveryState.FailedToDeliver
+      task.errorDesc == "rln proof rejected"
 
   asyncTest "a task parked for budget does not spend its mix window":
     ## The window runs from admission. A task that did not pass admission has

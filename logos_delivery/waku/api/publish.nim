@@ -78,13 +78,11 @@ func isRlnRejection*(error: ErrorStatus): bool =
       error.desc.get("").contains(RlnValidatorErrorMsg)
     )
 
-proc onRlnProofRejected*(self: Waku) =
-  ## Called when a publish was rejected as RLN-invalid. Lets the mounted RLN
-  ## backend refresh whatever the proof was built against, so the next proof
-  ## generated for the message is built fresh. Non-blocking: the send
-  ## service's own loop is what retries, and it must not stall waiting on an
-  ## RPC round trip. A backend without a refresh concept installs no hook.
-  discard self.node.rlnPlugin.notifyProofRejected()
+proc onRlnProofRejected*(self: Waku): bool =
+  ## Tells the mounted RLN backend its proof was rejected. True when the
+  ## backend will refresh what proofs are built against; see
+  ## `notifyProofRejected`.
+  return self.node.rlnPlugin.notifyProofRejected()
 
 proc lightpushPeerAvailable*(self: Waku, shard: PubsubTopic): bool =
   ## True if a lightpush service peer is available for `shard`.

@@ -34,8 +34,9 @@ type
     isReady*: proc(): Future[bool] {.gcsafe, raises: [].}
     onProofRejected*: proc() {.gcsafe, raises: [].}
       ## Called when a publish was rejected as RLN-invalid, so the backend can
-      ## refresh whatever the proof was built against. Nil for backends
-      ## without such a concept.
+      ## refresh whatever the proof was built against. Must not block: callers
+      ## such as the send service loop do not wait for the refresh. Nil for
+      ## backends without such a concept.
     validateProof*: proc(
       message: WakuMessage
     ): Future[Result[ValidationResult, RlnError]] {.gcsafe, raises: [].}
