@@ -501,6 +501,45 @@ suite "MessagingClientConf - anonymity level":
       raiseAssert error
     check wakuConf.mixConf.isSome()
 
+suite "MessagingClientConf - from the node CLI":
+  test "an unset flag takes the preset value":
+    var conf = defaultTestWakuNodeConf()
+    conf.preset = "twn"
+    let fromPreset = resolvePreset("twn").valueOr:
+      raiseAssert error
+    let messaging = MessagingClientConf.init(conf).valueOr:
+      raiseAssert error
+    check:
+      messaging.reliabilityEnabled == fromPreset.reliabilityEnabled
+      messaging.sendQueueCapacity.isNone()
+
+  test "a set flag overrides the preset value":
+    var conf = defaultTestWakuNodeConf()
+    conf.preset = "twn"
+    let fromPreset = resolvePreset("twn").valueOr:
+      raiseAssert error
+    conf.reliability = Opt.some(not fromPreset.reliabilityEnabled.get())
+    conf.anonymityLevel = Opt.some(AnonymityLevel.Preferred)
+    conf.sendQueueCapacity = Opt.some(5000'u)
+    conf.backfillEnabled = Opt.some(false)
+    let messaging = MessagingClientConf.init(conf).valueOr:
+      raiseAssert error
+    check:
+      messaging.reliabilityEnabled == conf.reliability
+      messaging.anonymityLevel == Opt.some(AnonymityLevel.Preferred)
+      messaging.sendQueueCapacity == Opt.some(5000'u)
+      messaging.backfillEnabled == Opt.some(false)
+
+  test "an anonymity level above None mounts mix, and mix=false is an error":
+    var conf = defaultTestWakuNodeConf()
+    check:
+      enableMixForAnonymity(conf, Opt.some(AnonymityLevel.None)).isOk()
+      conf.mix.isNone()
+      enableMixForAnonymity(conf, Opt.some(AnonymityLevel.Required)).isOk()
+      conf.mix == Opt.some(true)
+    conf.mix = Opt.some(false)
+    check enableMixForAnonymity(conf, Opt.some(AnonymityLevel.Preferred)).isErr()
+
 suite "LogosDelivery.new - raw kernel construction":
   asyncTest "a kernel-only node mounts the kernel only; start/stop tolerate the nil layers":
     let kernel = defaultTestWakuNodeConf()
@@ -558,6 +597,26 @@ suite "parseLogosDeliveryConf - flat WakuNodeConf shape (interop compatibility)"
       raiseAssert error
     check:
       lc.messagingConf.get().reliabilityEnabled == Opt.some(true)
+
+  test "a flat blob's messaging flags reach the messaging record":
+    let lc = parseLogosDeliveryConf("""{"relay": true, "sendQueueCapacity": 5}""").valueOr:
+      raiseAssert error
+    check lc.messagingConf.get().sendQueueCapacity == Opt.some(5'u)
+
+  test "a flat blob's anonymity level by its CLI name mounts mix":
+    let lc = parseLogosDeliveryConf(
+      """{"relay": true, "anonymity-level": "Required"}"""
+    ).valueOr:
+      raiseAssert error
+    check:
+      lc.messagingConf.get().anonymityLevel == Opt.some(AnonymityLevel.Required)
+      WakuNodeConf(lc.kernelConf).mix == Opt.some(true)
+
+  test "a flat blob's anonymity level with mix=false is an error":
+    check parseLogosDeliveryConf(
+      """{"relay": true, "anonymity-level": "Required", "mix": false}"""
+    )
+      .isErr()
 
   test "an unknown key in a flat blob is rejected":
     check parseLogosDeliveryConf("""{"relay": true, "bogusKey": 1}""").isErr()

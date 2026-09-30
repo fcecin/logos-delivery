@@ -115,19 +115,26 @@ proc new*(
   ##   messaging -> kernel + messaging client
   ##   channels  -> kernel + messaging + reliable channels
   ## For `messaging`/`channels`, `conf.mode` (Edge/Core) sets the kernel protocol
-  ## flags first (messaging-level concern); for `kernel` it is skipped.
+  ## flags first (messaging-level concern); for `kernel` it is skipped. The
+  ## messaging flags and the network preset give the messaging config.
   var kernelConf = conf
+  var messagingConf = Opt.none(MessagingClientConf)
+  if conf.entryLayer == EntryLayer.kernel and conf.hasMessagingFlags():
+    return err(
+      "the Messaging API flags need --entry-layer=messaging or --entry-layer=channels"
+    )
   if conf.entryLayer != EntryLayer.kernel:
     applyMode(kernelConf, conf.mode).isOkOr:
       return err("failed to apply mode: " & error)
+    let cliMessagingConf = MessagingClientConf.init(conf).valueOr:
+      return err("failed to build the messaging config: " & error)
+    enableMixForAnonymity(kernelConf, cliMessagingConf.anonymityLevel).isOkOr:
+      return err("failed to apply the anonymity level: " & error)
+    messagingConf = Opt.some(cliMessagingConf)
 
   let ldConf = LogosDeliveryConf(
     kernelConf: KernelConf(kernelConf),
-    messagingConf:
-      if conf.entryLayer == EntryLayer.kernel:
-        Opt.none(MessagingClientConf)
-      else:
-        Opt.some(MessagingClientConf()),
+    messagingConf: messagingConf,
     channelsConf:
       if conf.entryLayer == EntryLayer.channels:
         Opt.some(ReliableChannelManagerConf())
