@@ -58,6 +58,12 @@ logosdeliverynode --entry-layer=messaging --mode=core --preset=logos.test \
   --rest=true --rest-address=127.0.0.1 --rest-port=8645 --storenode=<multiaddr>
 ```
 
+These flags configure the Messaging API: `--reliability`, `--anonymity-level`,
+`--rate-limit-enabled`, `--rate-limit-epoch-sec`, `--rate-limit-messages-per-epoch`,
+`--rate-limit-approached-threshold-percent`, `--max-parked-age-sec`, `--send-queue-capacity`,
+`--backfill-enabled` and `--backfill-request-timeout-seconds`. `logosdeliverynode --help` shows
+their defaults. A kernel-only node refuses them.
+
 | Method and route | Body | Response |
 |---|---|---|
 | `POST /messaging/v1/subscriptions` | `["/app/1/topic/proto", ...]` | `200 OK` |
@@ -78,14 +84,13 @@ send events with the same `requestId`:
   confirmation within about 60 s of propagation, ...)
 
 `sent` and `error` are final. `sent` needs store-based reliability, and never comes for an
-ephemeral message. A send over the plain path also needs a Store peer for `sent`. A
-`logosdeliverynode` started from the command line always has reliability on. For library and
-JSON configs, the network preset sets it (on for `logos.dev` and `logos.test`, off for `twn` and
-`status.prod`, on without a preset), and `reliability` overrides the preset. Without
-reliability, and for an ephemeral message, `propagated` is the last event. Clients must ignore
-kinds that they do not know. A `404` on `GET /events/send/{requestId}` means that nothing is
-buffered for that id now: the id is unknown, already polled, or has no event yet. Keep polling
-until the last event.
+ephemeral message. A send over the plain path also needs a Store peer for `sent`. The network
+preset sets reliability (on for `logos.dev` and `logos.test`, off for `twn` and `status.prod`, on
+without a preset). The `--reliability` flag, or the `reliability` field of a library or JSON
+config, overrides the preset. Without reliability, and for an ephemeral message, `propagated` is
+the last event. Clients must ignore kinds that they do not know. A `404` on
+`GET /events/send/{requestId}` means that nothing is buffered for that id now: the id is
+unknown, already polled, or has no event yet. Keep polling until the last event.
 
 Each received record has the message hash, the full `WakuMessage` and a `source`: `live` for a
 message that arrived when it was published, `history` for a message that a Store peer returned
