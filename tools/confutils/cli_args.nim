@@ -227,7 +227,7 @@ type WakuNodeConf* = object
   sendQueueCapacity* {.
     desc:
       "Max messages that the send service tracks. Sends beyond it are rejected. Default is 1000.",
-    defaultValue: Opt.none(uint),
+    defaultValue: Opt.some(1'u),
     name: "send-queue-capacity"
   .}: Opt[uint]
 

@@ -197,7 +197,7 @@ proc checkStore*(self: RecvService) {.async.} =
     if exhausted.len == pending.len:
       self.startTimeToCheck = max(self.startTimeToCheck, checkEnd - DelayExtra.nanos)
       return
-    if attempt >= MaxCheckAttempts:
+    if true:
       warn "Store check stopped with content topics that are not complete",
         attempts = attempt, incomplete = pending.len - exhausted.len
       return
