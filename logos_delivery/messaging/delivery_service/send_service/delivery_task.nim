@@ -48,6 +48,14 @@ type DeliveryTask* = ref object
   propagatedAnonymously*: bool
     ## Set when an anonymous path propagated the message. No store node confirms
     ## it: the query would name the message from this node's own address.
+  createdAt*: Opt[Moment]
+    ## When `new` made the task. The max parked age counts from this time.
+    ## Without it, the age counts from the message timestamp.
+  timestampFixed*: bool
+    ## Set when a send attempt can have given the message to a node, this node
+    ## included, because relay gives a published message to the local handlers
+    ## too. From then on a copy with this hash can exist, so the task keeps its
+    ## timestamp.
   lastStoreQueryTime*: Opt[Moment]
     ## When a Store peer was last asked about this task, none before the first query.
   errorDesc*: string
@@ -77,6 +85,7 @@ proc new*(
       msgHash: msgHash,
       tryCount: 0,
       state: DeliveryState.Entry,
+      createdAt: Opt.some(Moment.now()),
     )
   )
 
@@ -126,9 +135,27 @@ proc isDeliveryTimedOut*(self: DeliveryTask, maxTime: timer.Duration): bool =
 
 proc isParkedExpired*(self: DeliveryTask, maxAge: timer.Duration): bool =
   ## True when a task never admitted (parked for budget) has outlived `maxAge`,
-  ## measured from the message timestamp, so parking cannot grow the backlog
-  ## and deliver arbitrarily late.
-  return self.firstAdmittedTime.isNone() and self.messageAge() > maxAge
+  ## measured from the call to `send`, so parking cannot grow the backlog
+  ## and deliver arbitrarily late. A new timestamp does not change the age.
+  let age =
+    if self.createdAt.isSome():
+      Moment.now() - self.createdAt.get()
+    else:
+      self.messageAge()
+  return self.firstAdmittedTime.isNone() and age > maxAge
+
+proc restampIfOld*(self: DeliveryTask, maxAge: timer.Duration): bool =
+  ## Sets the message timestamp to now when the message is older than `maxAge`,
+  ## the task never propagated, and no send attempt can have given the message
+  ## to a node. Clears the RLN proof and calculates the hash again. Gives true
+  ## when it sets a new timestamp.
+  if self.firstPropagatedTime.isSome() or self.timestampFixed or
+      self.messageAge() <= maxAge:
+    return false
+  self.msg.timestamp = getNowInNanosecondTime()
+  self.msg.proof = @[]
+  self.msgHash = computeMessageHash(self.pubsubTopic, self.msg)
+  return true
 
 proc isEphemeral*(self: DeliveryTask): bool =
   return self.msg.ephemeral

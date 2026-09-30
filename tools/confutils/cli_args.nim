@@ -219,7 +219,7 @@ type WakuNodeConf* = object
 
   maxParkedAgeSec* {.
     desc:
-      "Max age in seconds, from the message timestamp, of a send that waits for rate-limit budget. Default is 1800.",
+      "Max age in seconds, from the call to send, of a send that waits for rate-limit budget. Default is 1800.",
     defaultValue: Opt.none(uint),
     name: "max-parked-age-sec"
   .}: Opt[uint]

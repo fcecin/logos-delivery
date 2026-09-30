@@ -140,6 +140,8 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
   # whose reply is lost is still on the network. From here on, the send service
   # logs no hash for this task at INFO or ERROR.
   task.anonymized = true
+  # The mix exit can publish the message even when its reply does not come.
+  task.timestampFixed = true
 
   task.errorDesc = "" # the attempt reports its own outcome
   task.heldRounds = 0

@@ -25,6 +25,7 @@ import
     waku_lightpush/rpc,
     waku_lightpush/client,
     waku_lightpush/callbacks,
+    waku_lightpush/protocol_metrics,
     waku_mix,
   ]
 
@@ -61,6 +62,25 @@ proc attachRlnProof*(
   ## the bytes. Without RLN mounted the message passes through unproven. The
   ## error's kind tells the caller whether a retry can succeed.
   return await attachProof(self.node.rlnPlugin, message)
+
+proc relayHasPeers*(self: Waku, shard: PubsubTopic): bool =
+  ## True when relay has a connected peer that subscribes to `shard`.
+  if self.node.wakuRelay.isNil():
+    return false
+  return self.node.wakuRelay.getNumConnectedPeers(shard).valueOr(0) > 0
+
+func isDialFailure*(error: ErrorStatus): bool =
+  ## True when the lightpush client did not connect to the service node, so the
+  ## service node did not get the message.
+  return
+    error.code == LightPushErrorCode.NO_PEERS_TO_RELAY and
+    error.desc.get("").startsWith(dialFailure)
+
+proc makesRlnProof*(self: Waku): bool =
+  ## True when this node attaches an RLN proof to the messages that it sends.
+  let plugin = self.node.rlnPlugin.valueOr:
+    return false
+  return not plugin.generateProof.isNil()
 
 func isRlnRejection*(error: ErrorStatus): bool =
   ## True when a publish failure means "the RLN proof was not accepted", so the

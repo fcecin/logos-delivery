@@ -22,6 +22,21 @@ method sendImpl*(
 ): Future[void] {.async, base.} =
   assert false, "Not implemented"
 
+method canAttempt*(
+    self: BaseSendProcessor, task: DeliveryTask
+): bool {.base, gcsafe, raises: [].} =
+  ## True when this processor can try to send `task` at this time.
+  return true
+
+proc chainCanAttempt*(self: BaseSendProcessor, task: DeliveryTask): bool =
+  ## True when a processor of the chain can try to send `task` at this time.
+  var processor = self
+  while not processor.isNil():
+    if processor.canAttempt(task):
+      return true
+    processor = processor.fallbackProcessor
+  return false
+
 proc parkForRlnProofRefresh*(task: DeliveryTask, waku: Waku, errorDesc: string) =
   ## The service refused the task's proof as RLN-invalid: its proof went stale
   ## against a moved merkle root. Schedules a background merkle-path refresh and
