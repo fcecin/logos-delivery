@@ -501,6 +501,45 @@ suite "MessagingClientConf - anonymity level":
       raiseAssert error
     check wakuConf.mixConf.isSome()
 
+suite "MessagingClientConf - from the node CLI":
+  test "an unset flag takes the preset value":
+    var conf = defaultTestWakuNodeConf()
+    conf.preset = "twn"
+    let fromPreset = resolvePreset("twn").valueOr:
+      raiseAssert error
+    let messaging = MessagingClientConf.init(conf).valueOr:
+      raiseAssert error
+    check:
+      messaging.reliabilityEnabled == fromPreset.reliabilityEnabled
+      messaging.sendQueueCapacity.isNone()
+
+  test "a set flag overrides the preset value":
+    var conf = defaultTestWakuNodeConf()
+    conf.preset = "twn"
+    let fromPreset = resolvePreset("twn").valueOr:
+      raiseAssert error
+    conf.reliability = Opt.some(not fromPreset.reliabilityEnabled.get())
+    conf.anonymityLevel = Opt.some(AnonymityLevel.Preferred)
+    conf.sendQueueCapacity = Opt.some(5000'u)
+    conf.backfillEnabled = Opt.some(false)
+    let messaging = MessagingClientConf.init(conf).valueOr:
+      raiseAssert error
+    check:
+      messaging.reliabilityEnabled == conf.reliability
+      messaging.anonymityLevel == Opt.some(AnonymityLevel.Preferred)
+      messaging.sendQueueCapacity == Opt.some(5000'u)
+      messaging.backfillEnabled == Opt.some(false)
+
+  test "an anonymity level above None mounts mix, and mix=false is an error":
+    var conf = defaultTestWakuNodeConf()
+    check:
+      enableMixForAnonymity(conf, Opt.some(AnonymityLevel.None)).isOk()
+      conf.mix.isNone()
+      enableMixForAnonymity(conf, Opt.some(AnonymityLevel.Required)).isOk()
+      conf.mix == Opt.some(true)
+    conf.mix = Opt.some(false)
+    check enableMixForAnonymity(conf, Opt.some(AnonymityLevel.Preferred)).isErr()
+
 suite "LogosDelivery.new - raw kernel construction":
   asyncTest "a kernel-only node mounts the kernel only; start/stop tolerate the nil layers":
     let kernel = defaultTestWakuNodeConf()

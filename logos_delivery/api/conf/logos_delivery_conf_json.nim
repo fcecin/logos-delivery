@@ -95,13 +95,7 @@ proc parseFlatConf(
   # [Legacy flat JSON config] This shape builds its own kernel record, so it
   # applies the level here. `toWakuNodeConf` does the same for the structured
   # shape.
-  if messaging.anonymityLevel.get(AnonymityLevel.None) != AnonymityLevel.None:
-    if kernel.mix == Opt.some(false):
-      return err(
-        "anonymityLevel=" & $messaging.anonymityLevel.get() &
-          " needs mix, but mix=false was set"
-      )
-    kernel.mix = Opt.some(true)
+  ?enableMixForAnonymity(kernel, messaging.anonymityLevel)
 
   return ok(
     LogosDeliveryConf(

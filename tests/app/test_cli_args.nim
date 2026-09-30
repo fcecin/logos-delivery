@@ -9,7 +9,8 @@ import
   nimcrypto/utils,
   secp256k1,
   confutils,
-  stint
+  stint,
+  results
 
 import tools/confutils/cli_args
 
@@ -514,3 +515,37 @@ suite "Waku external config - REST server caches":
     conf.rest = true
     conf.restRelayCacheCapacity = 0
     check conf.toWakuConf().isErr()
+
+suite "Waku external config - messaging flags":
+  test "the messaging flags parse from the command line":
+    let config = WakuNodeConf.load(
+      version = "",
+      cmdLine = @[
+        "--reliability=false", "--anonymity-level=Required",
+        "--rate-limit-enabled=true", "--rate-limit-epoch-sec=60",
+        "--rate-limit-messages-per-epoch=5",
+        "--rate-limit-approached-threshold-percent=90", "--max-parked-age-sec=120",
+        "--send-queue-capacity=5000", "--backfill-enabled=false",
+        "--backfill-request-timeout-seconds=30",
+      ],
+    )
+    check:
+      config.reliability == Opt.some(false)
+      config.anonymityLevel == Opt.some(AnonymityLevel.Required)
+      config.rateLimitEnabled == Opt.some(true)
+      config.rateLimitEpochPeriodSec == Opt.some(60'u64)
+      config.rateLimitMessagesPerEpoch == Opt.some(5'u64)
+      config.rateLimitApproachedThresholdPercent == Opt.some(90'u64)
+      config.maxParkedAgeSec == Opt.some(120'u)
+      config.sendQueueCapacity == Opt.some(5000'u)
+      config.backfillEnabled == Opt.some(false)
+      config.backfillRequestTimeoutSeconds == Opt.some(30'i64)
+
+  test "the messaging flags are unset by default":
+    let config = WakuNodeConf.load(version = "", cmdLine = @[])
+    check:
+      config.reliability.isNone()
+      config.anonymityLevel.isNone()
+      config.rateLimitEnabled.isNone()
+      config.sendQueueCapacity.isNone()
+      config.backfillEnabled.isNone()

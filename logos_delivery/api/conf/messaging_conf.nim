@@ -121,6 +121,20 @@ proc applyMode*(conf: var WakuNodeConf, mode: LogosDeliveryMode): ConfResult[voi
     conf.store = false
   return ok()
 
+proc enableMixForAnonymity*(
+    conf: var WakuNodeConf, anonymityLevel: Opt[AnonymityLevel]
+): ConfResult[void] =
+  ## Mounts mix when the anonymity level is above `None`. The send path can use
+  ## only a mix that the node mounts.
+  if anonymityLevel.get(AnonymityLevel.None) == AnonymityLevel.None:
+    return ok()
+  if conf.mix == Opt.some(false):
+    return err(
+      "anonymityLevel=" & $anonymityLevel.get() & " needs mix, but mix=false was set"
+    )
+  conf.mix = Opt.some(true)
+  return ok()
+
 proc toWakuNodeConf*(
     self: MessagingClientConf, mode: LogosDeliveryMode
 ): ConfResult[WakuNodeConf] =
@@ -188,14 +202,7 @@ proc toWakuNodeConf*(
     conf.rlnRelayUserMessageLimit = self.rlnUserMessageLimit
   if self.rlnDisableValidation.isSome():
     conf.rlnDisableValidation = self.rlnDisableValidation.get()
-  if self.anonymityLevel.get(AnonymityLevel.None) != AnonymityLevel.None:
-    # The send path can only use a mix that the node mounts.
-    if conf.mix == Opt.some(false):
-      return err(
-        "anonymityLevel=" & $self.anonymityLevel.get() &
-          " needs mix, but mix=false was set"
-      )
-    conf.mix = Opt.some(true)
+  ?enableMixForAnonymity(conf, self.anonymityLevel)
   if self.logLevel.isSome():
     conf.logLevel = self.logLevel.get()
   if self.logFormat.isSome():
@@ -251,3 +258,22 @@ proc resolvePreset*(preset: string): ConfResult[MessagingClientConf] =
     return ok(MessagingClientConf())
   let npc = npcOpt.get()
   return ok(MessagingClientConf(reliabilityEnabled: Opt.some(npc.p2pReliability)))
+
+proc init*(
+    T: type MessagingClientConf, conf: WakuNodeConf
+): ConfResult[MessagingClientConf] =
+  ## The messaging config of a node that starts from the CLI. Set flags override
+  ## the values of the network preset.
+  let fromFlags = MessagingClientConf(
+    reliabilityEnabled: conf.reliability,
+    anonymityLevel: conf.anonymityLevel,
+    rateLimitEnabled: conf.rateLimitEnabled,
+    rateLimitEpochPeriodSec: conf.rateLimitEpochPeriodSec,
+    rateLimitMessagesPerEpoch: conf.rateLimitMessagesPerEpoch,
+    rateLimitApproachedThresholdPercent: conf.rateLimitApproachedThresholdPercent,
+    maxParkedAgeSec: conf.maxParkedAgeSec,
+    sendQueueCapacity: conf.sendQueueCapacity,
+    backfillEnabled: conf.backfillEnabled,
+    backfillRequestTimeoutSeconds: conf.backfillRequestTimeoutSeconds,
+  )
+  return ok(merge(?resolvePreset(conf.preset), fromFlags))
