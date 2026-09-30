@@ -29,7 +29,8 @@ import
   ../../waku_lightpush as lightpush_protocol,
   ../peer_manager,
   ../../common/rate_limit/setting,
-  ../../rln
+  ../../rln,
+  ../../rln/rln_plugin
 
 logScope:
   topics = "waku node lightpush api"
@@ -153,13 +154,8 @@ proc legacyLightpushPublish*(
   # the downstream ensureTimestampSet then becomes a no-op.
   let message = ensureTimestampSet(message)
 
-  let rln =
-    if node.rln.isNil():
-      Opt.none(RlnEvm)
-    else:
-      Opt.some(node.rln)
-  let msgWithProof = (await checkAndGenerateRLNProof(rln, message)).valueOr:
-    return err("failed call checkAndGenerateRLNProof from lightpush: " & error)
+  let msgWithProof = (await attachProof(node.rlnPlugin, message)).valueOr:
+    return err("failed to attach RLN proof: " & $error)
 
   try:
     let pubsubForPublish = resolveLegacyPubsubTopic(
@@ -171,15 +167,16 @@ proc legacyLightpushPublish*(
       await internalLegacyLightpushPublish(node, pubsubForPublish, msgWithProof, peer)
 
     # Legacy has no status codes, so string-match the RLN error to detect a
-    # stale merkle proof path. Schedule the refresh and hand the error back:
-    # retrying is the caller's decision, the same way the non-legacy path
-    # behaves. A retry regenerates the proof against the refreshed cache.
-    if publishResult.isOk() or rln.isNone() or
-        not publishResult.error.contains(RlnValidatorErrorMsg):
+    # rejected proof. Ask the backend to refresh what proofs are built against
+    # and hand the error back: retrying is the caller's decision, the same way
+    # the non-legacy path behaves. A backend without a refresh hook gets the
+    # error back unchanged.
+    if publishResult.isOk() or not publishResult.error.contains(RlnValidatorErrorMsg):
+      return publishResult
+    if not node.rlnPlugin.notifyProofRejected():
       return publishResult
 
-    debug "legacy lightpush send rejected as RLN-invalid; scheduling merkle proof refresh"
-    rln.get().groupManager.scheduleMerkleProofRefresh()
+    debug "legacy lightpush send rejected as RLN-invalid; RLN proof refresh scheduled"
     return err(RlnProofRefreshScheduledMsg & ": " & publishResult.error)
   except CatchableError:
     return err(getCurrentExceptionMsg())
@@ -340,13 +337,10 @@ proc lightpushPublish*(
   # the downstream ensureTimestampSet then becomes a no-op.
   let message = ensureTimestampSet(message)
 
-  let rln =
-    if node.rln.isNil():
-      Opt.none(RlnEvm)
-    else:
-      Opt.some(node.rln)
-  let msgWithProof = (await checkAndGenerateRLNProof(rln, message)).valueOr:
-    return lighpushErrorResult(LightPushErrorCode.OUT_OF_RLN_PROOF, error)
+  let msgWithProof = (await attachProof(node.rlnPlugin, message)).valueOr:
+    return lighpushErrorResult(
+      LightPushErrorCode.OUT_OF_RLN_PROOF, "failed to attach RLN proof: " & $error
+    )
 
   let firstResult =
     await lightpushPublishHandler(node, pubsubForPublish, msgWithProof, toPeer, mixify)
@@ -354,7 +348,7 @@ proc lightpushPublish*(
   # Gate the refresh on unambiguously RLN-related failures: 504
   # (OUT_OF_RLN_PROOF) is always RLN; 420 (INVALID_MESSAGE) also covers non-RLN
   # rejections (e.g. oversized), so additionally require RlnValidatorErrorMsg.
-  if firstResult.isOk() or rln.isNone():
+  if firstResult.isOk():
     return firstResult
   let isRlnRelatedFailure =
     firstResult.error.code == LightPushErrorCode.OUT_OF_RLN_PROOF or (
@@ -364,12 +358,14 @@ proc lightpushPublish*(
   if not isRlnRelatedFailure:
     return firstResult
 
-  # Schedule the refresh and return immediately, normalized to 504 with
-  # RlnProofRefreshScheduledMsg so callers can tell "stale proof, retry" from a
-  # permanent rejection. A retry regenerates against the refreshed cache.
-  debug "lightpush send rejected as RLN-invalid; scheduling merkle proof refresh",
+  # Ask the backend to refresh what proofs are built against and return
+  # immediately, normalized to 504 with RlnProofRefreshScheduledMsg so callers
+  # can tell "stale proof, retry" from a permanent rejection. A backend without
+  # a refresh hook gets the result back unchanged.
+  if not node.rlnPlugin.notifyProofRejected():
+    return firstResult
+  debug "lightpush send rejected as RLN-invalid; RLN proof refresh scheduled",
     statusCode = $firstResult.error.code
-  rln.get().groupManager.scheduleMerkleProofRefresh()
   return lighpushErrorResult(
     LightPushErrorCode.OUT_OF_RLN_PROOF,
     RlnProofRefreshScheduledMsg & ": " &

@@ -7,7 +7,7 @@
 ## so the messaging layer never inspects `waku.node` directly.
 {.push raises: [].}
 
-import std/[tables, times, strutils]
+import std/[tables, strutils]
 import results, chronos, libp2p/crypto/rng, libp2p_mix/pool
 
 import logos_delivery/waku/waku
@@ -15,17 +15,17 @@ import
   logos_delivery/waku/[
     waku_core,
     node/waku_node,
+    rln/rln_api,
+    rln/rln_plugin,
     node/waku_node/lightpush,
     node/peer_manager,
     waku_relay/protocol,
     rln,
-    rln/rln_lez/rln_lez,
     waku_lightpush/common,
     waku_lightpush/rpc,
     waku_lightpush/client,
     waku_lightpush/callbacks,
     waku_mix,
-    requests/rln_requests,
   ]
 
 # WakuLightPushResult, PushMessageHandler, LightPushErrorCode (common) plus the
@@ -46,52 +46,21 @@ proc relayPushHandler*(self: Waku): PushMessageHandler =
   ## proof is attached by the messaging layer via `attachRlnProof`.
   return getRelayPushHandler(self.node.wakuRelay)
 
+proc rlnEpochQuota*(
+    self: Waku, timestamp: uint64
+): Future[Result[EpochQuota, RlnError]] {.async.} =
+  ## The mounted RLN backend's budget snapshot for the epoch derived from
+  ## `timestamp` (Unix seconds). An error without a backend that keeps one.
+  return await epochQuota(self.node.rlnPlugin, timestamp)
+
 proc attachRlnProof*(
     self: Waku, message: WakuMessage
 ): Future[Result[WakuMessage, string]] {.async.} =
   ## Returns `message` carrying an RLN proof. A message that already has one is
   ## returned untouched, so retrying a task neither redraws a nonce nor changes
   ## the bytes. Without RLN mounted the message passes through unproven.
-  ##
-  ## Uses the root-refreshing generator: a message can wait in the send
-  ## service's task cache while the group root moves on chain, so the proof is
-  ## validated against the acceptable-root window and regenerated once against a
-  ## refetched merkle path if it went stale.
-  if message.proof.len > 0:
-    return ok(message)
-
-  if not self.node.rlnLez.isNil():
-    let rlnLez = self.node.rlnLez
-    if message.timestamp <= 0:
-      return
-        err("Cannot attach an RLN proof to a message that has not been timestamped")
-    let timestamp = uint64(message.timestamp div 1_000_000_000)
-
-    if not rlnLez.membershipVerified:
-      let status = (await rlnLez.verifyMembership()).valueOr:
-        return err("Failed to verify RLN membership: " & error)
-      if not rlnLez.membershipVerified:
-        return err("The node does not have a usable RLN membership: " & $status)
-
-    let generated = (
-      await RequestGenerateRlnProof.request(self.brokerCtx, message, timestamp)
-    ).valueOr:
-      return err("Failed to attach RLN proof: " & error)
-    var msgWithProof = message
-    msgWithProof.proof = generated.proof
-    return ok(msgWithProof)
-
-  if self.node.rln.isNil():
-    return ok(message)
-
-  var msgWithProof = message
-  msgWithProof.proof = (
-    await self.node.rln.generateRLNProofWithRootRefresh(
-      message.toRLNSignal(), float64(getTime().toUnix())
-    )
-  ).valueOr:
-    return err("failed to attach RLN proof: " & error)
-
+  let msgWithProof = (await attachProof(self.node.rlnPlugin, message)).valueOr:
+    return err("Failed to attach RLN proof: " & $error)
   return ok(msgWithProof)
 
 func isRlnRejection*(error: ErrorStatus): bool =
@@ -109,15 +78,11 @@ func isRlnRejection*(error: ErrorStatus): bool =
       error.desc.get("").contains(RlnValidatorErrorMsg)
     )
 
-proc onRlnProofRejected*(self: Waku) =
-  ## Called when a publish was rejected as RLN-invalid. Starts refetching the
-  ## merkle path in the background, so the next proof generated for the message
-  ## is built against a fresh one. Non-blocking: the send service's own loop is
-  ## what retries, and it must not stall waiting on an RPC round trip.
-  if self.node.rln.isNil():
-    return
-
-  self.node.rln.groupManager.scheduleMerkleProofRefresh()
+proc onRlnProofRejected*(self: Waku): bool =
+  ## Tells the mounted RLN backend its proof was rejected. True when the
+  ## backend will refresh what proofs are built against; see
+  ## `notifyProofRejected`.
+  return self.node.rlnPlugin.notifyProofRejected()
 
 proc lightpushPeerAvailable*(self: Waku, shard: PubsubTopic): bool =
   ## True if a lightpush service peer is available for `shard`.

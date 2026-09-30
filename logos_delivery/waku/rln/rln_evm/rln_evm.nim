@@ -10,8 +10,7 @@ import
   web3/eth_api_types,
   eth/keys,
   results,
-  stew/[byteutils, arrayops],
-  brokers/broker_context
+  stew/[byteutils, arrayops]
 
 import
   ./group_manager,
@@ -19,17 +18,16 @@ import
   ./conversion_utils,
   ./constants,
   ./protocol_types,
-  ./protocol_metrics,
+  ../protocol_metrics,
   ./nonce_manager,
   ./types,
   ./config,
   ./proof,
   ./nullifier_log
 
-import
-  logos_delivery/waku/
-    [common/error_handling, waku_core, requests/rln_requests, waku_keystore]
-import logos_delivery/waku/rln/rln_lez/types as rln_api_types
+import logos_delivery/waku/[common/error_handling, waku_core, waku_keystore]
+import logos_delivery/waku/rln/types as rln_api_types
+import logos_delivery/waku/rln/rln_plugin
 
 # Re-export the submodules so existing `import rln`
 # callers see the moved symbols
@@ -47,7 +45,6 @@ proc stop*(rlnEvm: RlnEvm) {.async: (raises: [CancelledError]).} =
 
   # stop the group sync, and flush data to tree db
   info "stopping rln"
-  RequestGenerateRlnProof.clearProvider(rlnEvm.brokerCtx)
   await rlnEvm.groupManager.stop()
 
 proc validateMessage*(
@@ -222,23 +219,7 @@ proc mount(
     rlnMaxEpochGap: max(uint64(MaxClockGapSeconds / float64(conf.epochSizeSec)), 1),
     rlnMaxTimestampGap: uint64(MaxClockGapSeconds),
     onFatalErrorAction: conf.onFatalErrorAction,
-    brokerCtx: globalBrokerContext(),
   )
-
-  RequestGenerateRlnProof.setProvider(
-    rlnEvm.brokerCtx,
-    proc(
-        message: WakuMessage, timestamp: uint64
-    ): Future[Result[RequestGenerateRlnProof, string]] {.async.} =
-      let proofBytes = (
-        await rlnEvm.generateRLNProofWithRootRefresh(
-          message.toRLNSignal(), float64(timestamp)
-        )
-      ).valueOr:
-        return err("Could not create RLN proof: " & error)
-      return ok(RequestGenerateRlnProof(proof: proofBytes)),
-  ).isOkOr:
-    return err("Proof generator provider cannot be set: " & $error)
 
   # Start epoch monitoring in the background
   rlnEvm.epochMonitorFuture = monitorEpochs(rlnEvm)
@@ -261,6 +242,93 @@ proc isReady*(rlnEvm: RlnEvm): Future[bool] {.async: (raises: [CancelledError]).
       err = getCurrentExceptionMsg()
     return false
 
+proc toRlnPlugin*(rlnEvm: RlnEvm): RlnPlugin =
+  ## The node's handle on this backend (`node.rlnPlugin`). The closures
+  ## capture this instance, so each node reaches only its own backend.
+  proc stopBackend(): Future[void] {.async.} =
+    try:
+      await rlnEvm.stop() ## this can raise an exception
+    except Exception:
+      error "exception stopping the node", error = getCurrentExceptionMsg()
+
+  proc backendReady(): Future[bool] {.async: (raises: [CancelledError]).} =
+    return await rlnEvm.isReady()
+
+  proc proofRejected() =
+    rlnEvm.groupManager.scheduleMerkleProofRefresh()
+
+  proc validate(
+      message: WakuMessage
+  ): Future[Result[ValidationResult, RlnError]] {.async.} =
+    ## Drops nullifier-log epochs outside the accepted window, then validates
+    ## the proof and logs it if valid; the in-node nullifier log does duplicate
+    ## and spam detection.
+    rlnEvm.clearNullifierLog()
+
+    let msgProof = protocol_types.RateLimitProof.init(message.proof).valueOr:
+      trace "Rln validator reject", error = error
+      return ok(ValidationResult(verdict: ProofVerdict.Invalid))
+
+    let validationRes = await rlnEvm.validateMessageAndUpdateLog(message)
+    trace "Rln proof checked",
+      validation = validationRes,
+      root = inHex(msgProof.merkleRoot),
+      shareX = inHex(msgProof.shareX),
+      shareY = inHex(msgProof.shareY),
+      nullifier = inHex(msgProof.nullifier)
+
+    let verdict =
+      case validationRes
+      of MessageValidationResult.Valid: ProofVerdict.Valid
+      of MessageValidationResult.Invalid: ProofVerdict.Invalid
+      of MessageValidationResult.Spam: ProofVerdict.RateLimitViolation
+    return ok(ValidationResult(verdict: verdict))
+
+  proc generate(message: WakuMessage): Future[Result[seq[byte], RlnError]] {.async.} =
+    ## Uses the wall clock and the root-refreshing generator: a message can
+    ## wait in the send service's task cache while the group root moves on
+    ## chain.
+    let proof = (
+      await rlnEvm.generateRLNProofWithRootRefresh(
+        message.toRLNSignal(), float64(getTime().toUnix())
+      )
+    ).valueOr:
+      return err(RlnError.transient(error))
+    return ok(proof)
+
+  proc quota(timestamp: uint64): Future[Result[EpochQuota, RlnError]] {.async.} =
+    ## The membership has a single implicit scope, and the nonce manager
+    ## tracks spent budget only for the current epoch.
+    let limit = rlnEvm.groupManager.userMessageLimit.valueOr:
+      return err(RlnError.notReady("the user message limit is not set"))
+
+    let rateLimit = uint64(limit)
+    let epoch = rlnEvm.calcEpoch(timestamp.float64)
+    let nm = rlnEvm.nonceManager
+    let spent =
+      if epoch != rlnEvm.getCurrentEpoch():
+        0'u64
+      elif getTime().toUnixFloat() - nm.lastNonceTime >= nm.epoch:
+        0'u64
+      else:
+        min(nm.nextNonce, rateLimit)
+
+    return ok(
+      EpochQuota(
+        epochIndex: fromEpoch(epoch), rateLimit: rateLimit, remaining: rateLimit - spent
+      )
+    )
+
+  return RlnPlugin(
+    name: "onchain",
+    stop: stopBackend,
+    isReady: backendReady,
+    onProofRejected: proofRejected,
+    validateProof: validate,
+    generateProof: generate,
+    getEpochQuota: quota,
+  )
+
 proc new*(
     T: type RlnEvm,
     conf: WakuRlnConfig,
@@ -273,3 +341,42 @@ proc new*(
     return await mount(conf, registrationHandler)
   except CatchableError:
     return err("could not mount the rln-relay protocol: " & getCurrentExceptionMsg())
+
+proc mountOnchain*(
+    conf: WakuRlnConfig, registrationHandler = Opt.none(RegistrationHandler)
+): Future[Result[RlnEvm, string]] {.async.} =
+  ## `RlnEvm.new` plus the contract-limit check, shared by this backend's
+  ## descriptor and code that mounts the backend directly (tests, example
+  ## apps).
+  let rln = ?(await RlnEvm.new(conf, registrationHandler))
+  if conf.userMessageLimit > rln.groupManager.rlnRelayMaxMessageLimit:
+    error "Rln-user-message-limit can't exceed the MAX_MESSAGE_LIMIT in the rln contract"
+  return ok(rln)
+
+proc rlnEvmDescriptor*(
+    conf: Opt[RlnConf], onFatalErrorAction: OnFatalErrorHandler
+): RlnPluginDescriptor =
+  ## Selected when on-chain RLN configuration came from the CLI or a preset.
+  proc present(): bool =
+    conf.isSome()
+
+  proc mount(): Future[Result[RlnPlugin, string]] {.async.} =
+    let evmConf = conf.get()
+    let rlnConf = WakuRlnConfig(
+      dynamic: evmConf.dynamic,
+      credIndex: evmConf.credIndex,
+      ethContractAddress: evmConf.ethContractAddress,
+      chainId: evmConf.chainId,
+      ethClientUrls: evmConf.ethClientUrls,
+      creds: evmConf.creds,
+      userMessageLimit: evmConf.userMessageLimit,
+      epochSizeSec: evmConf.epochSizeSec,
+      onFatalErrorAction: onFatalErrorAction,
+    )
+    let rln = (await mountOnchain(rlnConf)).valueOr:
+      return err(
+        "failed to mount waku RLN relay protocol: failed to set rln validator: " & error
+      )
+    return ok(rln.toRlnPlugin())
+
+  return RlnPluginDescriptor(name: "onchain", matches: present, mount: mount)

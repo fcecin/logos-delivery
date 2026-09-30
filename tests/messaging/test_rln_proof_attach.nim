@@ -7,7 +7,6 @@ import
   logos_delivery/waku/node/waku_node,
   logos_delivery/waku/node/waku_node/relay,
   logos_delivery/waku/api/publish,
-  logos_delivery/waku/api/rln as rln_api,
   logos_delivery/waku/factory/waku_conf,
   logos_delivery/waku/rln/rln_lez/[rln_lez, transport]
 import
@@ -57,17 +56,17 @@ suite "SendService RLN proof attach":
   asyncTest "rlnEpochQuota fails when RLN is not mounted":
     ## The rate limit manager reads the failure as "use the local fallback".
     let waku = (await Waku.new(testConf())).expect("Waku.new")
-    check (await waku.rlnEpochQuota(MembershipScope(), nowSec())).isErr()
+    check (await waku.rlnEpochQuota(nowSec())).isErr()
 
   asyncTest "rlnEpochQuota reads the RLN plugin's budget when it is mounted":
     let waku = (await Waku.new(testConf())).expect("Waku.new")
     check logosdelivery_rln_set_plugin(addr lezPlugin, nil) == 0
     defer:
       discard logosdelivery_rln_set_plugin(nil, nil)
-    waku.node.rlnLez = RlnLez.init()
+    waku.node.rlnPlugin = Opt.some(RlnLez.init().toRlnPlugin())
 
-    let quota = (await waku.rlnEpochQuota(MembershipScope(), nowSec())).valueOr:
-      raiseAssert error
+    let quota = (await waku.rlnEpochQuota(nowSec())).valueOr:
+      raiseAssert $error
     check:
       quota.epochIndex == 42
       quota.rateLimit == 100
@@ -76,6 +75,7 @@ suite "SendService RLN proof attach":
 suite "SendService RLN proof attach - RLN mounted":
   var
     waku {.threadvar.}: Waku
+    onchainRln {.threadvar.}: RlnEvm
     anvilProc {.threadvar.}: Process
     manager {.threadvar.}: RlnEvmGroupManager
 
@@ -84,30 +84,28 @@ suite "SendService RLN proof attach - RLN mounted":
     manager = await setupRlnEvm(deployContracts = false)
 
     waku = (await Waku.new(testConf())).expect("Waku.new")
-    (
-      await waku.node.setRlnValidator(
-        getWakuRlnConfig(
-          manager = manager,
-          userMessageLimit = 20,
-          index = MembershipIndex(1),
-          epochSizeSec = 600,
-        )
+    onchainRln = await waku.node.mountOnchainRln(
+      getWakuRlnConfig(
+        manager = manager,
+        userMessageLimit = 20,
+        index = MembershipIndex(1),
+        epochSizeSec = 600,
       )
-    ).expect("setRlnValidator")
+    )
 
     let credentials = generateCredentials()
     (
-      await cast[RlnEvmGroupManager](waku.node.rln.groupManager).register(
+      await cast[RlnEvmGroupManager](onchainRln.groupManager).register(
         credentials, UserMessageLimit(20)
       )
     ).isOkOr:
       assert false, "failed to register RLN credentials: " & error
 
   asyncTeardown:
-    ## The RLN proof-generator provider is registered on the global broker
-    ## context; without stopping RLN it leaks into the next test's setup.
+    ## Stops the on-chain backend's background work (group sync, epoch
+    ## monitor) so it does not outlive the test.
     try:
-      await waku.node.rln.stop()
+      await onchainRln.stop()
     except Exception:
       assert false, "failed to stop RLN: " & getCurrentExceptionMsg()
     stopAnvil(anvilProc)
@@ -120,11 +118,9 @@ suite "SendService RLN proof attach - RLN mounted":
   asyncTest "rlnEpochQuota's remaining budget drops as proofs spend it":
     ## Wires the rate limit manager to RLN: admission stops at
     ## `remaining == 0` and the window rolls on `epochIndex`.
-    let before =
-      (await waku.rlnEpochQuota(MembershipScope(), nowSec())).expect("rlnEpochQuota")
+    let before = (await waku.rlnEpochQuota(nowSec())).expect("rlnEpochQuota")
     discard (await waku.attachRlnProof(testMessage())).expect("attachRlnProof")
-    let after =
-      (await waku.rlnEpochQuota(MembershipScope(), nowSec())).expect("rlnEpochQuota")
+    let after = (await waku.rlnEpochQuota(nowSec())).expect("rlnEpochQuota")
     check:
       before.rateLimit == 20'u64 # the mounted userMessageLimit
       before.remaining == 20'u64

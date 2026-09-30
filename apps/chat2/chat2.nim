@@ -49,6 +49,7 @@ import
 
 import libp2p/protocols/pubsub/rpc/messages, libp2p/protocols/pubsub/pubsub
 import logos_delivery/waku/rln
+import logos_delivery/waku/rln/rln_plugin
 
 const Help = """
   Commands: /[?|help|connect|nick|exit]
@@ -70,6 +71,7 @@ type Chat = ref object
   nick: string # nickname for this chat session
   prompt: bool # chat prompt is showing
   contentTopic: string # default content topic for chat messages
+  rln: RlnEvm # on-chain RLN backend; nil when RLN is off
 
 type
   PrivateKey* = crypto.PrivateKey
@@ -189,11 +191,10 @@ proc publish(c: Chat, line: string) {.async.} =
     timestamp: getNanosecondTime(time),
   )
 
-  if not isNil(c.node.rln):
+  if not isNil(c.rln):
     # for future version when we support more than one rln protected content topic,
     # we should check the message content topic as well
-    let proofRes =
-      await c.node.rln.generateRLNProof(message.toRLNSignal(), float64(time))
+    let proofRes = waitFor c.rln.generateRLNProof(message.toRLNSignal(), float64(time))
     if proofRes.isErr():
       info "could not append rate limit proof to the message"
     else:
@@ -204,13 +205,13 @@ proc publish(c: Chat, line: string) {.async.} =
         return
       # TODO move it to log after dogfooding
       let msgEpoch = fromEpoch(proof.epoch)
-      if fromEpoch(c.node.rln.lastEpoch) == msgEpoch:
+      if fromEpoch(c.rln.lastEpoch) == msgEpoch:
         echo "--rln epoch: ",
           msgEpoch, " ⚠️ message rate violation! you are spamming the network!"
       else:
         echo "--rln epoch: ", msgEpoch
       # update the last epoch
-      c.node.rln.lastEpoch = proof.epoch
+      c.rln.lastEpoch = proof.epoch
 
     try:
       if not c.node.wakuLegacyLightPush.isNil():
@@ -552,12 +553,14 @@ proc processInput(rfd: AsyncFD, rng: crypto.Rng) {.async.} =
         epochSizeSec: conf.rlnEpochSizeSec,
       )
 
-      (await node.setRlnValidator(rlnConf, spamHandler = Opt.some(spamHandler))).isOkOr:
+      let onchainRln = (waitFor mountOnchain(rlnConf)).valueOr:
         error "failed to set rln validator", error = error
         quit(QuitFailure)
+      node.mountRln(onchainRln.toRlnPlugin(), RlnCommonConf(), Opt.some(spamHandler))
+      chat.rln = onchainRln
 
-      let membershipIndex = node.rln.groupManager.membershipIndex.get()
-      let identityCredential = node.rln.groupManager.idCredentials.get()
+      let membershipIndex = onchainRln.groupManager.membershipIndex.get()
+      let identityCredential = onchainRln.groupManager.idCredentials.get()
       echo "your membership index is: ", membershipIndex
       echo "your rln identity commitment key is: ",
         identityCredential.idCommitment.inHex()

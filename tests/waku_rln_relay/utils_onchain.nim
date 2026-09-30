@@ -20,8 +20,15 @@ import
   results
 
 import
-  logos_delivery/waku/
-    [rln, rln/rln_evm/protocol_types, rln/rln_evm/constants, rln/rln_evm/bindings],
+  logos_delivery/waku/[
+    rln,
+    rln/rln_plugin,
+    rln/rln_evm/protocol_types,
+    rln/rln_evm/constants,
+    rln/rln_evm/bindings,
+    node/waku_node,
+    node/waku_node/relay,
+  ],
   ../testlib/common
 
 const CHAIN_ID* = 1234'u256
@@ -777,5 +784,18 @@ proc buildRlnEvm*(
       raiseAssert errStr
     ,
   )
+
+proc mountOnchainRln*(
+    node: WakuNode,
+    conf: WakuRlnConfig,
+    spamHandler = Opt.none(SpamHandler),
+    registrationHandler = Opt.none(RegistrationHandler),
+): Future[RlnEvm] {.async.} =
+  ## Mounts the on-chain RLN backend built from `conf` on `node` and returns
+  ## it, for tests that use the backend directly.
+  let rln = (await mountOnchain(conf, registrationHandler)).valueOr:
+    raise newException(CatchableError, "failed to set rln validator: " & error)
+  node.mountRln(rln.toRlnPlugin(), RlnCommonConf(), spamHandler)
+  return rln
 
 {.pop.}

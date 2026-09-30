@@ -10,10 +10,11 @@
 import std/json
 import chronos, chronicles, results
 import stew/byteutils
-import ./types, ./transport, ./config
-import ../rln_api
+import logos_delivery/waku/waku_core/message/message
+import ../types, ../signal, ./transport
+import ../rln_api, ../rln_plugin
 
-export types, config
+export types
 
 logScope:
   topics = "waku rln lez"
@@ -91,5 +92,85 @@ proc verifyMembership*(
   if state.status.isUsable():
     w.membershipVerified = true
   return ok(state.status)
+
+proc toRlnPlugin*(lez: RlnLez): RlnPlugin =
+  ## The node's handle on this backend (`node.rlnPlugin`). The host owns the
+  ## backend's lifecycle, health and proof refresh, so those closures stay nil.
+  proc validate(
+      message: WakuMessage
+  ): Future[Result[ValidationResult, RlnError]] {.async.} =
+    ## Local checks, then the host's verdict over `./transport`.
+    if message.timestamp < 0:
+      trace "RLN validator reject", error = "Negative message timestamp"
+      return ok(ValidationResult(verdict: ProofVerdict.Invalid))
+    if message.proof.len == 0:
+      trace "RLN validator reject", error = "Message has no RLN proof"
+      return ok(ValidationResult(verdict: ProofVerdict.Invalid))
+    let timestamp = uint64(message.timestamp div 1_000_000_000)
+
+    let proofJson = $(%*{"proof": message.proof.toHex()})
+    let response = (
+      await rlnValidateProof(message.toRLNSignal().toHex(), timestamp, proofJson)
+    ).valueOr:
+      return err(toRlnError(error))
+    return parseRlnValidationResult(response)
+
+  proc generate(message: WakuMessage): Future[Result[seq[byte], RlnError]] {.async.} =
+    ## The membership gate, then the host's proof over `./transport`. A passed
+    ## gate is cached on `lez`, which `nodeStarted` below also sets.
+    if message.timestamp <= 0:
+      return err(RlnError.permanent("the message has not been timestamped"))
+    let timestamp = uint64(message.timestamp div 1_000_000_000)
+
+    if not lez.membershipVerified:
+      let status = (await lez.verifyMembership()).valueOr:
+        return err(RlnError.transient("could not verify the RLN membership: " & error))
+      if not lez.membershipVerified:
+        return err(RlnError.notReady("no usable RLN membership: " & $status))
+
+    let response = (await rlnGenerateProof(message.toRLNSignal().toHex(), timestamp)).valueOr:
+      return err(toRlnError(error))
+    return parseRlnGeneratedProof(response)
+
+  proc quota(timestamp: uint64): Future[Result[EpochQuota, RlnError]] {.async.} =
+    return await lez.getEpochQuota(timestamp)
+
+  proc nodeStarted(): Future[void] {.async: (raises: [CancelledError]).} =
+    ## The node's first call to the host. Membership only gates sending, so no
+    ## outcome stops startup: a validate-only node has no membership, and a
+    ## Pending one can settle later. An error means the host did not answer:
+    ## NotReady when its backend is not initialised, Transient for a timeout.
+    ## A pass is cached on `lez` so the send path skips the registry read;
+    ## anything else is retried per send.
+    let membershipRes = await lez.verifyMembership()
+    if membershipRes.isErr():
+      warn "RLN backend did not answer the startup membership check; sends and proof validation fail until it does",
+        error = membershipRes.error
+    elif not membershipRes.get().isUsable():
+      notice "No usable RLN membership; proof validation is unaffected, sends fail until it is active",
+        status = $membershipRes.get()
+    else:
+      info "RLN membership verified", status = $membershipRes.get()
+
+  return RlnPlugin(
+    name: "external",
+    validateProof: validate,
+    generateProof: generate,
+    getEpochQuota: quota,
+    onNodeStarted: nodeStarted,
+  )
+
+proc rlnLezDescriptor*(): RlnPluginDescriptor =
+  ## Selected when the host has installed its RLN plugin over the C ABI
+  ## (`logosdelivery_rln_set_plugin`); the host owns the backend's parameters.
+  ## Registration is all that selection checks: mounting makes no call to the
+  ## host, so whether its backend is initialised first shows in `nodeStarted`.
+  proc present(): bool =
+    rlnPluginRegistered()
+
+  proc mount(): Future[Result[RlnPlugin, string]] {.async.} =
+    return ok(RlnLez.init().toRlnPlugin())
+
+  return RlnPluginDescriptor(name: "external", matches: present, mount: mount)
 
 {.pop.}

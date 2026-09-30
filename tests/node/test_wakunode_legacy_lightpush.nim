@@ -17,6 +17,7 @@ import
     waku_lightpush_legacy/common,
     waku_lightpush_legacy/protocol_metrics,
     rln,
+    rln/rln_plugin,
     rln/rln_evm/constants,
   ],
   ../testlib/[wakucore, wakunode, testasync, futures, testutils],
@@ -98,6 +99,7 @@ suite "Waku Legacy Lightpush - End To End":
 suite "RLN Proofs as a Lightpush Service":
   var
     server {.threadvar.}: WakuNode
+    serverRln {.threadvar.}: RlnEvm
     client {.threadvar.}: WakuNode
     anvilProc {.threadvar.}: Process
     manager {.threadvar.}: RlnEvmGroupManager
@@ -133,11 +135,11 @@ suite "RLN Proofs as a Lightpush Service":
 
     (await server.mountRelay()).isOkOr:
       assert false, "Failed to mount relay"
-    (await server.setRlnValidator(wakuRlnConfig)).expect("setRlnValidator")
+    serverRln = await server.mountOnchainRln(wakuRlnConfig)
     check (await server.mountLegacyLightPush()).isOk()
     client.mountLegacyLightPushClient()
 
-    let manager1 = cast[RlnEvmGroupManager](server.rln.groupManager)
+    let manager1 = cast[RlnEvmGroupManager](serverRln.groupManager)
     let idCredentials1 = generateCredentials()
 
     (await manager1.register(idCredentials1, UserMessageLimit(20))).isOkOr:
@@ -169,9 +171,8 @@ suite "RLN Proofs as a Lightpush Service":
 
       # Attach the RLN proof. In production the client mounts RLN and generates the
       # proof in legacyLightpushPublish; here we generate it using the server's RLN
-      # instance since both ends share group state via the in-memory manager.
-      let msgWithProof =
-        (await checkAndGenerateRLNProof(Opt.some(server.rln), message)).get()
+      # plugin since both ends share group state via the in-memory manager.
+      let msgWithProof = (await attachProof(server.rlnPlugin, message)).get()
 
       # When the client publishes a message
       let publishResponse = await lightpushClient.legacyLightpushPublish(
@@ -235,13 +236,12 @@ suite "RLN Proofs as a Lightpush Service":
         response.isErr()
         response.error == "unrelated failure"
 
-    asyncTest "no refresh scheduled when node.rln is nil":
-      # Detach RLN so the RLN-rejection branch short-circuits on rln.isNone()
-      # even when the error string carries RlnValidatorErrorMsg. Restore before
-      # teardown so server.stop() sees the same object graph it was
-      # constructed with.
-      let savedRln = server.rln
-      server.rln = nil
+    asyncTest "no refresh scheduled when RLN is not mounted":
+      # Detach the RLN backend so there is no refresh hook to call, even when
+      # the error string carries RlnValidatorErrorMsg. Restore before teardown
+      # so server.stop() stops the backend it was constructed with.
+      let savedPlugin = server.rlnPlugin
+      reset(server.rlnPlugin)
 
       var callCount = 0
       let stub: PushMessageHandler = proc(
@@ -255,11 +255,12 @@ suite "RLN Proofs as a Lightpush Service":
         Opt.some(pubsubTopic), message, server.peerInfo.toRemotePeerInfo()
       )
 
-      server.rln = savedRln
+      server.rlnPlugin = savedPlugin
 
       check:
         callCount == 1
         response.isErr()
+        not response.error.contains(RlnProofRefreshScheduledMsg)
 
 suite "Waku Legacy Lightpush message delivery":
   asyncTest "Legacy lightpush message flow succeed":

@@ -27,13 +27,13 @@ import
     waku_filter_v2,
     waku_archive,
     waku_store_sync,
-    rln,
-    rln/rln_lez/config as rln_lez_config,
+    rln/markers,
+    rln/protocol_metrics,
+    rln/rln_plugin,
     node/waku_node,
     node/subscription_manager,
     node/peer_manager,
-    rln/rln_evm/protocol_types,
-    requests/rln_requests,
+    rln/types,
   ]
 import logos_delivery/api/events/kernel_events # MessageSeenEvent
 
@@ -186,143 +186,70 @@ proc mountRelay*(
 
   ## Waku RLN Relay
 
-proc setRlnValidator*(
+proc registerRlnValidator(
     node: WakuNode,
-    rlnConf: WakuRlnConfig | WakuRlnLezConfig,
+    plugin: RlnPlugin,
+    commonConf: RlnCommonConf,
     spamHandler = Opt.none(SpamHandler),
-    registrationHandler = Opt.none(RegistrationHandler),
-): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+) =
+  ## Registers the backend-agnostic RLN message validator. Verdicts come from
+  ## the mounted backend's `validateProof`; the validator never names a backend.
   info "Setting rln validator"
 
-  when rlnConf is WakuRlnLezConfig:
-    if node.wakuRelay.isNil():
-      info "WakuRelay not mounted; RLN validator not set"
-      return ok()
+  if node.wakuRelay.isNil():
+    info "WakuRelay not mounted; RLN validator not set"
+    return
 
-    if rlnConf.disableValidation:
-      # Temporary RLN phase-in: published messages still carry proofs, but
-      # received messages pass through unchecked.
-      info "RLN proof validation is disabled; not registering the RLN validator"
-      return ok()
+  if commonConf.disableValidation:
+    # Temporary RLN phase-in: published messages still carry proofs, but
+    # received messages pass through unchecked.
+    info "RLN proof validation is disabled; not registering the RLN validator"
+    return
 
-    # Maps the module's verdict (RequestValidateRlnProof) to pubsub.ValidationResult.
-    proc validator(
-        topic: string, message: WakuMessage
-    ): Future[pubsub.ValidationResult] {.async.} =
-      trace "Rln-lez topic validator is called"
+  let validateProof = plugin.validateProof
+  if validateProof.isNil():
+    info "RLN backend has no proof validation; RLN validator not set"
+    return
 
-      if message.timestamp < 0:
-        trace "Rln-lez validator reject", error = "Negative message timestamp"
-        return pubsub.ValidationResult.Reject
-      if message.proof.len == 0:
-        trace "Rln-lez validator reject", error = "Message has no RLN proof"
-        return pubsub.ValidationResult.Reject
-      let timestamp = uint64(message.timestamp div 1_000_000_000)
+  proc validator(
+      topic: string, message: WakuMessage
+  ): Future[pubsub.ValidationResult] {.async.} =
+    trace "RLN topic validator is called"
 
-      let res = (
-        await RequestValidateRlnProof.request(node.brokerCtx, message, timestamp)
-      ).valueOr:
-        # no verdict from the module — don't score the peer down for our own failure
-        trace "rln-lez validator ignore", error = error
-        return pubsub.ValidationResult.Ignore
+    let res = (await validateProof(message)).valueOr:
+      # no verdict from the backend — don't score the peer down for our own failure
+      trace "RLN validator ignore", error = $error
+      return pubsub.ValidationResult.Ignore
 
-      let proof = byteutils.toHex(message.proof)
-      case res.validation.verdict
-      of ProofVerdict.Valid:
-        trace "Message validity is verified, relaying", proof = proof
-        logos_delivery_rln_valid_messages_total.inc(labelValues = [topic])
-        return pubsub.ValidationResult.Accept
-      of ProofVerdict.Invalid:
-        trace "Message validity could not be verified, discarding", proof = proof
-        return pubsub.ValidationResult.Reject
-      of ProofVerdict.Duplicate:
-        trace "Duplicate rln proof, discarding", proof = proof
-        return pubsub.ValidationResult.Reject
-      of ProofVerdict.RateLimitViolation:
-        trace "Rate limit violation found, discarding", proof = proof
-        if spamHandler.isSome():
-          let handler = spamHandler.get()
-          handler(message)
-        return pubsub.ValidationResult.Reject
+    let proof = byteutils.toHex(message.proof)
+    case res.verdict
+    of ProofVerdict.Valid:
+      trace "Message validity is verified, relaying", proof = proof
+      logos_delivery_rln_valid_messages_total.inc(labelValues = [topic])
+      return pubsub.ValidationResult.Accept
+    of ProofVerdict.Invalid:
+      trace "Message validity could not be verified, discarding", proof = proof
+      return pubsub.ValidationResult.Reject
+    of ProofVerdict.Duplicate:
+      trace "Duplicate rln proof, discarding", proof = proof
+      return pubsub.ValidationResult.Reject
+    of ProofVerdict.RateLimitViolation:
+      trace "Rate limit violation found, discarding", proof = proof
+      if spamHandler.isSome():
+        let handler = spamHandler.get()
+        handler(message)
+      return pubsub.ValidationResult.Reject
 
-    debug "Registering RLN validator"
-    node.wakuRelay.addValidator(validator, RlnValidatorErrorMsg)
-    return ok()
-  else:
-    let rlnRes =
-      try:
-        await RlnEvm.new(rlnConf, registrationHandler)
-      except CancelledError as e:
-        raise e
-      except CatchableError as e:
-        return err("failed to set rln validator: " & e.msg)
-    let rln = rlnRes.valueOr:
-      return err("failed to set rln validator: " & error)
-    if (rlnConf.userMessageLimit > rln.groupManager.rlnRelayMaxMessageLimit):
-      error "Rln-user-message-limit can't exceed the MAX_MESSAGE_LIMIT in the rln contract"
+  debug "Registering RLN validator"
+  node.wakuRelay.addValidator(validator, RlnValidatorErrorMsg)
 
-    node.rln = rln
-
-    if node.wakuRelay.isNil():
-      info "WakuRelay not mounted; RLN validator not set"
-      return ok()
-
-    if rlnConf.disableValidation:
-      info "RLN proof validation is disabled; not registering the RLN validator"
-      return ok()
-
-    # Maps validateMessageAndUpdateLog's result to pubsub.ValidationResult.
-    proc validator(
-        topic: string, message: WakuMessage
-    ): Future[pubsub.ValidationResult] {.async.} =
-      trace "Rln-relay topic validator is called"
-      rln.clearNullifierLog()
-
-      let msgProof = protocol_types.RateLimitProof.init(message.proof).valueOr:
-        trace "Rln validator reject", error = error
-        return pubsub.ValidationResult.Reject
-
-      # validate the message and update log
-      let validationRes = await rln.validateMessageAndUpdateLog(message)
-
-      let
-        proof = byteutils.toHex(msgProof.proof)
-        root = inHex(msgProof.merkleRoot)
-        shareX = inHex(msgProof.shareX)
-        shareY = inHex(msgProof.shareY)
-        nullifier = inHex(msgProof.nullifier)
-
-      case validationRes
-      of MessageValidationResult.Valid:
-        trace "Message validity is verified, relaying",
-          proof = proof,
-          root = root,
-          shareX = shareX,
-          shareY = shareY,
-          nullifier = nullifier
-        logos_delivery_rln_valid_messages_total.inc(labelValues = [topic])
-        return pubsub.ValidationResult.Accept
-      of MessageValidationResult.Invalid:
-        trace "Message validity could not be verified, discarding",
-          proof = proof,
-          root = root,
-          shareX = shareX,
-          shareY = shareY,
-          nullifier = nullifier
-        return pubsub.ValidationResult.Reject
-      of MessageValidationResult.Spam:
-        trace "A spam message is found! yay! discarding:",
-          proof = proof,
-          root = root,
-          shareX = shareX,
-          shareY = shareY,
-          nullifier = nullifier
-        if spamHandler.isSome():
-          let handler = spamHandler.get()
-          handler(message)
-        return pubsub.ValidationResult.Reject
-
-    # register rln validator as default validator
-    debug "Registering RLN validator"
-    node.wakuRelay.addValidator(validator, RlnValidatorErrorMsg)
-    return ok()
+proc mountRln*(
+    node: WakuNode,
+    plugin: RlnPlugin,
+    commonConf: RlnCommonConf,
+    spamHandler = Opt.none(SpamHandler),
+) =
+  ## Mounts an RLN backend on `node`: records its plugin and registers the
+  ## RLN relay validator.
+  node.rlnPlugin = Opt.some(plugin)
+  node.registerRlnValidator(plugin, commonConf, spamHandler)

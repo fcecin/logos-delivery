@@ -26,6 +26,7 @@ import
     discovery/waku_dnsdisc,
     waku_relay,
     rln,
+    rln/rln_plugin,
     factory/builder,
     factory/networks_config,
   ],
@@ -627,9 +628,10 @@ when isMainModule:
       onFatalErrorAction: onFatalErrorAction,
     )
 
-    (waitFor node.setRlnValidator(rlnConf)).isOkOr:
+    let onchainRln = (waitFor mountOnchain(rlnConf)).valueOr:
       error "failed to setup RLN", error = error
       quit(QuitFailure)
+    node.mountRln(onchainRln.toRlnPlugin(), RlnCommonConf())
 
   node.mountMetadata(conf.clusterId, conf.shards).isOkOr:
     error "failed to mount waku metadata protocol: ", error = error

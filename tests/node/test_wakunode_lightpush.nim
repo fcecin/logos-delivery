@@ -16,6 +16,7 @@ import
     waku_node,
     waku_lightpush,
     rln,
+    rln/rln_plugin,
   ],
   ../testlib/[wakucore, wakunode, testasync, futures],
   ../resources/payloads,
@@ -103,6 +104,7 @@ suite "Waku Lightpush - End To End":
 suite "RLN Proofs as a Lightpush Service":
   var
     server {.threadvar.}: WakuNode
+    serverRln {.threadvar.}: RlnEvm
     client {.threadvar.}: WakuNode
     anvilProc {.threadvar.}: Process
     manager {.threadvar.}: RlnEvmGroupManager
@@ -138,11 +140,11 @@ suite "RLN Proofs as a Lightpush Service":
 
     (await server.mountRelay()).isOkOr:
       assert false, "Failed to mount relay"
-    (await server.setRlnValidator(wakuRlnConfig)).expect("setRlnValidator")
+    serverRln = await server.mountOnchainRln(wakuRlnConfig)
     check (await server.mountLightPush()).isOk()
     client.mountLightPushClient()
 
-    let manager1 = cast[RlnEvmGroupManager](server.rln.groupManager)
+    let manager1 = cast[RlnEvmGroupManager](serverRln.groupManager)
     let idCredentials1 = generateCredentials()
 
     (await manager1.register(idCredentials1, UserMessageLimit(20))).isOkOr:
@@ -173,10 +175,9 @@ suite "RLN Proofs as a Lightpush Service":
       lightpushClient.mountLightPushClient()
 
       # Attach the RLN proof. In production the client mounts RLN and generates the
-      # proof in lightpushPublish; here we generate it using the server's RLN instance
+      # proof in lightpushPublish; here we generate it using the server's RLN plugin
       # since both ends share group state via the in-memory manager.
-      let msgWithProof =
-        (await checkAndGenerateRLNProof(Opt.some(server.rln), message)).get()
+      let msgWithProof = (await attachProof(server.rlnPlugin, message)).get()
 
       # When the client publishes a message
       let publishResponse = await lightpushClient.lightpushPublish(
@@ -191,18 +192,17 @@ suite "RLN Proofs as a Lightpush Service":
       check publishResponse.error.code == LightPushErrorCode.NO_PEERS_TO_RELAY
 
     asyncTest "invalidate + regenerate refetches merkle path and rebuilds proof":
-      # Exercises the primitive pair that lightpushPublish leans on after a
-      # 420 (INVALID_MESSAGE) or 504 (OUT_OF_RLN_PROOF) rejection: calling
-      # invalidateMerkleProofCache empties the cached path so the next
-      # proof-gen refetches from chain, and attachRLNProof rebuilds the proof
-      # even though the message already carries one.
-      let firstMsg =
-        (await checkAndGenerateRLNProof(Opt.some(server.rln), message)).get()
+      # Exercises what a retry after a 420 (INVALID_MESSAGE) or 504
+      # (OUT_OF_RLN_PROOF) rejection relies on: invalidateMerkleProofCache
+      # empties the cached path so the next proof generation refetches it from
+      # chain, and the backend's generateProof builds a new proof even for a
+      # message that already carries one.
+      let firstMsg = (await attachProof(server.rlnPlugin, message)).get()
       check firstMsg.proof.len > 0
 
       # Corrupt the cache to model a stale/invalid witness — the same state a
       # 420/504 rejection would leave us in.
-      let manager = cast[RlnEvmGroupManager](server.rln.groupManager)
+      let manager = cast[RlnEvmGroupManager](serverRln.groupManager)
       let goodCache = manager.merkleProofCache
       manager.merkleProofCache = newSeq[byte](goodCache.len)
       check manager.merkleProofCache != goodCache
@@ -210,7 +210,8 @@ suite "RLN Proofs as a Lightpush Service":
       # Retry path: invalidate the cache so the next proof-gen refetches from
       # chain, then regenerate the proof.
       manager.invalidateMerkleProofCache()
-      let secondMsg = (await attachRLNProof(server.rln, firstMsg)).get()
+      var secondMsg = firstMsg
+      secondMsg.proof = (await server.rlnPlugin.get().generateProof(firstMsg)).get()
 
       check:
         secondMsg.proof.len > 0
@@ -238,7 +239,7 @@ suite "RLN Proofs as a Lightpush Service":
           lighpushErrorResult(LightPushErrorCode.INVALID_MESSAGE, RlnValidatorErrorMsg)
       server.wakuLightPush.pushHandler = stub
 
-      let manager = cast[RlnEvmGroupManager](server.rln.groupManager)
+      let manager = cast[RlnEvmGroupManager](serverRln.groupManager)
       let goodCache = manager.merkleProofCache
       check goodCache.len > 0
 
@@ -341,12 +342,12 @@ suite "RLN Proofs as a Lightpush Service":
         response.isErr()
         response.error.code == LightPushErrorCode.INTERNAL_SERVER_ERROR
 
-    asyncTest "rejection passes through unchanged when node.rln is nil":
-      # Detach RLN so the RLN-rejection branch short-circuits on rln.isNone()
-      # even for a 420. Restore before teardown so server.stop() sees the same
-      # object graph it was constructed with.
-      let savedRln = server.rln
-      server.rln = nil
+    asyncTest "rejection passes through unchanged when RLN is not mounted":
+      # Detach the RLN backend so there is no refresh hook to call, even for an
+      # RLN-tagged 420. Restore before teardown so server.stop() stops the
+      # backend it was constructed with.
+      let savedPlugin = server.rlnPlugin
+      reset(server.rlnPlugin)
 
       var callCount = 0
       let stub: PushMessageHandler = proc(
@@ -354,13 +355,13 @@ suite "RLN Proofs as a Lightpush Service":
       ): Future[WakuLightPushResult] {.async.} =
         inc callCount
         return lighpushErrorResult(
-          LightPushErrorCode.INVALID_MESSAGE, "simulated stale merkle path"
+          LightPushErrorCode.INVALID_MESSAGE, RlnValidatorErrorMsg & ": simulated"
         )
       server.wakuLightPush.pushHandler = stub
 
       let response = await server.lightpushPublish(Opt.some(pubsubTopic), message)
 
-      server.rln = savedRln
+      server.rlnPlugin = savedPlugin
 
       check:
         callCount == 1

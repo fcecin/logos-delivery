@@ -25,8 +25,8 @@ import
   ../waku_core,
   ../waku_core/codecs,
   ../rln,
+  ../rln/rln_plugin,
   ../rln/rln_lez/rln_lez,
-  ../rln/rln_lez/transport,
   ../discovery/waku_dnsdisc,
   ../waku_archive/retention_policy as policy,
   ../waku_archive/retention_policy/builder as policy_builder,
@@ -333,47 +333,31 @@ proc setupProtocols(
   except CatchableError:
     return err("failed to mount libp2p ping protocol: " & getCurrentExceptionMsg())
 
-  # The RLN module backend is selected by the host installing an RLN plugin over
-  # FFI (`logosdelivery_rln_set_plugin`), not by configuration. The plugin is
-  # implementation-agnostic: the host owns its parameters and its lifecycle.
-  let rlnPlugin = rlnPluginRegistered()
+  # RLN backend selected by configuration source: each descriptor probes
+  # whether its own source is present — host callbacks installed over the C
+  # ABI (`logosdelivery_rln_set_plugin`) for the external backend, CLI/preset
+  # configuration for the on-chain one. With no source present the node starts
+  # without RLN.
+  let rlnDescriptors =
+    [rlnLezDescriptor(), rlnEvmDescriptor(conf.rlnEvmConf, onFatalErrorAction)]
 
-  if rlnPlugin and conf.rlnEvmConf.isSome():
-    return err(
-      "two RLN backends requested: an RLN plugin is installed and RLN relay is " &
-        "also configured for the embedded EVM backend"
-    )
+  let selectedRln = selectRlnPlugin(rlnDescriptors).valueOr:
+    return err("failed call selectRlnPlugin: " & $error)
 
-  if rlnPlugin or conf.rlnEvmConf.isSome():
+  if selectedRln.isNone():
+    info "No RLN backend configured; RLN is off"
+  else:
     when defined(disable_rln):
       return
         err("the configuration enables RLN relay, but this build has -d:disable_rln")
-
-  if rlnPlugin:
-    info "Mounting RLN plugin backend"
-    node.rlnLez = RlnLez.init()
-    let validatorConf = WakuRlnLezConfig(
-      onFatalErrorAction: onFatalErrorAction,
-      disableValidation: conf.rlnDisableValidation,
-    )
-    (await node.setRlnValidator(validatorConf)).isOkOr:
-      return err("failed to mount waku RLN relay protocol: " & error)
-  elif conf.rlnEvmConf.isSome():
-    let rlnEvmConf = conf.rlnEvmConf.get()
-    let rlnConf = WakuRlnConfig(
-      dynamic: rlnEvmConf.dynamic,
-      credIndex: rlnEvmConf.credIndex,
-      ethContractAddress: rlnEvmConf.ethContractAddress,
-      chainId: rlnEvmConf.chainId,
-      ethClientUrls: rlnEvmConf.ethClientUrls,
-      creds: rlnEvmConf.creds,
-      userMessageLimit: rlnEvmConf.userMessageLimit,
-      epochSizeSec: rlnEvmConf.epochSizeSec,
-      onFatalErrorAction: onFatalErrorAction,
-      disableValidation: conf.rlnDisableValidation,
-    )
-    (await node.setRlnValidator(rlnConf)).isOkOr:
-      return err("failed to mount waku RLN relay protocol: " & error)
+    else:
+      let descriptor = selectedRln.get()
+      info "Mounting RLN backend", backend = descriptor.name
+      let mounted = (await descriptor.mount()).valueOr:
+        return err("failed to mount RLN backend" & $error)
+      node.mountRln(
+        mounted, RlnCommonConf(disableValidation: conf.rlnDisableValidation)
+      )
 
   # NOTE Must be mounted after relay
   if conf.lightPush:
@@ -454,23 +438,14 @@ proc startNode*(
   except CatchableError:
     return err("failed to start waku node: " & getCurrentExceptionMsg())
 
-  # Membership only gates sending, so verify it non-fatally: a validate-only
-  # node is legitimate, and a Pending membership can settle later. A pass is
-  # cached on the handle so the send path (`attachRlnProof`) skips the
-  # registry read; anything else is retried per send.
-  if not node.rlnLez.isNil():
-    let membershipRes =
-      try:
-        await node.rlnLez.verifyMembership()
-      except CancelledError:
-        Result[MembershipStatus, string].err("cancelled")
-    if membershipRes.isErr():
-      notice "could not verify RLN membership at startup", error = membershipRes.error
-    elif not membershipRes.get().isUsable():
-      notice "node has no usable RLN membership; sends will fail until it is active",
-        status = $membershipRes.get()
-    else:
-      info "RLN membership verified", status = $membershipRes.get()
+  # Backend work that needs a running node, such as the external backend's
+  # membership check, its first call to the host. The backend handles its own
+  # failures, so the node starts regardless; only cancellation stops startup.
+  if node.rlnPlugin.isSome() and not node.rlnPlugin.get().onNodeStarted.isNil():
+    try:
+      await node.rlnPlugin.get().onNodeStarted()
+    except CancelledError:
+      return err("cancelled during the RLN backend start hook")
 
   # Connect to configured static nodes
   if conf.staticNodes.len > 0:

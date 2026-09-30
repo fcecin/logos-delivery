@@ -51,8 +51,7 @@ import
     waku_lightpush as lightpush_protocol,
     waku_enr,
     waku_peer_exchange,
-    rln,
-    rln/rln_lez/rln_lez,
+    rln/rln_plugin,
     common/rate_limit/setting,
     common/callbacks,
     common/nimchronos,
@@ -119,8 +118,7 @@ type
     wakuStoreTransfer*: SyncTransfer
     wakuFilter*: waku_filter_v2.WakuFilter
     wakuFilterClient*: filter_client.WakuFilterClient
-    rln*: RlnEvm
-    rlnLez*: RlnLez
+    rlnPlugin*: Opt[RlnPlugin]
     wakuLegacyLightPush*: WakuLegacyLightPush
     wakuLegacyLightpushClient*: WakuLegacyLightPushClient
     wakuLightPush*: WakuLightPush
@@ -944,8 +942,8 @@ proc stop*(node: WakuNode) {.async.} =
 
   node.peerManager.stop()
 
-  if not node.rln.isNil():
-    await node.rln.stop()
+  if node.rlnPlugin.isSome() and not node.rlnPlugin.get().stop.isNil():
+    await node.rlnPlugin.get().stop()
 
   if not node.wakuArchive.isNil():
     await node.wakuArchive.stopWait()
@@ -966,7 +964,9 @@ proc stop*(node: WakuNode) {.async.} =
   node.enrLearnedEndpoint = Opt.none(DiscoveryEndpoint)
 
 proc isReady*(node: WakuNode): Future[bool] {.async: (raises: [CancelledError]).} =
-  if node.rln == nil:
+  let plugin = node.rlnPlugin.valueOr:
     return true
-  return await node.rln.isReady()
+  if plugin.isReady.isNil():
+    return true
+  return await plugin.isReady()
   ## TODO: add other protocol `isReady` checks

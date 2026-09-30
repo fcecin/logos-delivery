@@ -66,7 +66,7 @@ method sendImpl*(self: RelaySendProcessor, task: DeliveryTask) {.async.} =
       request = task.requestId, msgHash = task.msgHash.to0xHex(), error = errorMessage
 
     if error.isRlnRejection():
-      task.parkForRlnProofRefresh(self.waku)
+      task.parkForRlnProofRefresh(self.waku, errorMessage)
       return
 
     if error.code != LightPushErrorCode.NO_PEERS_TO_RELAY:

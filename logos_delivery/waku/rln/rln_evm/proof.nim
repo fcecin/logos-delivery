@@ -1,7 +1,7 @@
 {.push raises: [].}
 
-import std/[times, sequtils]
-import chronos, chronicles, results, stew/byteutils
+import std/times
+import chronos, chronicles, results
 
 import
   logos_delivery/waku/[
@@ -10,8 +10,10 @@ import
     rln/rln_evm/conversion_utils,
     rln/rln_evm/group_manager,
     rln/rln_evm/nonce_manager,
-    waku_core,
   ]
+import ../signal
+
+export signal
 
 proc calcEpoch*(rlnEvm: RlnEvm, t: float64): Epoch =
   ## gets time `t` as `flaot64` with subseconds resolution in the fractional part
@@ -49,16 +51,6 @@ proc absDiff*(e1, e2: Epoch): uint64 =
     return epoch1 - epoch2
   else:
     return epoch2 - epoch1
-
-proc toRLNSignal*(wakumessage: WakuMessage): seq[byte] =
-  ## it is a utility proc that prepares the `data` parameter of the proof generation procedure i.e., `proofGen`  that resides in the current module
-  ## it extracts the `contentTopic`, `timestamp` and the `payload` of the supplied `wakumessage` and serializes them into a byte sequence
-
-  let
-    contentTopicBytes = toBytes(wakumessage.contentTopic)
-    timestampBytes = toBytes(wakumessage.timestamp.uint64)
-    output = concat(wakumessage.payload, contentTopicBytes, @(timestampBytes))
-  return output
 
 proc generateRLNProofWithNonce(
     rlnEvm: RlnEvm, input: seq[byte], senderEpochTime: float64, nonce: Nonce
@@ -111,30 +103,3 @@ proc generateRLNProofWithRootRefresh*(
   debug "RLN: stale merkle root detected; refreshing merkle path and regenerating proof"
   rlnEvm.groupManager.invalidateMerkleProofCache()
   return await rlnEvm.generateRLNProofWithNonce(input, senderEpochTime, nonce)
-
-proc attachRLNProof*(
-    rlnEvm: RlnEvm, message: WakuMessage
-): Future[Result[WakuMessage, string]] {.async.} =
-  ## Returns the message with a freshly generated RLN proof, replacing any
-  ## existing one and drawing a new message id. Retry paths suspecting a stale
-  ## path should call `invalidateMerkleProofCache` first.
-  var msgWithProof = message
-  msgWithProof.proof = (
-    await rlnEvm.generateRLNProof(message.toRLNSignal(), float64(getTime().toUnix()))
-  ).valueOr:
-    return err("error in attachRLNProof: " & error)
-  return ok(msgWithProof)
-
-proc checkAndGenerateRLNProof*(
-    rlnEvm: Opt[RlnEvm], message: WakuMessage
-): Future[Result[WakuMessage, string]] {.async.} =
-  ## Returns the message with an attached RLN proof, or unchanged when it
-  ## already carries a proof or RLN is not configured.
-  if message.proof.len > 0:
-    return ok(message)
-
-  if rlnEvm.isNone():
-    debug "Publishing message without RLN proof"
-    return ok(message)
-
-  return await attachRLNProof(rlnEvm.get(), message)

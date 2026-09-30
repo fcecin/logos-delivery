@@ -1,14 +1,9 @@
 {.push raises: [].}
 
-import
-  ../waku_core,
-  ../waku_relay,
-  ./common,
-  ./protocol_metrics,
-  ../rln,
-  ../rln/rln_evm/protocol_types
+import results, chronos, chronicles
+import ../waku_core, ../waku_relay, ./common, ./protocol_metrics
 
-import std/times, libp2p/peerid, stew/byteutils
+import libp2p/peerid
 
 proc getNilPushHandler*(): PushMessageHandler =
   return proc(
