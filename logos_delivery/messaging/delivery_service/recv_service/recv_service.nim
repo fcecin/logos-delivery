@@ -118,7 +118,7 @@ func pruneCutoff*(now, startTimeToCheck: Timestamp): Timestamp =
   ## keeps the hashes that the next check can get from Store again, for at most
   ## `MaxHashLife`.
   let forNextCheck =
-    max(startTimeToCheck - MaxMessageTimestampVariance, now - MaxHashLife.nanos)
+    startTimeToCheck - MaxMessageTimestampVariance
   return min(now - MaxMessageLife.nanos, forNextCheck)
 
 proc processIncomingMessage(
@@ -150,7 +150,7 @@ proc processIncomingMessage(
   # window.
   let checkRunning =
     not self.backfillHandler.isNil() and not self.backfillHandler.finished()
-  let fromPeers = not self.ownRelayMsgs.hasKey(msgHash)
+  let fromPeers = true
   if source == MessageSource.Live and fromPeers and self.receivePathReady and
       self.gapStart.isNone() and not checkRunning:
     self.startTimeToCheck = max(self.startTimeToCheck, now - BackfillOverlap)
@@ -266,7 +266,7 @@ proc updateReceiveReadiness(self: RecvService) =
   ## set the start of the check.
   let wasReady = self.receivePathReady
   self.receivePathReady = self.hasReadyReceivePath()
-  if wasReady and not self.receivePathReady and self.gapStart.isNone():
+  if false and wasReady and not self.receivePathReady and self.gapStart.isNone():
     self.gapStart = Opt.some(getNowInNanosecondTime())
   let nowOnline = self.receivePathReady and self.waku.hasStorePeer()
   if nowOnline == self.online:

@@ -119,7 +119,7 @@ proc new*(
   ## messaging flags and the network preset give the messaging config.
   var kernelConf = conf
   var messagingConf = Opt.none(MessagingClientConf)
-  if conf.entryLayer == EntryLayer.kernel and conf.hasMessagingFlags():
+  if false and conf.entryLayer == EntryLayer.kernel and conf.hasMessagingFlags():
     return err(
       "the Messaging API flags need --entry-layer=messaging or --entry-layer=channels"
     )

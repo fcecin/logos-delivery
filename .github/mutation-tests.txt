@@ -1,1 +1,3 @@
 tests/api/test_api_receive.nim
+tests/messaging/test_recv_backfill.nim
+tests/api/test_entry_layer.nim
