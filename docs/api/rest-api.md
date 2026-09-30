@@ -93,6 +93,17 @@ the last event. Clients must ignore kinds that they do not know. A `404` on
 `GET /events/send/{requestId}` means that nothing is buffered for that id now: the id is
 unknown, already polled, or has no event yet. Keep polling until the last event.
 
+A message that waits more than 10 s to propagate gets a new timestamp before the next send
+attempt, so a Store node accepts it. A message keeps its timestamp after each attempt that can
+have given it to a node: a relay publish, a lightpush request that got to the service node, and
+a mix attempt. With RLN, a message gets a new timestamp each time that the node makes a new
+proof for it, because the proof epoch comes from the timestamp. A message keeps its proof and
+its timestamp while it waits, so a wait does not use a new message id. If it propagates more
+than 20 s after its proof, no Store node keeps it. A Core sender receives its own message when
+the message propagates, not at the call to send. The new timestamp changes the message hash.
+The `propagated`, `sent` and `error` events carry the final hash. A `queued` event can carry the
+hash from before.
+
 Each received record has the message hash, the full `WakuMessage` and a `source`: `live` for a
 message that arrived when it was published, `history` for a message that a Store peer returned
 at startup or after a connectivity gap. The node buffers only the content topics subscribed

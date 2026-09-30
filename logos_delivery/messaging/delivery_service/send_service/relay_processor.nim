@@ -53,12 +53,28 @@ method isValidProcessor*(
   # return self.isTopicHealthy(task.pubsubTopic)
   return true
 
+method canAttempt*(
+    self: RelaySendProcessor, task: DeliveryTask
+): bool {.gcsafe, raises: [].} =
+  return self.waku.relayHasPeers(task.pubsubTopic)
+
 method sendImpl*(self: RelaySendProcessor, task: DeliveryTask) {.async.} =
+  # GossipSub gives a published message to the local handlers before it looks
+  # for peers. Without a peer, a publish gives the message to this node only.
+  if not self.waku.relayHasPeers(task.pubsubTopic):
+    debug "No relay peer for the shard, relay does not publish",
+      requestId = task.requestId, shard = task.pubsubTopic
+    task.state = self.fallbackStateToSet
+    return
+
   task.tryCount.inc()
   debug "Trying message delivery via Relay",
     requestId = task.requestId,
     msgHash = task.msgHash.to0xHex(),
     tryCount = task.tryCount
+
+  # Relay also gives a published message to the local handlers of this node.
+  task.relayPublished = true
 
   let noOfPublishedPeers = (await self.publishProc(task.pubsubTopic, task.msg)).valueOr:
     let errorMessage = error.desc.get($error.code)
@@ -73,6 +89,8 @@ method sendImpl*(self: RelaySendProcessor, task: DeliveryTask) {.async.} =
       task.state = DeliveryState.FailedToDeliver
       task.errorDesc = errorMessage
     else:
+      # The publish gave the message to the local handlers.
+      task.timestampFixed = true
       task.state = self.fallbackStateToSet
     return
 
@@ -87,4 +105,5 @@ method sendImpl*(self: RelaySendProcessor, task: DeliveryTask) {.async.} =
       task.firstPropagatedTime = Opt.some(Moment.now())
   else:
     # It shall not happen, but still covering it
+    task.timestampFixed = true
     task.state = self.fallbackStateToSet

@@ -62,7 +62,7 @@ proc buildTask(id: string, admittedAgo: Duration): DeliveryTask =
   let msg = WakuMessage(
     contentTopic: "/test/1/anonymity/proto",
     payload: "hi".toBytes(),
-    timestamp: 1_700_000_000_000_000_000,
+    timestamp: getNowInNanosecondTime(),
   )
   let pubsubTopic = PubsubTopic("/waku/2/rs/3/0")
   return DeliveryTask(

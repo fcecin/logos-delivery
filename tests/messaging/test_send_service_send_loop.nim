@@ -10,7 +10,11 @@ import
   logos_delivery/waku/factory/waku_conf,
   logos_delivery/messaging/rate_limit_manager/rate_limit_manager,
   logos_delivery/messaging/delivery_service/send_service/
-    [send_service, send_processor, delivery_task]
+    [send_service, send_processor, delivery_task, relay_processor],
+  logos_delivery/waku/waku_lightpush/common,
+  logos_delivery/waku/waku_archive/archive,
+  logos_delivery/waku/api/publish
+from logos_delivery/waku/waku_lightpush/protocol_metrics import dialFailure
 import ../testlib/[testasync, wakunodeconf]
 
 ## The service pass sends queued tasks in batches of `MaxSendsInFlight`, and
@@ -67,6 +71,33 @@ proc newScripted(
     gate: newFuture[void]("send-loop-gate"), stalled: stalled, raising: raising
   )
 
+type GaveToNodeProcessor = ref object of BaseSendProcessor
+  ## The first call ends as an attempt that can have given the message to a
+  ## node. Later calls propagate the task.
+  calls: int
+
+method process(self: GaveToNodeProcessor, task: DeliveryTask): Future[void] {.async.} =
+  inc self.calls
+  if self.calls == 1:
+    task.timestampFixed = true
+    task.state = DeliveryState.NextRoundRetry
+    return
+  task.state = DeliveryState.SuccessfullyPropagated
+  task.firstPropagatedTime = Opt.some(Moment.now())
+
+type LateProcessor = ref object of BaseSendProcessor
+  ## Cannot try a send while `ready` is false. Then it propagates the task.
+  ready: bool
+
+method canAttempt(
+    self: LateProcessor, task: DeliveryTask
+): bool {.gcsafe, raises: [].} =
+  return self.ready
+
+method process(self: LateProcessor, task: DeliveryTask): Future[void] {.async.} =
+  task.state = DeliveryState.SuccessfullyPropagated
+  task.firstPropagatedTime = Opt.some(Moment.now())
+
 type HandOffProcessor = ref object of BaseSendProcessor
   ## Overrides `sendImpl`, so the base chain runs. The first call parks the task
   ## for `send()`; each later call hands it to the fallback processor, as the mix
@@ -80,6 +111,23 @@ method sendImpl(self: HandOffProcessor, task: DeliveryTask): Future[void] {.asyn
   inc self.calls
   task.state =
     if self.calls == 1: DeliveryState.NextRoundRetry else: DeliveryState.FallbackRetry
+
+type ServiceNodeProcessor = ref object of BaseSendProcessor
+  ## Propagates each task, as a lightpush service node that publishes it. With
+  ## `asRelay` it marks the task as a relay publish.
+  asRelay: bool
+
+method isValidProcessor(
+    self: ServiceNodeProcessor, task: DeliveryTask
+): bool {.gcsafe.} =
+  return true
+
+method sendImpl(
+    self: ServiceNodeProcessor, task: DeliveryTask
+): Future[void] {.async.} =
+  task.relayPublished = self.asRelay
+  task.state = DeliveryState.SuccessfullyPropagated
+  task.firstPropagatedTime = Opt.some(Moment.now())
 
 type StallingProcessor = ref object of BaseSendProcessor
   ## Overrides `sendImpl`, which the chain calls on each link, and waits there on
@@ -131,7 +179,7 @@ suite "SendService - batched send pass":
     let msg = WakuMessage(
       contentTopic: "/test/1/send-loop/proto",
       payload: id.toBytes(),
-      timestamp: 1_700_000_000_000_000_000,
+      timestamp: getNowInNanosecondTime(),
     )
     let pubsubTopic = PubsubTopic("/waku/2/rs/3/0")
     return DeliveryTask(
@@ -142,7 +190,7 @@ suite "SendService - batched send pass":
       state: DeliveryState.Entry,
     )
 
-  proc newService(processor: ScriptedProcessor): SendService =
+  proc newService(processor: BaseSendProcessor): SendService =
     let manager =
       RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
     return SendService.new(false, waku, manager, processor).expect("SendService.new")
@@ -176,6 +224,129 @@ suite "SendService - batched send pass":
     processor.gate.complete()
     await pass
     check a.state == DeliveryState.SuccessfullyPropagated
+
+  proc ageBy(task: DeliveryTask, age: timer.Duration) =
+    ## As if the task waited `age` for its next attempt.
+    task.msg.timestamp = getNowInNanosecondTime() - age.nanoseconds
+    task.msgHash = computeMessageHash(task.pubsubTopic, task.msg)
+
+  asyncTest "a message that waited gets a new timestamp before it is sent":
+    let processor = newScripted()
+    let service = newService(processor)
+    let task = buildTask("waited")
+    await service.queue(@[task])
+    task.ageBy(chronos.seconds(30))
+    let oldHash = task.msgHash
+    check archive.validate(task.msg).isErr()
+    await service.trySendMessages()
+    check:
+      task.state == DeliveryState.SuccessfullyPropagated
+      task.messageAge() < MaxUnsentMessageAge
+      task.msgHash != oldHash
+      task.msgHash == computeMessageHash(task.pubsubTopic, task.msg)
+      archive.validate(task.msg).isOk()
+
+  asyncTest "a message that a send attempt can have given to a node keeps its timestamp":
+    let processor = GaveToNodeProcessor()
+    let service = newService(processor)
+    let task = buildTask("gave-to-node")
+    await service.send(task)
+    check task.timestampFixed
+    task.ageBy(chronos.seconds(30))
+    let oldHash = task.msgHash
+    await service.trySendMessages()
+    check:
+      task.state == DeliveryState.SuccessfullyPropagated
+      task.msgHash == oldHash
+
+  asyncTest "a message gets a new timestamp only when a processor can try it":
+    let processor = LateProcessor(ready: false)
+    let service = newService(processor)
+    let task = buildTask("late")
+    await service.send(task)
+    task.ageBy(chronos.seconds(30))
+    let waitedHash = task.msgHash
+    await service.trySendMessages()
+    check:
+      task.state == DeliveryState.NextRoundRetry
+      task.msgHash == waitedHash
+    processor.ready = true
+    await service.trySendMessages()
+    check:
+      task.state == DeliveryState.SuccessfullyPropagated
+      task.msgHash != waitedHash
+
+  asyncTest "relay does not publish a message without a relay peer":
+    var calls = 0
+    let publishProc: PushMessageHandler = proc(
+        topic: PubsubTopic, msg: WakuMessage
+    ): Future[WakuLightPushResult] {.async.} =
+      inc calls
+      return lightpushSuccessResult(1)
+    let processor = RelaySendProcessor.new(true, publishProc, waku, waku.brokerCtx)
+    let task = buildTask("no-relay-peer")
+    await processor.process(task)
+    check:
+      calls == 0
+      not processor.canAttempt(task)
+      not task.timestampFixed
+      task.state == DeliveryState.NextRoundRetry
+
+  asyncTest "a message that a lightpush service node published goes to the receive service":
+    check waku.hasRelay()
+    var ownHashes: seq[WakuMessageHash]
+    let onOwnMessage: OwnMessageHandler = proc(
+        pubsubTopic: PubsubTopic, msg: WakuMessage
+    ) {.gcsafe, raises: [].} =
+      ownHashes.add(computeMessageHash(pubsubTopic, msg))
+    let publishProc: PushMessageHandler = proc(
+        topic: PubsubTopic, msg: WakuMessage
+    ): Future[WakuLightPushResult] {.async.} =
+      return lightpushSuccessResult(1)
+    let manager =
+      RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
+    # Relay has no peer, so the next processor sends the task.
+    let relay = RelaySendProcessor.new(true, publishProc, waku, waku.brokerCtx)
+    relay.chain(ServiceNodeProcessor())
+    let service = SendService
+      .new(false, waku, manager, relay, onOwnMessage = onOwnMessage)
+      .expect("SendService.new")
+    let task = buildTask("service-node")
+    await service.send(task)
+    check:
+      task.state == DeliveryState.SuccessfullyPropagated
+      ownHashes == @[task.msgHash]
+    # Relay gives a message that it publishes to the local handlers itself.
+    let relayed = SendService
+      .new(
+        false,
+        waku,
+        manager,
+        ServiceNodeProcessor(asRelay: true),
+        onOwnMessage = onOwnMessage,
+      )
+      .expect("SendService.new")
+    let relayTask = buildTask("relay-publish")
+    await relayed.send(relayTask)
+    check:
+      relayTask.state == DeliveryState.SuccessfullyPropagated
+      ownHashes.len == 1
+
+  test "only a dial failure shows that the service node did not get the message":
+    let unreachable: ErrorStatus = (
+      LightPushErrorCode.NO_PEERS_TO_RELAY,
+      Opt.some(dialFailure & ": /ip4/10.255.255.1/tcp/60000 is not accessible"),
+    )
+    let noRelayPeers: ErrorStatus = (
+      LightPushErrorCode.NO_PEERS_TO_RELAY,
+      Opt.some("No peers for topic, skipping publish"),
+    )
+    let zeroPeers: ErrorStatus =
+      (LightPushErrorCode.NO_PEERS_TO_RELAY, Opt.none(string))
+    check:
+      unreachable.isDialFailure()
+      not noRelayPeers.isDialFailure()
+      not zeroPeers.isDialFailure()
 
   asyncTest "a pass starts at most MaxSendsInFlight sends before waiting for them":
     let ids = names("t", MaxSendsInFlight + 1)

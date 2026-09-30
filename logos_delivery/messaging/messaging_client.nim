@@ -64,6 +64,8 @@ proc new*(
   let sendQueueCapacity = conf.sendQueueCapacity.get(uint(DefaultMaxTaskCacheSize))
   if sendQueueCapacity notin 1'u .. SendQueueCapacityLimit:
     return err("sendQueueCapacity must be between 1 and " & $SendQueueCapacityLimit)
+  let backfill = ?BackfillState.init(conf)
+  let recvService = RecvService.new(waku, backfill)
   let sendProcessor = setupSendProcessorChain(waku, anonymityLevel).valueOr:
     return err("failed to setup SendProcessorChain: " & error)
   let sendService = ?SendService.new(
@@ -74,9 +76,11 @@ proc new*(
     anonymityLevel = anonymityLevel,
     maxParkedAge = seconds(int64(maxParkedAgeSec)),
     maxTaskCacheSize = int(sendQueueCapacity),
+    onOwnMessage = proc(
+        pubsubTopic: PubsubTopic, msg: WakuMessage
+    ) {.gcsafe, raises: [].} =
+      recvService.deliverOwnMessage(pubsubTopic, msg),
   )
-  let backfill = ?BackfillState.init(conf)
-  let recvService = RecvService.new(waku, backfill)
 
   if anonymityLevel == AnonymityLevel.Required:
     waku.setConnectionStatusAdjuster(requireMixReady)

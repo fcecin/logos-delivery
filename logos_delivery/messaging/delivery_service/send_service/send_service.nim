@@ -13,6 +13,7 @@ import
 import logos_delivery/api/events/messaging_client_events
 import logos_delivery/api/conf/modes
 import logos_delivery/messaging/messaging_metrics
+from logos_delivery/waku/waku_archive/archive import MaxMessageTimestampVariance
 
 logScope:
   topics = "send service"
@@ -42,7 +43,7 @@ proc maxDeliveryTime*(anonymityLevel: AnonymityLevel): timer.Duration =
     MaxTimeInCache
 
 const DefaultMaxParkedAge* = chronos.minutes(30)
-  ## Parked tasks never admitted within this age (from the message timestamp)
+  ## Parked tasks never admitted within this age (from the call to `send`)
   ## are dropped with a `MessageErrorEvent`. Spans a few default RLN epochs.
 
 const DefaultMaxTaskCacheSize* = 1000
@@ -60,10 +61,20 @@ const StoreValidationQueryTimeout = chronos.seconds(15)
   ## Bounds one Store validation query with its dials. It exceeds one
   ## `DefaultDialTimeout`, so a dead Store peer leaves time for another.
 
+const MaxUnsentMessageAge* = nanoseconds(MaxMessageTimestampVariance div 2)
+  ## A message older than this gets a new timestamp before the next send
+  ## attempt, until its task propagates. A Store node rejects a message more
+  ## than `MaxMessageTimestampVariance` away from its clock.
+
 const MaxSendsInFlight* = 4
   ## The number of sends a service pass starts before it waits for them. One
   ## unanswered mix reply (`MixReplyTimeout`) then holds only its batch, and the
   ## batch size also caps the burst that one pass sends.
+
+type OwnMessageHandler* =
+  proc(pubsubTopic: PubsubTopic, msg: WakuMessage) {.gcsafe, raises: [].}
+  ## Gets a message that this node sent, when it propagates and relay did not
+  ## publish it.
 
 type SendService* = ref object of RootObj
   brokerCtx: BrokerContext
@@ -100,6 +111,7 @@ type SendService* = ref object of RootObj
     ## Sends started by the current pass and not yet waited for, kept so
     ## `stopSendService` can cancel them: `allFutures` does not cancel its
     ## children when it is cancelled itself.
+  onOwnMessage: OwnMessageHandler
 
 proc setupSendProcessorChain*(
     waku: Waku, anonymityLevel: AnonymityLevel
@@ -154,7 +166,10 @@ proc new*(
     maxTaskCacheSize: int = DefaultMaxTaskCacheSize,
     maxValidationAge: timer.Duration = MaxTimeInCache,
     serviceLoopInterval: timer.Duration = ServiceLoopInterval,
+    onOwnMessage: OwnMessageHandler = nil,
 ): Result[T, string] =
+  ## `onOwnMessage` gets each message that a lightpush service node published
+  ## for a node with relay.
   let checkStoreForMessages = preferP2PReliability and waku.isStoreMounted()
 
   let sendService = SendService(
@@ -171,6 +186,7 @@ proc new*(
     maxValidationAge: maxValidationAge,
     maxTaskCacheSize: maxTaskCacheSize,
     serviceLoopInterval: serviceLoopInterval,
+    onOwnMessage: onOwnMessage,
   )
 
   return ok(sendService)
@@ -304,6 +320,11 @@ proc reportTaskResult(self: SendService, task: DeliveryTask) =
         self.brokerCtx, task.requestId, task.msgHash.to0xHex()
       )
       task.propagateEventEmitted = true
+      if not task.relayPublished and not task.anonymized and self.waku.hasRelay() and
+          not self.onOwnMessage.isNil():
+        # A lightpush service node published the message. Relay did not give it
+        # to the local handlers of this node.
+        self.onOwnMessage(task.pubsubTopic, task.msg)
 
     if task.propagatedAnonymously and not task.sentEventEmitted and
         self.storeConfirmationExpected(task):
@@ -440,6 +461,26 @@ proc admitAndProve(self: SendService, task: DeliveryTask): Future[bool] {.async.
       self.reportTaskQueued(task)
       return false
     task.firstAdmittedTime = Opt.some(Moment.now())
+
+  # No processor can send the task at this time. A new timestamp or a new
+  # proof is of no use before the next attempt.
+  if not self.sendProcessor.chainCanAttempt(task):
+    return false
+
+  # The RLN proof epoch comes from the message timestamp, so a new proof also
+  # gets a new timestamp. A message with a proof keeps its timestamp, so that a
+  # wait does not use a new message id. A validator that refuses the proof
+  # clears it (`parkForRlnProofRefresh`).
+  let maxAge =
+    if not self.waku.makesRlnProof():
+      MaxUnsentMessageAge
+    elif task.msg.proof.len == 0:
+      ZeroDuration
+    else:
+      InfiniteDuration
+  if task.restampIfOld(maxAge):
+    debug "New timestamp for a message that waited to propagate",
+      requestId = task.requestId, msgHash = task.msgHash.to0xHex()
 
   ## A no-op when RLN is not mounted, or when a prior round already attached a
   ## proof; otherwise draws the nonce and attaches. A permanent failure, such

@@ -6,6 +6,9 @@ import brokers/broker_context
 import ../testlib/[common, wakucore, wakunode, wakunodeconf, testasync]
 import ../waku_archive/archive_utils
 import logos_delivery, logos_delivery/waku/[waku_node, waku_core, waku_relay/protocol]
+import
+  logos_delivery/waku/waku_archive,
+  logos_delivery/waku/waku_archive/common as archive_common
 import logos_delivery/waku/factory/waku_conf
 import tools/confutils/cli_args
 import logos_delivery/api/conf/messaging_conf
@@ -511,13 +514,18 @@ suite "Waku API - Send":
       await fakeLightpushNode.mountLibp2pPing()
       await fakeLightpushNode.start()
     let fakeLightpushNodePeerInfo = fakeLightpushNode.peerInfo.toRemotePeerInfo()
-    proc dummyHandler(
+    # The service node has no relay peer, so its relay gives each message that
+    # it publishes to this handler only.
+    var seenHashes: seq[WakuMessageHash]
+    proc collectHandler(
         topic: PubsubTopic, msg: WakuMessage
     ): Future[void] {.async, gcsafe.} =
-      discard
+      let msgHash = computeMessageHash(topic, msg)
+      if msgHash notin seenHashes:
+        seenHashes.add(msgHash)
 
     fakeLightpushNode.subscribe(
-      (kind: PubsubSub, topic: PubsubTopic("/waku/2/rs/3/0")), dummyHandler
+      (kind: PubsubSub, topic: PubsubTopic("/waku/2/rs/3/0")), collectHandler
     ).isOkOr:
       raiseAssert "Failed to subscribe fakeLightpushNode: " & error
 
@@ -551,6 +559,52 @@ suite "Waku API - Send":
     discard await eventManager.waitForEvents(eventTimeout)
 
     eventManager.validate({SendEventOutcome.Error}, requestId)
+    # Each attempt after the first sends the same message, with the same hash.
+    check seenHashes.len == 1
+    (await node.stop()).isOkOr:
+      raiseAssert "Failed to stop node: " & error
+
+  asyncTest "a message that waited without a peer gets a new timestamp and is sent":
+    ## A Core node with no peer keeps the message. Its peers come after more
+    ## than the time that a Store node accepts between a message timestamp and
+    ## its clock. The message gets a new timestamp, so the Store node keeps it.
+    var node: LogosDelivery
+    lockNewGlobalBrokerContext:
+      node = (await LogosDelivery.new(defaultTestWakuNodeConf())).valueOr:
+        raiseAssert error
+      (await node.start()).isOkOr:
+        raiseAssert "Failed to start Waku node: " & error
+
+    let eventManager = newSendEventListenerManager(node.waku.brokerCtx)
+    defer:
+      await eventManager.teardown()
+
+    let contentTopic = ContentTopic("/waku/2/waited-content/proto")
+    let requestId = (
+      await node.messagingClient.send(MessageEnvelope.init(contentTopic, "waited"))
+    ).valueOr:
+      raiseAssert error
+
+    await sleepAsync(22.seconds)
+    check eventManager.propagatedCount == 0 and eventManager.errorCount == 0
+    await node.waku.node.connectToNodes(@[relayNode1PeerInfo, storeNodePeerInfo])
+
+    const eventTimeout = 10.seconds
+    discard await eventManager.waitForEvents(eventTimeout)
+
+    eventManager.validate(
+      {SendEventOutcome.Sent, SendEventOutcome.Propagated}, requestId
+    )
+    let archived = (
+      await storeNode.wakuArchive.findMessages(
+        archive_common.ArchiveQuery(
+          includeData: false,
+          contentTopics: @[contentTopic],
+          pubsubTopic: Opt.some(PubsubTopic("/waku/2/rs/3/0")),
+        )
+      )
+    ).expect("find messages")
+    check archived.hashes.len == 1
     (await node.stop()).isOkOr:
       raiseAssert "Failed to stop node: " & error
 

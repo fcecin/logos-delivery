@@ -9,7 +9,11 @@ import
   logos_delivery/waku/api/publish,
   logos_delivery/waku/factory/waku_conf,
   logos_delivery/waku/rln/rln_api,
-  logos_delivery/waku/rln/rln_lez/[rln_lez, transport]
+  logos_delivery/waku/rln/rln_lez/[rln_lez, transport],
+  logos_delivery/api/types,
+  logos_delivery/messaging/rate_limit_manager/rate_limit_manager,
+  logos_delivery/messaging/delivery_service/send_service/
+    [send_service, send_processor, delivery_task]
 import
   ../testlib/[testasync, wakunodeconf],
   ../waku_rln_relay/utils_onchain,
@@ -79,6 +83,28 @@ suite "SendService RLN proof attach":
       quota.epochIndex == 42
       quota.rateLimit == 100
       quota.remaining == 7
+
+type PropagatingProcessor = ref object of BaseSendProcessor
+  ## Propagates each task at once.
+
+method process(self: PropagatingProcessor, task: DeliveryTask): Future[void] {.async.} =
+  task.state = DeliveryState.SuccessfullyPropagated
+  task.firstPropagatedTime = Opt.some(Moment.now())
+
+type DialFailedOnceProcessor = ref object of BaseSendProcessor
+  ## The first call ends as a failed dial, which gives the message to no node.
+  ## Later calls propagate the task.
+  calls: int
+
+method process(
+    self: DialFailedOnceProcessor, task: DeliveryTask
+): Future[void] {.async.} =
+  inc self.calls
+  if self.calls == 1:
+    task.state = DeliveryState.NextRoundRetry
+    return
+  task.state = DeliveryState.SuccessfullyPropagated
+  task.firstPropagatedTime = Opt.some(Moment.now())
 
 suite "SendService RLN proof attach - RLN mounted":
   var
@@ -219,3 +245,58 @@ suite "SendService RLN proof attach - RLN mounted":
     check:
       first.proof.len > 0
       second.proof == first.proof
+
+  asyncTest "a send gives a new proof and a new timestamp together":
+    ## The task waited less than `MaxUnsentMessageAge`, but its timestamp is in
+    ## an epoch that the message ids already left behind. It gets a new
+    ## timestamp before its proof, so the proof is not refused.
+    discard (await waku.attachRlnProof(testMessage())).expect("current epoch")
+    let rateLimit =
+      RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
+    let service = SendService.new(false, waku, rateLimit, PropagatingProcessor()).expect(
+        "SendService.new"
+      )
+    let msg = messageAt(nowSec() - 5)
+    let pubsubTopic = PubsubTopic("/waku/2/rs/3/0")
+    let task = DeliveryTask(
+      requestId: RequestId("rln-epoch"),
+      pubsubTopic: pubsubTopic,
+      msg: msg,
+      msgHash: computeMessageHash(pubsubTopic, msg),
+      state: DeliveryState.Entry,
+    )
+    await service.send(task)
+    check:
+      task.state == DeliveryState.SuccessfullyPropagated
+      task.msg.proof.len > 0
+      (await onchainRln.validateMessage(task.msg)) == MessageValidationResult.Valid
+
+  asyncTest "a message with a proof keeps its timestamp while it waits":
+    ## A wait does not use a new message id. The proof and the timestamp stay
+    ## until a validator refuses the proof.
+    let rateLimit =
+      RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
+    let service = SendService
+      .new(false, waku, rateLimit, DialFailedOnceProcessor())
+      .expect("SendService.new")
+    let msg = testMessage()
+    let pubsubTopic = PubsubTopic("/waku/2/rs/3/0")
+    let task = DeliveryTask(
+      requestId: RequestId("rln-wait"),
+      pubsubTopic: pubsubTopic,
+      msg: msg,
+      msgHash: computeMessageHash(pubsubTopic, msg),
+      state: DeliveryState.Entry,
+    )
+    await service.send(task)
+    check:
+      task.state == DeliveryState.NextRoundRetry
+      task.msg.proof.len > 0
+    let proof = task.msg.proof
+    let hash = task.msgHash
+    await sleepAsync(MaxUnsentMessageAge + chronos.seconds(1))
+    await service.trySendMessages()
+    check:
+      task.state == DeliveryState.SuccessfullyPropagated
+      task.msg.proof == proof
+      task.msgHash == hash

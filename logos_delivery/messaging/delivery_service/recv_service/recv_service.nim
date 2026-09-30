@@ -142,6 +142,13 @@ proc processIncomingMessage(
   MessageReceivedEvent.emit(self.brokerCtx, msgHash.to0xHex(), message, source)
   return true
 
+proc deliverOwnMessage*(
+    self: RecvService, pubsubTopic: PubsubTopic, message: WakuMessage
+) =
+  ## Delivers a message that this node sent through a lightpush service node.
+  ## Relay did not give it to the local handlers.
+  discard self.processIncomingMessage(pubsubTopic, message, MessageSource.Live)
+
 proc checkStore*(self: RecvService) {.async.} =
   ## Checks the store for messages that were not received directly and
   ## delivers them via MessageReceivedEvent, as `MessageSource.History`.

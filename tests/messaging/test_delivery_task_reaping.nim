@@ -2,6 +2,7 @@
 
 import results, chronos, testutils/unittests
 
+import logos_delivery/waku/waku_core
 import logos_delivery/messaging/delivery_service/send_service/delivery_task
 
 const MaxTime = chronos.minutes(1)
@@ -34,3 +35,67 @@ suite "DeliveryTask - delivery-timeout reaping":
     let task = taskWith(Opt.some(Moment.now()), Opt.none(Moment))
     check task.admissionAge() < MaxTime
     check not task.isDeliveryTimedOut(MaxTime)
+
+suite "DeliveryTask - new timestamp before a send attempt":
+  const MaxAge = chronos.seconds(10)
+
+  proc taskAged(age: timer.Duration): DeliveryTask =
+    let msg = WakuMessage(
+      contentTopic: "/test/1/restamp/proto",
+      payload: @[byte 1, 2, 3],
+      timestamp: getNowInNanosecondTime() - age.nanoseconds,
+      proof: @[byte 9, 9],
+    )
+    let pubsubTopic = PubsubTopic("/waku/2/rs/3/0")
+    return DeliveryTask(
+      pubsubTopic: pubsubTopic, msg: msg, msgHash: computeMessageHash(pubsubTopic, msg)
+    )
+
+  test "an old message that never propagated gets a new timestamp and hash":
+    let task = taskAged(chronos.seconds(30))
+    let oldHash = task.msgHash
+    check:
+      task.restampIfOld(MaxAge)
+      task.messageAge() < MaxAge
+      task.msg.proof.len == 0
+      task.msgHash != oldHash
+      task.msgHash == computeMessageHash(task.pubsubTopic, task.msg)
+
+  test "a recent message keeps its timestamp":
+    let task = taskAged(chronos.seconds(1))
+    let oldTimestamp = task.msg.timestamp
+    check:
+      not task.restampIfOld(MaxAge)
+      task.msg.timestamp == oldTimestamp
+
+  test "a message that propagated keeps its timestamp":
+    let task = taskAged(chronos.seconds(30))
+    task.firstPropagatedTime = Opt.some(Moment.now())
+    let oldHash = task.msgHash
+    check:
+      not task.restampIfOld(MaxAge)
+      task.msgHash == oldHash
+
+  test "a message that a send attempt can have given to a node keeps its timestamp":
+    let task = taskAged(chronos.seconds(30))
+    task.timestampFixed = true
+    let oldHash = task.msgHash
+    check:
+      not task.restampIfOld(MaxAge)
+      task.msgHash == oldHash
+
+suite "DeliveryTask - max parked age":
+  test "the age counts from the call to send, not from the message timestamp":
+    let old = DeliveryTask(
+      createdAt: Opt.some(Moment.now() - chronos.seconds(60)),
+      msg: WakuMessage(timestamp: getNowInNanosecondTime()),
+    )
+    let fresh = DeliveryTask(
+      createdAt: Opt.some(Moment.now()),
+      msg: WakuMessage(
+        timestamp: getNowInNanosecondTime() - chronos.seconds(60).nanoseconds
+      ),
+    )
+    check:
+      old.isParkedExpired(chronos.seconds(30))
+      not fresh.isParkedExpired(chronos.seconds(30))

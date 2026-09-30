@@ -20,6 +20,11 @@ method isValidProcessor*(
 ): bool {.gcsafe.} =
   return self.waku.lightpushPeerAvailable(task.pubsubTopic)
 
+method canAttempt*(
+    self: LightpushSendProcessor, task: DeliveryTask
+): bool {.gcsafe, raises: [].} =
+  return self.waku.lightpushPeerAvailable(task.pubsubTopic)
+
 method sendImpl*(
     self: LightpushSendProcessor, task: DeliveryTask
 ): Future[void] {.async.} =
@@ -39,9 +44,19 @@ method sendImpl*(
       return
 
     case error.code
-    of LightPushErrorCode.NO_PEERS_TO_RELAY, LightPushErrorCode.TOO_MANY_REQUESTS,
-        LightPushErrorCode.OUT_OF_RLN_PROOF, LightPushErrorCode.SERVICE_NOT_AVAILABLE,
-        LightPushErrorCode.INTERNAL_SERVER_ERROR:
+    of LightPushErrorCode.INTERNAL_SERVER_ERROR:
+      # The request can have reached the service node, and the service node can
+      # have published the message.
+      task.timestampFixed = true
+      task.state = DeliveryState.NextRoundRetry
+    of LightPushErrorCode.NO_PEERS_TO_RELAY:
+      # A service node without relay peers gave the message to its own local
+      # handlers. After a dial failure, the service node does not have it.
+      if not error.isDialFailure():
+        task.timestampFixed = true
+      task.state = DeliveryState.NextRoundRetry
+    of LightPushErrorCode.TOO_MANY_REQUESTS, LightPushErrorCode.OUT_OF_RLN_PROOF,
+        LightPushErrorCode.SERVICE_NOT_AVAILABLE:
       task.state = DeliveryState.NextRoundRetry
     else:
       # the message is malformed, send error
@@ -62,6 +77,7 @@ method sendImpl*(
     # Controversial state, publish says ok but no peer. It should not happen.
     debug "Lightpush publish returned zero peers, request pushed back for next round",
       requestId = task.requestId
+    task.timestampFixed = true
     task.state = DeliveryState.NextRoundRetry
 
   return

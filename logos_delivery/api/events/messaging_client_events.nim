@@ -20,6 +20,8 @@ EventBroker:
 EventBroker:
   # Event emitted when a send is held back because the epoch's rate-limit budget
   # is spent. The message stays queued and is sent once the budget refills.
+  # The send can give the message a new timestamp later, so `messageHash` can
+  # change. The later events of the request carry the final hash.
   type MessageQueuedEvent* = object
     requestId*: RequestId
     messageHash*: string
