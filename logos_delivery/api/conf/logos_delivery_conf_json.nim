@@ -88,20 +88,14 @@ proc parseFlatConf(
 
   # [Legacy flat JSON config] Reliability is resolved from the preset by the messaging
   # layer (the kernel no longer carries it), so a flat blob's `preset` must lift it
-  # here to stay faithful to master. An explicit reliability in the blob still wins.
-  if kernel.preset.len > 0:
-    messaging = merge(?resolvePreset(kernel.preset), messaging)
+  # here to stay faithful to master. The blob can also set the messaging flags of the
+  # CLI, which the walker writes to the kernel record. An explicit key still wins.
+  messaging = merge(?MessagingClientConf.init(kernel), messaging)
 
   # [Legacy flat JSON config] This shape builds its own kernel record, so it
   # applies the level here. `toWakuNodeConf` does the same for the structured
   # shape.
-  if messaging.anonymityLevel.get(AnonymityLevel.None) != AnonymityLevel.None:
-    if kernel.mix == Opt.some(false):
-      return err(
-        "anonymityLevel=" & $messaging.anonymityLevel.get() &
-          " needs mix, but mix=false was set"
-      )
-    kernel.mix = Opt.some(true)
+  ?enableMixForAnonymity(kernel, messaging.anonymityLevel)
 
   return ok(
     LogosDeliveryConf(
