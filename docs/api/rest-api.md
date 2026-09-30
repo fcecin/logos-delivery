@@ -88,9 +88,11 @@ A poll clears what it returns, for every client. The received buffer keeps the n
 
 With one polling client, a gap in `seq` between two polls is the number of evicted records. With more clients, a gap can also be records that another client polled. `seq` starts again at 1 when the node restarts.
 
-An eviction is an observation loss of the client, not a network loss. To stop it, poll faster or increase the capacity. The `Message received` log line and the `logos_delivery_recv_messages_total{source=...}` metric count every delivery.
+An evicted message was received, and only the client missed it. To stop evictions, poll faster or increase the capacity. The `Message received` log line and the `logos_delivery_recv_messages_total{source=...}` metric count every delivery.
 
-Malformed bodies and content topics answer `400`. A node without autosharding answers `503`.
+The send buffer keeps the statuses of the newest requests and drops the oldest when full. The metric `logos_delivery_rest_send_dropped_total` counts the dropped ones.
+
+Malformed bodies and content topics get HTTP `400`. A node without autosharding answers HTTP `503`. A send to a full send queue gets HTTP `429` with a `Retry-After` header. `--send-queue-capacity` sets the size of the queue.
 
 ### Node configuration
 Find details [here](../operators/how-to/configure-rest-api.md). To set up a network of Messaging API nodes, see [Run a Messaging API node](../operators/how-to/run-messaging.md).
