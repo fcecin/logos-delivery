@@ -186,6 +186,12 @@ suite "Waku Mix - hop address policy":
     store[ProtoBook][publicPeers[0]] = @[WakuLightPushCodec]
     check mixHealth() == HealthStatus.READY
 
+    # Evidence against the one public exit takes readiness away again.
+    node.peerManager.recordDialFailure(publicPeers[0], "test")
+    check:
+      node.getMixNodePoolSize() == MinMixPoolSize - 1
+      mixHealth() == HealthStatus.NOT_READY
+
   asyncTest "the own hop of a sender behind NAT still ends its reply paths":
     ## The hop policy applies only to the hops of other nodes.
     let node = await mixNode()

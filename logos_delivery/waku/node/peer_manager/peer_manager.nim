@@ -335,6 +335,34 @@ proc addServicePeer*(pm: PeerManager, remotePeerInfo: RemotePeerInfo, proto: str
 # require pre-connection
 proc pruneInRelayConns(pm: PeerManager, amount: int) {.async.}
 
+proc dialFailureClock*(): Moment =
+  ## The clock of `LastFailedConnBook`.
+  Moment.init(getTime().toUnix, Second)
+
+proc isOnline*(pm: PeerManager): bool =
+  ## False while the online monitor finds no network.
+  pm.online
+
+proc recordDialSuccess*(pm: PeerManager, peerId: PeerId, source = "api") =
+  ## Counts a successful dial from `source` and clears the failed-dial count of
+  ## `peerId`.
+  logos_delivery_peers_dials.inc(labelValues = ["successful"])
+  logos_delivery_node_conns_initiated.inc(labelValues = [source])
+  pm.switch.peerStore[NumberFailedConnBook][peerId] = 0
+
+proc recordDialFailure*(pm: PeerManager, peerId: PeerId, reason: string) =
+  ## Records a failed dial to `peerId`, with `reason` as the metric label.
+  logos_delivery_peers_dials.inc(labelValues = [reason])
+  let peerStore = pm.switch.peerStore
+  peerStore[NumberFailedConnBook][peerId] = peerStore[NumberFailedConnBook][peerId] + 1
+  peerStore[LastFailedConnBook][peerId] = dialFailureClock()
+  peerStore[ConnectionBook][peerId] = CannotConnect
+
+  trace "Connecting peer failed",
+    peerId = peerId,
+    reason = reason,
+    failedAttempts = peerStore[NumberFailedConnBook][peerId]
+
 # Connects to a given node. Note that this function uses `connect` and
 # does not provide a protocol. Streams for relay (gossipsub) are created
 # automatically without the needing to dial.
@@ -376,23 +404,11 @@ proc connectPeer*(
       if not deadline.finished():
         await deadline.cancelAndWait()
 
-      logos_delivery_peers_dials.inc(labelValues = ["successful"])
-      logos_delivery_node_conns_initiated.inc(labelValues = [source])
-
-      peerStore[NumberFailedConnBook][peerId] = 0
+      pm.recordDialSuccess(peerId, source)
 
       return true
 
-  # Dial failed
-  peerStore[NumberFailedConnBook][peerId] = peerStore[NumberFailedConnBook][peerId] + 1
-  peerStore[LastFailedConnBook][peerId] = Moment.init(getTime().toUnix, Second)
-  peerStore[ConnectionBook][peerId] = CannotConnect
-
-  trace "Connecting peer failed",
-    peerId = peerId,
-    reason = reasonFailed,
-    failedAttempts = peerStore[NumberFailedConnBook][peerId]
-  logos_delivery_peers_dials.inc(labelValues = [reasonFailed])
+  pm.recordDialFailure(peerId, reasonFailed)
 
   return false
 

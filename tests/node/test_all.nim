@@ -5,6 +5,7 @@ import
   ./test_wakunode_legacy_lightpush,
   ./test_wakunode_lightpush,
   ./test_wakunode_mix,
+  ./test_wakunode_mix_dial_evidence,
   ./test_wakunode_mix_e2e,
   ./test_wakunode_mix_hop_policy,
   ./test_wakunode_mix_reply_link,
