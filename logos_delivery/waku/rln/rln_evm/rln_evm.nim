@@ -251,7 +251,7 @@ proc toRlnPlugin*(rlnEvm: RlnEvm): RlnPlugin =
     except Exception:
       error "exception stopping the node", error = getCurrentExceptionMsg()
 
-  proc backendReady(): Future[bool] {.async.} =
+  proc backendReady(): Future[bool] {.async: (raises: [CancelledError]).} =
     return await rlnEvm.isReady()
 
   proc proofRejected() =

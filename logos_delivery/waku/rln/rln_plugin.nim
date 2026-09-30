@@ -28,7 +28,7 @@ type
     ## nil when the backend has no such concept.
     name*: string ## for logs and metrics only, never for dispatch
     stop*: proc(): Future[void] {.gcsafe, raises: [].}
-    isReady*: proc(): Future[bool] {.gcsafe, raises: [].}
+    isReady*: proc(): Future[bool] {.async: (raises: [CancelledError]), gcsafe.}
     onProofRejected*: proc() {.gcsafe, raises: [].}
       ## Called when a publish was rejected as RLN-invalid, so the backend can
       ## refresh whatever the proof was built against. Must not block: callers
