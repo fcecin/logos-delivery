@@ -93,6 +93,11 @@ the last event. Clients must ignore kinds that they do not know. A `404` on
 `GET /events/send/{requestId}` means that nothing is buffered for that id now: the id is
 unknown, already polled, or has no event yet. Keep polling until the last event.
 
+A message that waits more than 10 s to propagate gets a new timestamp before the next send
+attempt, so a Store node accepts it. The new timestamp changes the message hash. The
+`propagated`, `sent` and `error` events carry the final hash. A `queued` event can carry the
+hash from before.
+
 Each received record has the message hash, the full `WakuMessage` and a `source`: `live` for a
 message that arrived when it was published, `history` for a message that a Store peer returned
 at startup or after a connectivity gap. The node buffers only the content topics subscribed

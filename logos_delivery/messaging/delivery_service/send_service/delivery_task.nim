@@ -130,5 +130,16 @@ proc isParkedExpired*(self: DeliveryTask, maxAge: timer.Duration): bool =
   ## and deliver arbitrarily late.
   return self.firstAdmittedTime.isNone() and self.messageAge() > maxAge
 
+proc restampIfOld*(self: DeliveryTask, maxAge: timer.Duration): bool =
+  ## Sets the message timestamp to now when the message is older than `maxAge`,
+  ## the task never propagated, and no mix exit got the message. Clears the RLN
+  ## proof and calculates the hash again. Gives true when it sets a new timestamp.
+  if self.firstPropagatedTime.isSome() or self.anonymized or self.messageAge() <= maxAge:
+    return false
+  self.msg.timestamp = getNowInNanosecondTime()
+  self.msg.proof = @[]
+  self.msgHash = computeMessageHash(self.pubsubTopic, self.msg)
+  return true
+
 proc isEphemeral*(self: DeliveryTask): bool =
   return self.msg.ephemeral

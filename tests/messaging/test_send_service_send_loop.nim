@@ -177,6 +177,19 @@ suite "SendService - batched send pass":
     await pass
     check a.state == DeliveryState.SuccessfullyPropagated
 
+  asyncTest "a message that waited gets a new timestamp before it is sent":
+    let processor = newScripted()
+    let service = newService(processor)
+    let task = buildTask("waited") # its timestamp is from 2023
+    let oldHash = task.msgHash
+    await service.queue(@[task])
+    await service.trySendMessages()
+    check:
+      task.state == DeliveryState.SuccessfullyPropagated
+      task.messageAge() < MaxUnsentMessageAge
+      task.msgHash != oldHash
+      task.msgHash == computeMessageHash(task.pubsubTopic, task.msg)
+
   asyncTest "a pass starts at most MaxSendsInFlight sends before waiting for them":
     let ids = names("t", MaxSendsInFlight + 1)
     let processor = newScripted(stalled = ids)
