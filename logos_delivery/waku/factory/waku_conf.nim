@@ -93,6 +93,9 @@ type MixConf* = ref object
   mixKey*: Curve25519Key
   mixPubKey*: Curve25519Key
   mixnodes*: seq[MixNodePubInfo]
+  privateHops*: bool
+    ## Lets mix hops use private, shared, loopback and relay-route addresses. For
+    ## a private network or a single host.
 
 type StoreServiceConf* = object
   dbMigration*: bool

@@ -16,6 +16,8 @@ make logosdeliverynode
 make chat2mix
 ```
 
+All nodes run on `127.0.0.1`. By default, mix puts on its paths only hops with a public address. Each config and chat script sets `mix-private-hops` so that mix accepts the loopback hops of this simulation.
+
 The simulation uses cluster 66, which has no network preset. Do not change it to 2. Cluster 2 applies the logos.dev preset, and the nodes then connect to the public logos.dev network and advertise their loopback addresses there.
 
 Simulation includes scripts for:

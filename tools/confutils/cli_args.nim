@@ -663,9 +663,16 @@ hence would have reachability issues.""",
 
   mixnodes* {.
     desc:
-      "A mix node to seed the pool with, as multiaddr:mixPubKey. The multiaddress carries a /p2p/<peer id> on TCP or QUIC-v1 over IPv4 (directly or through a circuit relay), or names its host (dns4), which is resolved after the mount. Argument may be repeated.",
+      "A mix node to seed the pool with, as multiaddr:mixPubKey. The multiaddress carries a /p2p/<peer id> on TCP or QUIC-v1 over IPv4 (directly or through a circuit relay), or names its host (dns4), which is resolved after the mount. An entry on a private or loopback address, or a circuit relay route, needs --mix-private-hops=true. Argument may be repeated.",
     name: "mixnode"
   .}: seq[MixNodePubInfo]
+
+  mixPrivateHops* {.
+    desc:
+      "Let mix paths use hops on private, shared or loopback addresses, and circuit relay routes. Only for a private network or a single host. On the public network, the other hops cannot dial these addresses.",
+    defaultValue: false,
+    name: "mix-private-hops"
+  .}: bool
 
   # Kademlia Discovery config
   # Opt-typed; desc states the default since the CLI can't auto-show it for Opt.none().
@@ -1146,6 +1153,7 @@ proc toWakuConf*(n: WakuNodeConf): ConfResult[WakuConf] =
   b.mixConf.withMixNodes(n.mixnodes)
   if n.mixkey.isSome():
     b.mixConf.withMixKey(n.mixkey.get())
+  b.mixConf.withPrivateHops(n.mixPrivateHops)
 
   b.filterServiceConf.withEnabled(n.filter)
   b.filterServiceConf.withSubscriptionTimeout(n.filterSubscriptionTimeout)
