@@ -259,6 +259,8 @@ const RestartTopic = ContentTopic("/waku/2/recv-process-restart/proto")
 const TestShard = PubsubTopic("/waku/2/rs/3/0")
 const SecondShard = PubsubTopic("/waku/2/rs/3/1") ## shard 1 of a two-shard network
 const OfflineCount = 105 ## archived between two subscriber processes, two Store pages
+
+const GapCount = 105 ## archived in one connectivity gap, two Store pages
 const Hour = chronos.hours(1).nanos
 
 proc runRestartedReceiver(
@@ -807,6 +809,205 @@ suite "Messaging API, Receive Service (store recovery)":
       # The setup message and the gap message were both recovered from Store.
       check eventManager.receivedSources ==
         @[MessageSource.History, MessageSource.History]
+
+    # Phase 5: the reconnection check reads all Store pages of a connectivity gap.
+    block:
+      let topic = ContentTopic("/waku/2/recv-long-gap-test/proto")
+      let net = await setupNetwork(topic)
+      defer:
+        await net.teardown()
+      let eventManager = net.events
+      check await eventManager.waitForEvents(TestTimeout) # the setup message
+      await net.joinMesh()
+      await waitForProtocolHealth(
+        net.subscriber.waku, WakuProtocol.RelayProtocol, HealthStatus.READY
+      )
+      discard await net.tunnel(
+        topic,
+        waitForProtocolHealth(
+          net.subscriber.waku, WakuProtocol.RelayProtocol, HealthStatus.NOT_READY
+        ),
+      )
+      for i in 0 ..< GapCount:
+        await net.storeNode.wakuArchive.handleMessage(
+          TestShard,
+          WakuMessage(
+            payload: ("long-gap-" & $i).toBytes(), contentTopic: topic, timestamp: now()
+          ),
+        )
+      eventManager.targetCount = GapCount + 2
+      eventManager.receivedEvent.clear()
+      await net.subscriber.waku.node.connectToNodes(@[net.storeNodePeerInfo])
+      check await eventManager.waitForEvents(TestTimeout)
+      check eventManager.receivedMessages.len == GapCount + 2
+      let payloads =
+        eventManager.receivedMessages.mapIt(string.fromBytes(it.payload)).toHashSet()
+      for i in 0 ..< GapCount:
+        check ("long-gap-" & $i) in payloads
+      check eventManager.receivedSources.allIt(it == MessageSource.History)
+
+    # Phase 6: the reconnection check starts at the last live message, not at
+    # the time that the node sees that it is offline. A message that nobody
+    # relayed between the two times comes from Store.
+    block:
+      let topic = ContentTopic("/waku/2/recv-late-loss-test/proto")
+      let net = await setupNetwork(topic)
+      defer:
+        await net.teardown()
+      let eventManager = net.events
+      check await eventManager.waitForEvents(TestTimeout) # the setup message
+      await net.subscriber.messagingClient.recvService.waitForStartupCatchUp()
+      await net.joinMesh()
+      await waitForProtocolHealth(
+        net.subscriber.waku, WakuProtocol.RelayProtocol, HealthStatus.READY
+      )
+      eventManager.targetCount = 2
+      eventManager.receivedEvent.clear()
+      await net.publishLive(topic, "live before the loss")
+      check await eventManager.waitForEvents(TestTimeout)
+      await sleepAsync(7.seconds)
+      # More than `DelayExtra` before the node sees that it is offline.
+      let lost = await net.archiveAt(topic, now() - 6_000_000_000, "lost before seen")
+      discard await net.tunnel(
+        topic,
+        waitForProtocolHealth(
+          net.subscriber.waku, WakuProtocol.RelayProtocol, HealthStatus.NOT_READY
+        ),
+      )
+      eventManager.targetCount = 4
+      eventManager.receivedEvent.clear()
+      await net.subscriber.waku.node.connectToNodes(@[net.storeNodePeerInfo])
+      check await eventManager.waitForEvents(TestTimeout)
+      let lostIdx = eventManager.receivedMessages.mapIt(it.payload).find(lost.payload)
+      check:
+        lostIdx >= 0
+        lostIdx >= 0 and eventManager.receivedSources[lostIdx] == MessageSource.History
+
+    # Phase 7: the reconnection check tries a failed content topic again. Its
+    # only Store peer does not answer at first. The startup catch-up is off,
+    # so only the reconnection check can deliver the gap message.
+    block:
+      let topic = ContentTopic("/waku/2/recv-check-retry-test/proto")
+      let net = await setupNetwork(
+        topic, knowStorePeer = false, messaging = backfillOverrides(false)
+      )
+      defer:
+        await net.teardown()
+      let eventManager = net.events
+      let deadId = PeerId
+        .init(generateSecp256k1Key().getPublicKey().expect("public key"))
+        .expect("peer id")
+      let dead =
+        parsePeerInfo("/ip4/10.255.255.1/tcp/60000/p2p/" & $deadId).expect("dead peer")
+      net.subscriber.waku.node.peerManager.addServicePeer(dead, WakuStoreCodec)
+      # Relay through the publisher only. The node is online with a dead Store peer.
+      await net.joinMesh(net.publisher.peerInfo.toRemotePeerInfo())
+      # The first pass of the check fails on the dead peer, after the default
+      # query timeout of 10 s.
+      await sleepAsync(chronos.seconds(12))
+      net.subscriber.waku.node.peerManager.addServicePeer(
+        net.storeNodePeerInfo, WakuStoreCodec
+      )
+      let gapMsg = await net.archiveAt(topic, now(), "archived during a failed check")
+      var gapIdx = -1
+      let deadline = Moment.now() + CatchUpRetryPeriod + TestTimeout
+      while gapIdx < 0 and Moment.now() < deadline:
+        eventManager.receivedEvent.clear()
+        gapIdx = eventManager.receivedMessages.mapIt(it.payload).find(gapMsg.payload)
+        if gapIdx < 0:
+          discard await eventManager.waitForEvents(chronos.seconds(5))
+      check:
+        gapIdx >= 0
+        gapIdx >= 0 and eventManager.receivedSources[gapIdx] == MessageSource.History
+
+    # Phase 8: a message that the node publishes on relay does not move the
+    # start of the reconnection check. A message that nobody relayed before the
+    # own message comes from Store.
+    block:
+      let topic = ContentTopic("/waku/2/recv-own-publish-test/proto")
+      let net = await setupNetwork(topic)
+      defer:
+        await net.teardown()
+      let eventManager = net.events
+      check await eventManager.waitForEvents(TestTimeout) # the setup message
+      await net.subscriber.messagingClient.recvService.waitForStartupCatchUp()
+      await net.joinMesh()
+      await waitForProtocolHealth(
+        net.subscriber.waku, WakuProtocol.RelayProtocol, HealthStatus.READY
+      )
+      eventManager.targetCount = 2
+      eventManager.receivedEvent.clear()
+      await net.publishLive(topic, "live before the own message")
+      check await eventManager.waitForEvents(TestTimeout)
+      let lost = await net.archiveAt(topic, now(), "lost before the own message")
+      # More than `BackfillOverlap` after the lost message.
+      await sleepAsync(chronos.seconds(45))
+      eventManager.targetCount = 3
+      eventManager.receivedEvent.clear()
+      discard (
+        await net.subscriber.messagingClient.send(
+          MessageEnvelope.init(topic, "own message")
+        )
+      ).expect("send")
+      check await eventManager.waitForEvents(TestTimeout) # the own message
+      discard await net.tunnel(
+        topic,
+        waitForProtocolHealth(
+          net.subscriber.waku, WakuProtocol.RelayProtocol, HealthStatus.NOT_READY
+        ),
+      )
+      eventManager.targetCount = 5
+      eventManager.receivedEvent.clear()
+      await net.subscriber.waku.node.connectToNodes(@[net.storeNodePeerInfo])
+      check await eventManager.waitForEvents(TestTimeout)
+      let lostIdx = eventManager.receivedMessages.mapIt(it.payload).find(lost.payload)
+      check:
+        lostIdx >= 0
+        lostIdx >= 0 and eventManager.receivedSources[lostIdx] == MessageSource.History
+
+    # Phase 9: a live message that comes while the node knows no Store peer does
+    # not move the start of the check across the gap. The check reads the gap
+    # when a Store peer comes.
+    block:
+      let topic = ContentTopic("/waku/2/recv-gap-open-test/proto")
+      let net = await setupNetwork(
+        topic, knowStorePeer = false, messaging = backfillOverrides(false)
+      )
+      defer:
+        await net.teardown()
+      let eventManager = net.events
+      let publisher = net.publisher.peerInfo.toRemotePeerInfo()
+      await net.joinMesh(publisher)
+      eventManager.targetCount = eventManager.receivedMessages.len + 1
+      eventManager.receivedEvent.clear()
+      await net.publishLive(topic, "live before the gap")
+      check await eventManager.waitForEvents(TestTimeout)
+      await net.subscriber.waku.node.disconnectNode(publisher)
+      await waitForProtocolHealth(
+        net.subscriber.waku, WakuProtocol.RelayProtocol, HealthStatus.NOT_READY
+      )
+      let gapMsg = await net.archiveAt(topic, now(), "archived in the gap")
+      # More than `BackfillOverlap` after the gap message.
+      await sleepAsync(chronos.seconds(41))
+      await net.joinMesh(publisher)
+      eventManager.targetCount = eventManager.receivedMessages.len + 1
+      eventManager.receivedEvent.clear()
+      await net.publishLive(topic, "live after the gap")
+      check await eventManager.waitForEvents(TestTimeout)
+      net.subscriber.waku.node.peerManager.addServicePeer(
+        net.storeNodePeerInfo, WakuStoreCodec
+      )
+      await net.subscriber.waku.node.connectToNodes(@[net.storeNodePeerInfo])
+      var gapIdx = -1
+      let deadline = Moment.now() + TestTimeout
+      while gapIdx < 0 and Moment.now() < deadline:
+        eventManager.receivedEvent.clear()
+        gapIdx = eventManager.receivedMessages.mapIt(it.payload).find(gapMsg.payload)
+        if gapIdx < 0:
+          discard await eventManager.waitForEvents(chronos.seconds(5))
+      check:
+        gapIdx >= 0
+        gapIdx >= 0 and eventManager.receivedSources[gapIdx] == MessageSource.History
 
   asyncTest "the receive service follows its receive peers, not ConnectionStatus":
     ## Under #4238, `ConnectionStatus` stays `Disconnected` in every phase.

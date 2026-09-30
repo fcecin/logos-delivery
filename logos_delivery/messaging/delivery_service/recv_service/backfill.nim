@@ -173,7 +173,7 @@ proc runCatchUpPass*(
         else:
           Result[Opt[Timestamp], string].err(response.error)
       let next = accepted.valueOr:
-        debug "Store catch-up query failed, the topic retries next pass",
+        debug "Store catch-up query failed for a topic",
           pubsubTopic = topic.pubsubTopic, contentTopic = topic.contentTopic, error
         progress[topic] = start
         completed = false

@@ -9,10 +9,14 @@ import ./[delivery_task, send_processor]
 logScope:
   topics = "send service relay processor"
 
+type OwnPublishHandler* = proc(msgHash: WakuMessageHash) {.gcsafe, raises: [].}
+  ## Gets the hash of each message just before relay publishes it.
+
 type RelaySendProcessor* = ref object of BaseSendProcessor
   waku: Waku
   publishProc: PushMessageHandler
   fallbackStateToSet: DeliveryState
+  onPublish: OwnPublishHandler
 
 proc new*(
     T: typedesc[RelaySendProcessor],
@@ -20,6 +24,7 @@ proc new*(
     publishProc: PushMessageHandler,
     waku: Waku,
     brokerCtx: BrokerContext,
+    onPublish: OwnPublishHandler = nil,
 ): RelaySendProcessor =
   let fallbackStateToSet =
     if lightpushAvailable:
@@ -32,6 +37,7 @@ proc new*(
     publishProc: publishProc,
     fallbackStateToSet: fallbackStateToSet,
     brokerCtx: brokerCtx,
+    onPublish: onPublish,
   )
 
 proc isTopicHealthy(self: RelaySendProcessor, topic: PubsubTopic): bool {.gcsafe.} =
@@ -59,6 +65,11 @@ method sendImpl*(self: RelaySendProcessor, task: DeliveryTask) {.async.} =
     requestId = task.requestId,
     msgHash = task.msgHash.to0xHex(),
     tryCount = task.tryCount
+
+  # Relay also gives a published message to the local handlers, so the receive
+  # service gets it as a live message.
+  if not self.onPublish.isNil():
+    self.onPublish(task.msgHash)
 
   let noOfPublishedPeers = (await self.publishProc(task.pubsubTopic, task.msg)).valueOr:
     let errorMessage = error.desc.get($error.code)

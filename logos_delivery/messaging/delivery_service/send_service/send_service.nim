@@ -102,7 +102,7 @@ type SendService* = ref object of RootObj
     ## children when it is cancelled itself.
 
 proc setupSendProcessorChain*(
-    waku: Waku, anonymityLevel: AnonymityLevel
+    waku: Waku, anonymityLevel: AnonymityLevel, onRelayPublish: OwnPublishHandler = nil
 ): Result[BaseSendProcessor, string] =
   let brokerCtx = waku.brokerCtx
   let isRelayAvail = waku.hasRelay()
@@ -127,7 +127,9 @@ proc setupSendProcessorChain*(
   if isRelayAvail:
     let publishProc = waku.relayPushHandler()
     processors.add(
-      RelaySendProcessor.new(isLightPushAvail, publishProc, waku, brokerCtx)
+      RelaySendProcessor.new(
+        isLightPushAvail, publishProc, waku, brokerCtx, onRelayPublish
+      )
     )
   if isLightPushAvail:
     processors.add(LightpushSendProcessor.new(waku, brokerCtx))

@@ -385,3 +385,10 @@ suite "Receive backfill":
       """{"messagingOverrides": {"backfillRequestTimeoutSeconds": "many"}}"""
     )
       .isErr()
+    # The pruner keeps the hashes of the next check window, for at most one hour.
+    let minute = chronos.minutes(1).nanos
+    check:
+      pruneCutoff(Base, Base - 3 * Hour) == Base - Hour
+      pruneCutoff(Base, Base - 10 * minute) ==
+        Base - 10 * minute - chronos.seconds(20).nanos
+      pruneCutoff(Base, Base - minute) == Base - 7 * minute

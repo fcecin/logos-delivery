@@ -22,8 +22,13 @@ import
   logos_delivery/waku/api/events/[health_events, peer_events],
   logos_delivery/waku/requests/health_requests,
   logos_delivery/waku/node/health_monitor/health_status
+from logos_delivery/waku/waku_archive/archive import MaxMessageTimestampVariance
 
 const MaxMessageLife = chronos.minutes(7) ## Max time we will keep track of rx messages
+
+const MaxHashLife* = chronos.hours(1)
+  ## The longest time that the service keeps the hash of a received message.
+  ## A check that reads a longer time can deliver a message again.
 
 const PruneOldMsgsPeriod = chronos.minutes(1)
 
@@ -40,6 +45,11 @@ const CatchUpRetryPeriod* = chronos.seconds(30)
 const FirstRunHistory* = chronos.hours(24)
   ## The catch-up of a node with no recovery hint goes back this far.
 
+const MaxCheckAttempts* = 10
+  ## Store passes of one reconnection check before it stops with content topics
+  ## that are not complete. The next time that the node comes back online, a
+  ## new check reads them again.
+
 const CatchUpSettlePeriod* = chronos.seconds(10)
   ## The wait for one more subscription after the startup catch-up is complete.
 
@@ -48,9 +58,6 @@ const
   DefaultBackfillRequestTimeout = chronos.seconds(10)
   MinBackfillRequestTimeoutSeconds = 1
   MaxBackfillRequestTimeoutSeconds = 300
-
-type TupleHashAndMsg =
-  tuple[hash: WakuMessageHash, msg: WakuMessage, pubsubTopic: PubsubTopic]
 
 type BackfillState* = object
   ## Settings and state of the startup catch-up. `backfill.nim` has the mechanism.
@@ -74,12 +81,27 @@ type RecvService* = ref object of RootObj
     ## hash of each message received in the last `MaxMessageLife`, with its
     ## local receipt time
 
+  receivePathReady: bool
+    ## the result of `hasReadyReceivePath` at the last readiness event
   online: bool ## receive path ready (see hasReadyReceivePath) and a Store peer known
   backfillHandler: Future[void] ## in-flight store backfill task
   msgPrunerHandler: Future[void] ## removes too old messages
 
   startTimeToCheck: Timestamp
-  endTimeToCheck: Timestamp
+    ## The start of the next reconnection check. The node has all messages from
+    ## before this time. A live message and a complete check move it forward.
+  recheckRequested: bool
+    ## Set when the node comes back online while a check runs. The check then
+    ## reads all content topics again.
+  gapStart: Opt[Timestamp]
+    ## Set when the node loses its receive path. Cleared when a check that
+    ## started after this time reads all content topics. While it is set, a
+    ## live message does not move `startTimeToCheck`.
+  ownRelayMsgs: Table[WakuMessageHash, Timestamp]
+    ## The hashes of the messages that this node publishes on relay, with the
+    ## time of the publish. Relay gives these messages to the local handlers
+    ## too. Such a message does not show that the node gets messages from its
+    ## peers.
 
   backfill: BackfillState ## the startup catch-up from the persisted hint
   stopping: bool
@@ -87,27 +109,17 @@ type RecvService* = ref object of RootObj
     ## `CancelledError` and does not raise it again, so a cancel may not reach the
     ## catch-up task. Remove this flag when broker requests raise it again.
 
-proc getMissingMsgsFromStore(
-    self: RecvService, msgHashes: seq[WakuMessageHash]
-): Future[Result[seq[TupleHashAndMsg], string]] {.async.} =
-  let storeResp: StoreQueryResponse = (
-    await self.waku.storeQueryToAny(
-      StoreQueryRequest(includeData: true, messageHashes: msgHashes)
-    )
-  ).valueOr:
-    return err("getMissingMsgsFromStore: " & $error)
+proc expectOwnRelayMessage*(self: RecvService, msgHash: WakuMessageHash) =
+  ## Records a message that this node is about to publish on relay.
+  self.ownRelayMsgs[msgHash] = getNowInNanosecondTime()
 
-  let otherwiseMsg = WakuMessage()
-  let otherwiseTopic = PubsubTopic("")
-  return ok(
-    storeResp.messages.mapIt(
-      (
-        hash: it.messageHash,
-        msg: it.message.get(otherwiseMsg),
-        pubsubTopic: it.pubsubTopic.get(otherwiseTopic),
-      )
-    )
-  )
+func pruneCutoff*(now, startTimeToCheck: Timestamp): Timestamp =
+  ## The pruner removes the hashes that the node received before this time. It
+  ## keeps the hashes that the next check can get from Store again, for at most
+  ## `MaxHashLife`.
+  let forNextCheck =
+    max(startTimeToCheck - MaxMessageTimestampVariance, now - MaxHashLife.nanos)
+  return min(now - MaxMessageLife.nanos, forNextCheck)
 
 proc processIncomingMessage(
     self: RecvService, pubsubTopic: string, message: WakuMessage, source: MessageSource
@@ -132,7 +144,16 @@ proc processIncomingMessage(
 
   # Local receipt time: a message recovered from Store stays known for the
   # full period whatever its own timestamp.
-  self.recentReceivedMsgs[msgHash] = getNowInNanosecondTime()
+  let now = getNowInNanosecondTime()
+  self.recentReceivedMsgs[msgHash] = now
+  # A running check keeps its start, so that the pruner keeps the hashes of its
+  # window.
+  let checkRunning =
+    not self.backfillHandler.isNil() and not self.backfillHandler.finished()
+  let fromPeers = not self.ownRelayMsgs.hasKey(msgHash)
+  if source == MessageSource.Live and fromPeers and self.receivePathReady and
+      self.gapStart.isNone() and not checkRunning:
+    self.startTimeToCheck = max(self.startTimeToCheck, now - BackfillOverlap)
   recordReceived(source, message.payload.len)
   info "Message received",
     msg_hash = msgHash.to0xHex(),
@@ -142,55 +163,81 @@ proc processIncomingMessage(
   MessageReceivedEvent.emit(self.brokerCtx, msgHash.to0xHex(), message, source)
   return true
 
+proc queryAnyStore(self: RecvService): BackfillQuery =
+  ## Sends a query to any Store peer. Gives an error when the service stops.
+  return proc(
+      request: StoreQueryRequest
+  ): Future[Result[StoreQueryResponse, string]] {.async.} =
+    if self.stopping:
+      return err("receive service is stopping")
+    return await self.waku.storeQueryToAny(request)
+
+proc deliverFromStore(self: RecvService): BackfillDeliver =
+  ## Delivers a message from Store as `MessageSource.History`. Gives false for
+  ## a message of a content topic that the node does not subscribe to.
+  return proc(
+      pubsubTopic: PubsubTopic, message: WakuMessage
+  ): bool {.gcsafe, raises: [].} =
+    if not self.waku.isContentSubscribed(pubsubTopic, message.contentTopic):
+      return false
+    discard self.processIncomingMessage(pubsubTopic, message, MessageSource.History)
+    return true
+
 proc checkStore*(self: RecvService) {.async.} =
   ## Checks the store for messages that were not received directly and
   ## delivers them via MessageReceivedEvent, as `MessageSource.History`.
+  ## Reads all pages of each subscribed content topic from `startTimeToCheck`.
+  ## Tries a failed content topic again after `CatchUpRetryPeriod`. Moves
+  ## `startTimeToCheck` forward only when all content topics are complete.
   if not self.waku.isStoreMounted():
     debug "recv service has no store client mounted, skipping store check"
     return
 
-  self.endTimeToCheck = getNowInNanosecondTime()
-
-  ## query store and deliver new recovered messages per subscribed topic
-  for (pubsubTopic, contentTopics) in self.waku.subscribedContentTopics():
-    let storeResp: StoreQueryResponse = (
-      await self.waku.storeQueryToAny(
-        StoreQueryRequest(
-          includeData: false,
-          pubsubTopic: Opt.some(pubsubTopic),
-          contentTopics: toSeq(contentTopics),
-          startTime: Opt.some(self.startTimeToCheck - DelayExtra.nanos),
-          endTime: Opt.some(self.endTimeToCheck + DelayExtra.nanos),
-        )
-      )
-    ).valueOr:
-      debug "checkStore failed to get remote msgHashes",
-        pubsubTopic = pubsubTopic, cTopics = toSeq(contentTopics), error = $error
+  let since = self.startTimeToCheck
+  var completed: HashSet[BackfillTopic]
+  let progress = newTable[BackfillTopic, Timestamp]() # a failed topic's next page start
+  self.recheckRequested = false
+  var attempt = 0
+  while not self.stopping:
+    inc attempt
+    let checkEnd = getNowInNanosecondTime()
+    let pending =
+      backfillTopics(self.waku.subscribedContentTopics()).filterIt(it notin completed)
+    let exhausted = await runCatchUpPass(
+      pending,
+      progress,
+      since,
+      checkEnd + DelayExtra.nanos,
+      self.backfill.queryTimeout,
+      self.queryAnyStore(),
+      self.deliverFromStore(),
+    )
+    if self.stopping:
+      return
+    for topic in exhausted:
+      completed.incl(topic)
+    if self.recheckRequested:
+      # The node went offline and came back during the check.
+      self.recheckRequested = false
+      completed.clear()
+      progress.clear()
+      attempt = 0
       continue
-
-    ## compare the msgHashes seen from the store vs the ones received directly
-    let msgHashesInStore = storeResp.messages.mapIt(it.messageHash)
-    let missedHashes: seq[WakuMessageHash] =
-      msgHashesInStore.filterIt(not self.recentReceivedMsgs.hasKey(it))
-
-    if missedHashes.len > 0:
-      info "missed messages detected, checking store for missed messages",
-        pubsubTopic = pubsubTopic, missedCount = missedHashes.len
-
-      ## Now retrieve the missing WakuMessages and deliver them
-      let missingMsgsRet = await self.getMissingMsgsFromStore(missedHashes)
-      if missingMsgsRet.isOk():
-        for msgTuple in missingMsgsRet.get():
-          if self.processIncomingMessage(
-            msgTuple.pubsubTopic, msgTuple.msg, MessageSource.History
-          ):
-            debug "recv service store-recovered message",
-              msg_hash = shortLog(msgTuple.hash), pubsubTopic = msgTuple.pubsubTopic
-      else:
-        debug "Failed to retrieve missing messages: ", error = $missingMsgsRet.error
-
-  ## update next check times
-  self.startTimeToCheck = self.endTimeToCheck
+    if exhausted.len == pending.len:
+      self.startTimeToCheck = max(self.startTimeToCheck, checkEnd - DelayExtra.nanos)
+      if self.gapStart.isSome() and self.gapStart.get() <= checkEnd:
+        self.gapStart = Opt.none(Timestamp)
+      return
+    if attempt >= MaxCheckAttempts:
+      warn "Store check stopped with content topics that are not complete",
+        attempts = attempt, incomplete = pending.len - exhausted.len
+      return
+    debug "checkStore did not complete all content topics, it tries them again",
+      attempt = attempt, completed = exhausted.len, pending = pending.len
+    await sleepAsync(CatchUpRetryPeriod)
+    if not self.online:
+      # The next time that the node comes back online starts a new check.
+      return
 
 proc hasHealthyFilterSubscription(self: RecvService): bool =
   ## Every subscribed shard has a healthy filter subscription (false with none).
@@ -213,22 +260,28 @@ proc hasReadyReceivePath(self: RecvService): bool =
     HealthStatus.READY or self.hasHealthyFilterSubscription()
 
 proc updateReceiveReadiness(self: RecvService) =
-  ## Records the time the node goes offline. When the node is back online,
-  ## queries Store for the messages missed while offline. Does not retry a
-  ## failed Store query, so online needs a Store peer.
-  let nowOnline = self.hasReadyReceivePath() and self.waku.hasStorePeer()
+  ## When the node is back online, queries Store for the messages missed since
+  ## `startTimeToCheck`. Online needs a Store peer. The node can lose its peers
+  ## some time before it sees the loss, so the time it goes offline does not
+  ## set the start of the check.
+  let wasReady = self.receivePathReady
+  self.receivePathReady = self.hasReadyReceivePath()
+  if wasReady and not self.receivePathReady and self.gapStart.isNone():
+    self.gapStart = Opt.some(getNowInNanosecondTime())
+  let nowOnline = self.receivePathReady and self.waku.hasStorePeer()
   if nowOnline == self.online:
     return
   self.online = nowOnline
 
   if not nowOnline:
-    self.startTimeToCheck = getNowInNanosecondTime()
     return
 
-  # At most one backfill in flight; skip if the previous is still running.
+  # At most one backfill in flight. A running check reads all topics again.
   if self.backfillHandler.isNil() or self.backfillHandler.finished():
     info "recv service backfilling missed messages after coming back online"
     self.backfillHandler = self.checkStore()
+  else:
+    self.recheckRequested = true
 
 proc listenForReadiness(self: RecvService, E: typedesc): auto =
   ## Re-evaluates `online` on each `E` event. An event that changes nothing
@@ -284,19 +337,8 @@ proc startupCatchUp(self: RecvService, job: persistency.Job) {.async.} =
   var completed: HashSet[BackfillTopic]
   let progress = newTable[BackfillTopic, Timestamp]() # a failed topic's next page start
   var settleUntil: Opt[Moment] # set when there is nothing left to do
-  let query: BackfillQuery = proc(
-      request: StoreQueryRequest
-  ): Future[Result[StoreQueryResponse, string]] {.async.} =
-    if self.stopping:
-      return err("receive service is stopping")
-    return await self.waku.storeQueryToAny(request)
-  let deliver: BackfillDeliver = proc(
-      pubsubTopic: PubsubTopic, message: WakuMessage
-  ): bool {.gcsafe, raises: [].} =
-    if not self.waku.isContentSubscribed(pubsubTopic, message.contentTopic):
-      return false
-    discard self.processIncomingMessage(pubsubTopic, message, MessageSource.History)
-    return true
+  let query = self.queryAnyStore()
+  let deliver = self.deliverFromStore()
   let wake = newAsyncEvent() # a new subscription or a peer change
   let onSubscribed = proc(event: ContentTopicSubscribedEvent) {.async: (raises: []).} =
     wake.fire()
@@ -383,20 +425,30 @@ proc new*(T: typedesc[RecvService], waku: Waku, backfill: BackfillState): T =
 
   let now = getNowInNanosecondTime()
   var recvService = RecvService(
-    waku: waku, startTimeToCheck: now, brokerCtx: waku.brokerCtx, backfill: backfill
+    waku: waku,
+    startTimeToCheck: now - DelayExtra.nanos,
+    brokerCtx: waku.brokerCtx,
+    backfill: backfill,
   )
 
   return recvService
 
 proc loopPruneOldMessages(self: RecvService) {.async.} =
   while true:
-    let oldestAllowedTime = getNowInNanosecondTime() - MaxMessageLife.nanos
+    let now = getNowInNanosecondTime()
+    let oldestAllowedTime = pruneCutoff(now, self.startTimeToCheck)
     var expired: seq[WakuMessageHash]
     for msgHash, rxTime in self.recentReceivedMsgs:
       if rxTime <= oldestAllowedTime:
         expired.add(msgHash)
     for msgHash in expired:
       self.recentReceivedMsgs.del(msgHash)
+    var oldOwn: seq[WakuMessageHash]
+    for msgHash, publishTime in self.ownRelayMsgs:
+      if publishTime <= now - MaxMessageLife.nanos:
+        oldOwn.add(msgHash)
+    for msgHash in oldOwn:
+      self.ownRelayMsgs.del(msgHash)
     await sleepAsync(PruneOldMsgsPeriod)
 
 proc startRecvService*(self: RecvService, job: persistency.Job) =
@@ -422,7 +474,8 @@ proc startRecvService*(self: RecvService, job: persistency.Job) =
   self.peerEventListener = self.listenForReadiness(WakuPeerEvent)
 
   # The initial read starts no backfill.
-  self.online = self.hasReadyReceivePath()
+  self.receivePathReady = self.hasReadyReceivePath()
+  self.online = self.receivePathReady
 
   if self.backfill.enabled and not job.isNil():
     self.backfill.task = self.startupCatchUp(job)

@@ -6,6 +6,7 @@ import
   logos_delivery/api/conf/messaging_conf,
   logos_delivery/api/messaging_client_api,
   logos_delivery/waku/waku,
+  logos_delivery/waku/waku_core,
   logos_delivery/waku/api/[publish, health],
   logos_delivery/waku/node/health_monitor,
   logos_delivery/waku/factory/conf_builder/waku_conf_builder,
@@ -64,7 +65,14 @@ proc new*(
   let sendQueueCapacity = conf.sendQueueCapacity.get(uint(DefaultMaxTaskCacheSize))
   if sendQueueCapacity notin 1'u .. SendQueueCapacityLimit:
     return err("sendQueueCapacity must be between 1 and " & $SendQueueCapacityLimit)
-  let sendProcessor = setupSendProcessorChain(waku, anonymityLevel).valueOr:
+  let backfill = ?BackfillState.init(conf)
+  let recvService = RecvService.new(waku, backfill)
+  let sendProcessor = setupSendProcessorChain(
+    waku,
+    anonymityLevel,
+    proc(msgHash: WakuMessageHash) {.gcsafe, raises: [].} =
+      recvService.expectOwnRelayMessage(msgHash),
+  ).valueOr:
     return err("failed to setup SendProcessorChain: " & error)
   let sendService = ?SendService.new(
     reliability,
@@ -75,9 +83,6 @@ proc new*(
     maxParkedAge = seconds(int64(maxParkedAgeSec)),
     maxTaskCacheSize = int(sendQueueCapacity),
   )
-  let backfill = ?BackfillState.init(conf)
-  let recvService = RecvService.new(waku, backfill)
-
   if anonymityLevel == AnonymityLevel.Required:
     waku.setConnectionStatusAdjuster(requireMixReady)
 
