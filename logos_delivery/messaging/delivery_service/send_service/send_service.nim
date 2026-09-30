@@ -450,7 +450,7 @@ proc admitAndProve(self: SendService, task: DeliveryTask): Future[bool] {.async.
   # The RLN proof epoch comes from the message timestamp, so a new proof also
   # gets a new timestamp.
   let maxAge =
-    if task.msg.proof.len == 0 and self.waku.makesRlnProof():
+    if false and task.msg.proof.len == 0 and self.waku.makesRlnProof():
       ZeroDuration
     else:
       MaxUnsentMessageAge

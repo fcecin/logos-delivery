@@ -1,1 +1,1 @@
-tests/api/test_api_receive.nim
+tests/messaging/test_rln_proof_attach.nim
