@@ -259,6 +259,8 @@ const RestartTopic = ContentTopic("/waku/2/recv-process-restart/proto")
 const TestShard = PubsubTopic("/waku/2/rs/3/0")
 const SecondShard = PubsubTopic("/waku/2/rs/3/1") ## shard 1 of a two-shard network
 const OfflineCount = 105 ## archived between two subscriber processes, two Store pages
+
+const GapCount = 105 ## archived in one connectivity gap, two Store pages
 const Hour = chronos.hours(1).nanos
 
 proc runRestartedReceiver(
@@ -807,6 +809,42 @@ suite "Messaging API, Receive Service (store recovery)":
       # The setup message and the gap message were both recovered from Store.
       check eventManager.receivedSources ==
         @[MessageSource.History, MessageSource.History]
+
+    # Phase 5: the reconnection check reads all Store pages of a connectivity gap.
+    block:
+      let topic = ContentTopic("/waku/2/recv-long-gap-test/proto")
+      let net = await setupNetwork(topic)
+      defer:
+        await net.teardown()
+      let eventManager = net.events
+      check await eventManager.waitForEvents(TestTimeout) # the setup message
+      await net.joinMesh()
+      await waitForProtocolHealth(
+        net.subscriber.waku, WakuProtocol.RelayProtocol, HealthStatus.READY
+      )
+      discard await net.tunnel(
+        topic,
+        waitForProtocolHealth(
+          net.subscriber.waku, WakuProtocol.RelayProtocol, HealthStatus.NOT_READY
+        ),
+      )
+      for i in 0 ..< GapCount:
+        await net.storeNode.wakuArchive.handleMessage(
+          TestShard,
+          WakuMessage(
+            payload: ("long-gap-" & $i).toBytes(), contentTopic: topic, timestamp: now()
+          ),
+        )
+      eventManager.targetCount = GapCount + 2
+      eventManager.receivedEvent.clear()
+      await net.subscriber.waku.node.connectToNodes(@[net.storeNodePeerInfo])
+      check await eventManager.waitForEvents(TestTimeout)
+      check eventManager.receivedMessages.len == GapCount + 2
+      let payloads =
+        eventManager.receivedMessages.mapIt(string.fromBytes(it.payload)).toHashSet()
+      for i in 0 ..< GapCount:
+        check ("long-gap-" & $i) in payloads
+      check eventManager.receivedSources.allIt(it == MessageSource.History)
 
   asyncTest "the receive service follows its receive peers, not ConnectionStatus":
     ## Under #4238, `ConnectionStatus` stays `Disconnected` in every phase.

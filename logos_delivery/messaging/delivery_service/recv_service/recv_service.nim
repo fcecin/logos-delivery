@@ -49,9 +49,6 @@ const
   MinBackfillRequestTimeoutSeconds = 1
   MaxBackfillRequestTimeoutSeconds = 300
 
-type TupleHashAndMsg =
-  tuple[hash: WakuMessageHash, msg: WakuMessage, pubsubTopic: PubsubTopic]
-
 type BackfillState* = object
   ## Settings and state of the startup catch-up. `backfill.nim` has the mechanism.
   enabled*: bool
@@ -87,28 +84,6 @@ type RecvService* = ref object of RootObj
     ## `CancelledError` and does not raise it again, so a cancel may not reach the
     ## catch-up task. Remove this flag when broker requests raise it again.
 
-proc getMissingMsgsFromStore(
-    self: RecvService, msgHashes: seq[WakuMessageHash]
-): Future[Result[seq[TupleHashAndMsg], string]] {.async.} =
-  let storeResp: StoreQueryResponse = (
-    await self.waku.storeQueryToAny(
-      StoreQueryRequest(includeData: true, messageHashes: msgHashes)
-    )
-  ).valueOr:
-    return err("getMissingMsgsFromStore: " & $error)
-
-  let otherwiseMsg = WakuMessage()
-  let otherwiseTopic = PubsubTopic("")
-  return ok(
-    storeResp.messages.mapIt(
-      (
-        hash: it.messageHash,
-        msg: it.message.get(otherwiseMsg),
-        pubsubTopic: it.pubsubTopic.get(otherwiseTopic),
-      )
-    )
-  )
-
 proc processIncomingMessage(
     self: RecvService, pubsubTopic: string, message: WakuMessage, source: MessageSource
 ): bool =
@@ -142,52 +117,49 @@ proc processIncomingMessage(
   MessageReceivedEvent.emit(self.brokerCtx, msgHash.to0xHex(), message, source)
   return true
 
+proc queryAnyStore(self: RecvService): BackfillQuery =
+  ## Sends a query to any Store peer. Gives an error when the service stops.
+  return proc(
+      request: StoreQueryRequest
+  ): Future[Result[StoreQueryResponse, string]] {.async.} =
+    if self.stopping:
+      return err("receive service is stopping")
+    return await self.waku.storeQueryToAny(request)
+
+proc deliverFromStore(self: RecvService): BackfillDeliver =
+  ## Delivers a message from Store as `MessageSource.History`. Gives false for
+  ## a message of a content topic that the node does not subscribe to.
+  return proc(
+      pubsubTopic: PubsubTopic, message: WakuMessage
+  ): bool {.gcsafe, raises: [].} =
+    if not self.waku.isContentSubscribed(pubsubTopic, message.contentTopic):
+      return false
+    discard self.processIncomingMessage(pubsubTopic, message, MessageSource.History)
+    return true
+
 proc checkStore*(self: RecvService) {.async.} =
   ## Checks the store for messages that were not received directly and
   ## delivers them via MessageReceivedEvent, as `MessageSource.History`.
+  ## Reads all pages of each subscribed content topic.
   if not self.waku.isStoreMounted():
     debug "recv service has no store client mounted, skipping store check"
     return
 
   self.endTimeToCheck = getNowInNanosecondTime()
 
-  ## query store and deliver new recovered messages per subscribed topic
-  for (pubsubTopic, contentTopics) in self.waku.subscribedContentTopics():
-    let storeResp: StoreQueryResponse = (
-      await self.waku.storeQueryToAny(
-        StoreQueryRequest(
-          includeData: false,
-          pubsubTopic: Opt.some(pubsubTopic),
-          contentTopics: toSeq(contentTopics),
-          startTime: Opt.some(self.startTimeToCheck - DelayExtra.nanos),
-          endTime: Opt.some(self.endTimeToCheck + DelayExtra.nanos),
-        )
-      )
-    ).valueOr:
-      debug "checkStore failed to get remote msgHashes",
-        pubsubTopic = pubsubTopic, cTopics = toSeq(contentTopics), error = $error
-      continue
-
-    ## compare the msgHashes seen from the store vs the ones received directly
-    let msgHashesInStore = storeResp.messages.mapIt(it.messageHash)
-    let missedHashes: seq[WakuMessageHash] =
-      msgHashesInStore.filterIt(not self.recentReceivedMsgs.hasKey(it))
-
-    if missedHashes.len > 0:
-      info "missed messages detected, checking store for missed messages",
-        pubsubTopic = pubsubTopic, missedCount = missedHashes.len
-
-      ## Now retrieve the missing WakuMessages and deliver them
-      let missingMsgsRet = await self.getMissingMsgsFromStore(missedHashes)
-      if missingMsgsRet.isOk():
-        for msgTuple in missingMsgsRet.get():
-          if self.processIncomingMessage(
-            msgTuple.pubsubTopic, msgTuple.msg, MessageSource.History
-          ):
-            debug "recv service store-recovered message",
-              msg_hash = shortLog(msgTuple.hash), pubsubTopic = msgTuple.pubsubTopic
-      else:
-        debug "Failed to retrieve missing messages: ", error = $missingMsgsRet.error
+  let topics = backfillTopics(self.waku.subscribedContentTopics())
+  let completed = await runCatchUpPass(
+    topics,
+    newTable[BackfillTopic, Timestamp](),
+    self.startTimeToCheck - DelayExtra.nanos,
+    self.endTimeToCheck + DelayExtra.nanos,
+    self.backfill.queryTimeout,
+    self.queryAnyStore(),
+    self.deliverFromStore(),
+  )
+  if completed.len < topics.len:
+    debug "checkStore did not complete all content topics",
+      completed = completed.len, subscribed = topics.len
 
   ## update next check times
   self.startTimeToCheck = self.endTimeToCheck
@@ -284,19 +256,8 @@ proc startupCatchUp(self: RecvService, job: persistency.Job) {.async.} =
   var completed: HashSet[BackfillTopic]
   let progress = newTable[BackfillTopic, Timestamp]() # a failed topic's next page start
   var settleUntil: Opt[Moment] # set when there is nothing left to do
-  let query: BackfillQuery = proc(
-      request: StoreQueryRequest
-  ): Future[Result[StoreQueryResponse, string]] {.async.} =
-    if self.stopping:
-      return err("receive service is stopping")
-    return await self.waku.storeQueryToAny(request)
-  let deliver: BackfillDeliver = proc(
-      pubsubTopic: PubsubTopic, message: WakuMessage
-  ): bool {.gcsafe, raises: [].} =
-    if not self.waku.isContentSubscribed(pubsubTopic, message.contentTopic):
-      return false
-    discard self.processIncomingMessage(pubsubTopic, message, MessageSource.History)
-    return true
+  let query = self.queryAnyStore()
+  let deliver = self.deliverFromStore()
   let wake = newAsyncEvent() # a new subscription or a peer change
   let onSubscribed = proc(event: ContentTopicSubscribedEvent) {.async: (raises: []).} =
     wake.fire()
