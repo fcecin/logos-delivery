@@ -1,8 +1,9 @@
-## The pool of mix hops. It follows the peer store of the node, and keeps one
-## hop address for each eligible peer.
+## The pool of mix hops. It follows the peer store of the node, keeps one hop
+## address for each eligible peer, and dials pool peers.
 
 {.push raises: [].}
 
+import std/[sequtils, tables]
 import chronicles, chronos, results
 
 import
@@ -32,6 +33,9 @@ type MixHopPool* = ref object
   known: MixNodePool ## Each peer with a mix key, in the peer store of the node.
   eligible: PeerStore ## One hop address for each peer that paths can use.
   pathPool: MixNodePool ## The pool over `eligible` that nim-libp2p-mix reads.
+  dials: Table[PeerId, Future[bool].Raising([CancelledError])]
+    ## The running mix dial of each peer. A later attempt joins it.
+  dialsStopped: bool ## True from `stop` to `start`. Then no send starts a dial.
   loop: Future[void]
   # The tunable is public for tests.
   maintenanceInterval*: Duration = chronos.seconds(15)
@@ -157,6 +161,46 @@ proc add*(pool: MixHopPool, info: MixPubInfo) =
   ## Adds a configured mix node to the peer store.
   pool.known.add(info)
 
+proc dialHop(
+    pool: MixHopPool, peerId: PeerId
+): Future[bool] {.async: (raises: [CancelledError]).} =
+  ## Dials `peerId` at its hop addresses. An existing connection counts as a
+  ## success.
+  let addresses = pool.hopAddresses(peerId)
+  if addresses.len == 0:
+    return false
+  try:
+    await pool.peerManager.switch.connect(peerId, addresses).wait(DefaultDialTimeout)
+  except AsyncTimeoutError:
+    debug "Mix peer dial timed out", peerId = peerId, addresses = $addresses
+    return false
+  except DialFailedError as exc:
+    debug "Mix peer dial failed",
+      peerId = peerId, addresses = $addresses, error = exc.msg
+    return false
+  debug "Mix peer dial succeeded", peerId = peerId
+  return true
+
+proc dial*(pool: MixHopPool, peerId: PeerId): Future[bool].Raising([CancelledError]) =
+  ## The running dial of `peerId`, or a new one. A second dial would only wait
+  ## on the libp2p dial lock and dial again.
+  pool.dials.withValue(peerId, running):
+    if not running[].finished():
+      return running[]
+  var done: seq[PeerId]
+  for id, running in pool.dials:
+    if running.finished():
+      done.add(id)
+  for id in done:
+    pool.dials.del(id)
+  let started = pool.dialHop(peerId)
+  pool.dials[peerId] = started
+  return started
+
+proc stopped*(pool: MixHopPool): bool =
+  ## True from `stop` to `start`.
+  pool.dialsStopped
+
 proc maintain*(pool: MixHopPool) {.async: (raises: [CancelledError]).} =
   ## One maintenance pass. It sees what no handler reports (an address TTL).
   ## Public for tests.
@@ -168,15 +212,19 @@ proc maintenanceLoop(pool: MixHopPool) {.async: (raises: [CancelledError]).} =
     await sleepAsync(pool.maintenanceInterval)
 
 proc start*(pool: MixHopPool) =
-  ## Runs the maintenance loop.
+  ## Allows dials again and runs the maintenance loop.
+  pool.dialsStopped = false
   if pool.loop.isNil() or pool.loop.finished():
     pool.loop = pool.maintenanceLoop()
 
 proc stop*(pool: MixHopPool) {.async: (raises: []).} =
-  ## Cancels the loop.
+  ## Cancels the loop and the dials, and blocks new ones until `start`.
+  pool.dialsStopped = true
   if not pool.loop.isNil():
     await pool.loop.cancelAndWait()
     pool.loop = nil
+  await noCancel allFutures(toSeq(pool.dials.values()).mapIt(it.cancelAndWait()))
+  pool.dials.clear()
 
 proc new*(
     T: typedesc[MixHopPool], peerManager: PeerManager, policy: PeerAddressPolicy
