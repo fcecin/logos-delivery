@@ -66,6 +66,7 @@ their defaults. A kernel-only node ignores them.
 
 | Method and route | Body | Response |
 |---|---|---|
+| `GET /messaging/v1/subscriptions` | | the subscribed content topics, sorted |
 | `POST /messaging/v1/subscriptions` | `["/app/1/topic/proto", ...]` | `200 OK` |
 | `DELETE /messaging/v1/subscriptions` | `["/app/1/topic/proto", ...]` | `200 OK` |
 | `POST /messaging/v1/messages` | `{"payload":"<base64>","contentTopic":"/app/1/topic/proto","ephemeral":false,"meta":"<base64>"}` | `{"requestId":"..."}` |
@@ -97,6 +98,7 @@ message that arrived when it was published, `history` for a message that a Store
 at startup or after a connectivity gap. The node buffers only the content topics subscribed
 through `/messaging/v1/subscriptions`. A relay subscription to the shard is not sufficient. A
 send subscribes the node to its content topic, so the sender also receives its own messages.
+`GET /messaging/v1/subscriptions` also lists the content topics that a send subscribed.
 
 A poll clears what it returns, for every client. The received buffer keeps the newest
 `--rest-messaging-cache-capacity` messages (default 50) and drops the oldest when full. These
