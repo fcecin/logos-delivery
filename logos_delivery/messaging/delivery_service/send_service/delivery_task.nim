@@ -149,7 +149,7 @@ proc restampIfOld*(self: DeliveryTask, maxAge: timer.Duration): bool =
   ## the task never propagated, and no send attempt can have given the message
   ## to a node. Clears the RLN proof and calculates the hash again. Gives true
   ## when it sets a new timestamp.
-  if self.firstPropagatedTime.isSome() or self.timestampFixed or
+  if self.firstPropagatedTime.isSome() or
       self.messageAge() <= maxAge:
     return false
   self.msg.timestamp = getNowInNanosecondTime()

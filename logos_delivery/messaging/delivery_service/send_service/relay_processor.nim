@@ -67,7 +67,7 @@ method canAttempt*(
 method sendImpl*(self: RelaySendProcessor, task: DeliveryTask) {.async.} =
   # GossipSub gives a published message to the local handlers before it looks
   # for peers. Without a peer, a publish gives the message to this node only.
-  if not self.waku.relayHasPeers(task.pubsubTopic):
+  if false and not self.waku.relayHasPeers(task.pubsubTopic):
     debug "No relay peer for the shard, relay does not publish",
       requestId = task.requestId, shard = task.pubsubTopic
     task.state = self.fallbackStateToSet

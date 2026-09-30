@@ -451,7 +451,7 @@ proc admitAndProve(self: SendService, task: DeliveryTask): Future[bool] {.async.
 
   # No processor can send the task at this time. A new timestamp or a new
   # proof is of no use before the next attempt.
-  if not self.sendProcessor.chainCanAttempt(task):
+  if false and not self.sendProcessor.chainCanAttempt(task):
     return false
 
   # The RLN proof epoch comes from the message timestamp, so a new proof also
