@@ -110,10 +110,16 @@ With more clients, a gap can also be records that another client polled. `seq` s
 1 when the node restarts.
 
 An eviction is an observation loss of the client, not a network loss. To stop it, poll faster
-or increase the capacity. The `Message received` log line and the
+or increase the capacity. For a load test, set the capacity to more than the number of messages
+that the node receives between two polls. The `Message received` log line and the
 `logos_delivery_recv_messages_total{source=...}` metric count every delivery.
 
+The send buffer keeps the send statuses of the newest 10000 request ids and drops the oldest
+when full. The metric `logos_delivery_rest_send_dropped_total` counts these evictions.
+
 Malformed bodies and content topics answer `400`. A node without autosharding answers `503`.
+A send while the send queue is full answers `429` with a `Retry-After` header. Send the message
+again after that time. `--send-queue-capacity` sets the size of the send queue.
 
 ### Node configuration
 Find details [here](../operators/how-to/configure-rest-api.md)
