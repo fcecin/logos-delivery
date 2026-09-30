@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
+import tempfile
 import threading
 import time
 import uuid
@@ -15,6 +17,9 @@ EVENT_PROPAGATED = "message_propagated"
 EVENT_SENT = "message_sent"
 EVENT_ERROR = "message_error"
 EVENT_CHANNEL_RECEIVED = "channel_message_received"
+EVENT_TOPIC_HEALTH_CHANGE = "relay_topic_health_change"
+# Topic health a node reports once its relay mesh on the shard has at least one peer.
+MESH_TOPIC_HEALTH = ("MinimallyHealthy", "SufficientlyHealthy")
 
 # MaxTimeInCache from send_service.nim.
 MAX_TIME_IN_CACHE_S = 60.0
@@ -127,6 +132,24 @@ def wait_for_connected(
                 return event
         time.sleep(poll_interval_s)
     return None
+
+
+def wait_for_mesh(
+    collector: EventCollector,
+    timeout_s: float = 10.0,
+    poll_interval_s: float = 0.3,
+) -> bool:
+    """Wait until the node's latest relay_topic_health_change for a shard says its mesh has a peer."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        latest_health = {}
+        for event in collector.snapshot():
+            if event.get("eventType") == EVENT_TOPIC_HEALTH_CHANGE:
+                latest_health[event.get("pubsubTopic")] = event.get("topicHealth")
+        if any(health in MESH_TOPIC_HEALTH for health in latest_health.values()):
+            return True
+        time.sleep(poll_interval_s)
+    return False
 
 
 TERMINAL_EVENT_TYPES = {EVENT_PROPAGATED, EVENT_SENT, EVENT_ERROR}
@@ -242,6 +265,15 @@ def unique_channel_id(prefix: str) -> str:
     leaks one run's causal history into the next.
     """
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
+
+
+def local_storage_config() -> dict:
+    """Storage paths in a fresh directory, so no two nodes share SQLite files."""
+    storage_dir = tempfile.mkdtemp(prefix="c_abi_node_")
+    return {
+        "localStoragePath": storage_dir,
+        "storeMessageDbUrl": f"sqlite://{os.path.join(storage_dir, 'store.sqlite3')}",
+    }
 
 
 def create_message_bindings(**overrides) -> dict:

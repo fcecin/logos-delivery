@@ -1,26 +1,25 @@
 """RC10 outcome: SDS-R repair recovers a missing dependency.
 
-Marked `slow` and kept out of the CI selection: the repair request only rides
-out after T_req, so the test spends minutes waiting. The CI-safe setup half is
-test_rc10_missing_dependency_is_parked in test_channel_delivery.py.
+Marked `slow` and run nightly instead of on PRs: the repair request only rides
+out after T_req, so the test spends minutes waiting. Its first half, up to m2
+being parked, runs on PRs as test_rc10_missing_dependency_is_parked in
+test_channel_delivery.py.
 """
 
 import time
 
 import pytest
 
-from src.libs.common import delay, to_base64
+from src.libs.common import to_base64
 from src.node.subprocess_node import ChannelSenderProcess
 from src.node.wrappers_manager import WrapperManager
 from src.node.wrapper_helpers import EventCollector, create_message_bindings, get_node_multiaddr, unique_channel_id
 from tests.c_abi.test_channel_delivery import (
     CHANNEL_RECEIVED_EVENT,
     DELIVERY_TIMEOUT_S,
-    MESH_SETTLE_S,
     MESSAGE_RECEIVED_EVENT,
     NO_CHANNEL_DELIVERY_WINDOW_S,
     RC10_CHANNEL_PREFIX,
-    RC10_CHANNEL_SETTLE_S,
     RC10_CONTENT_TOPIC,
     SENDER_A,
     SENDER_B,
@@ -67,7 +66,6 @@ class TestChannelRepair:
             sender_config = {
                 **node_config,
                 "staticnodes": [get_node_multiaddr(receiver)],
-                "portsShift": 1,
             }
 
             subscribe_result = receiver.subscribe_content_topic(RC10_CONTENT_TOPIC)
@@ -79,7 +77,6 @@ class TestChannelRepair:
                 channel_id=channel_id,
                 sender_id=SENDER_A,
                 payload_b64=to_base64(m1),
-                settle_s=MESH_SETTLE_S,
             ) as sender:
                 arrived = wait_for_message_received(receiver_collector, RC10_CONTENT_TOPIC, DELIVERY_TIMEOUT_S)
                 assert arrived is not None, (
@@ -89,8 +86,6 @@ class TestChannelRepair:
 
                 receiver_create = receiver.channel_create(channel_id, RC10_CONTENT_TOPIC, SENDER_B)
                 assert receiver_create.is_ok(), f"receiver channel_create failed: {receiver_create.err()}"
-
-                delay(RC10_CHANNEL_SETTLE_S)
 
                 sender.send(to_base64(m2))
 

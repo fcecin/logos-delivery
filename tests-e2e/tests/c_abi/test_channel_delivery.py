@@ -11,6 +11,7 @@ from src.node.wrapper_helpers import (
     get_node_multiaddr,
     unique_channel_id,
     wait_for_connected,
+    wait_for_mesh,
 )
 
 RC05_CHANNEL_PREFIX = "rc05-channel"
@@ -39,8 +40,6 @@ RC09_CONTENT_TOPIC = "/test/1/rc09-channel/proto"
 
 RC10_CHANNEL_PREFIX = "rc10-channel"
 RC10_CONTENT_TOPIC = "/test/1/rc10-channel/proto"
-# B's channel must exist before A's second send, or m2 lands with nothing to park it.
-RC10_CHANNEL_SETTLE_S = 5
 
 RC12_CHANNEL_PREFIX = "rc12-channel"
 RC12_CONTENT_TOPIC = "/test/1/rc12-channel/proto"
@@ -52,15 +51,12 @@ RC13_CONTENT_TOPIC = "/test/1/rc13-channel/proto"
 CLOSED_CHANNEL_PREFIX = "rc-closed-channel"
 CLOSED_CONTENT_TOPIC = "/test/1/rc-closed-channel/proto"
 
-MESH_SETTLE_S = 10
 DELIVERY_TIMEOUT_S = 50.0
 # Once the unmarked message has provably reached B's messaging layer, the
 # channel ingress decision has already been made on that same event, so this is
 # just a short grace window to catch any late channel_message_received.
 NO_CHANNEL_DELIVERY_WINDOW_S = 10.0
 
-# A has no peer to dial before it sends, so no mesh to settle.
-RC09_SENDER_SETTLE_S = 2
 RC09_RECOVERY_TIMEOUT_S = 90.0
 
 
@@ -176,7 +172,6 @@ class TestChannelDelivery:
             sender_config = {
                 **node_config,
                 "staticnodes": [get_node_multiaddr(receiver)],
-                "portsShift": 1,
             }
 
             subscribe_result = receiver.subscribe_content_topic(CONTENT_TOPIC)
@@ -191,7 +186,6 @@ class TestChannelDelivery:
                 channel_id=channel_id,
                 sender_id=SENDER_A,
                 payload_b64=payload_b64,
-                settle_s=MESH_SETTLE_S,
             ):
                 received = wait_for_channel_received(receiver_collector, channel_id, DELIVERY_TIMEOUT_S)
                 assert received is not None, (
@@ -234,7 +228,6 @@ class TestChannelDelivery:
             sender_config = {
                 **node_config,
                 "staticnodes": [get_node_multiaddr(receiver)],
-                "portsShift": 1,
             }
             sender_collector = EventCollector()
             sender_result = WrapperManager.create_and_start(config=sender_config, event_cb=sender_collector.event_callback)
@@ -252,7 +245,7 @@ class TestChannelDelivery:
                 receiver_create = receiver.channel_create(channel_id, RC06_CONTENT_TOPIC, SENDER_B)
                 assert receiver_create.is_ok(), f"receiver channel_create failed: {receiver_create.err()}"
 
-                delay(MESH_SETTLE_S)
+                assert wait_for_mesh(sender_collector), "sender gossipsub mesh has no peer"
 
                 # Plain relay publish: right content topic, but no Reliable-Channel
                 # marker, so B's channel ingress filter must drop it.
@@ -300,7 +293,6 @@ class TestChannelDelivery:
             sender_config = {
                 **node_config,
                 "staticnodes": [get_node_multiaddr(receiver)],
-                "portsShift": 1,
             }
 
             for content_topic in (RC07_CONTENT_TOPIC, RC07_OTHER_CONTENT_TOPIC):
@@ -316,7 +308,6 @@ class TestChannelDelivery:
                 channel_id=channel_id,
                 sender_id=SENDER_A,
                 payload_b64=payload_b64,
-                settle_s=MESH_SETTLE_S,
             ):
                 arrived = wait_for_message_received(receiver_collector, RC07_OTHER_CONTENT_TOPIC, DELIVERY_TIMEOUT_S)
                 assert arrived is not None, (
@@ -359,7 +350,6 @@ class TestChannelDelivery:
             sender_config = {
                 **node_config,
                 "staticnodes": [get_node_multiaddr(receiver)],
-                "portsShift": 1,
             }
 
             subscribe_result = receiver.subscribe_content_topic(RC08_CONTENT_TOPIC)
@@ -374,7 +364,6 @@ class TestChannelDelivery:
                 channel_id=channel_id,
                 sender_id=SENDER_A,
                 payload_b64=to_base64(m1),
-                settle_s=MESH_SETTLE_S,
             ) as sender:
                 first = wait_for_channel_received(receiver_collector, channel_id, DELIVERY_TIMEOUT_S)
                 assert first is not None, (
@@ -437,15 +426,12 @@ class TestChannelDelivery:
             }
         )
         # A comes up first with nobody to dial; B joins later and dials A.
-        sender_config = {**node_config, "portsShift": 1}
-
         with ChannelSenderProcess(
-            sender_config,
+            node_config,
             content_topic=RC09_CONTENT_TOPIC,
             channel_id=channel_id,
             sender_id=SENDER_A,
             payload_b64=to_base64(m1),
-            settle_s=RC09_SENDER_SETTLE_S,
         ) as sender:
             receiver_collector = EventCollector()
             receiver_config = {**node_config, "staticnodes": [sender.multiaddr]}
@@ -462,8 +448,7 @@ class TestChannelDelivery:
                 start_result = receiver.start_node()
                 assert start_result.is_ok(), f"Failed to start receiver: {start_result.err()}"
                 assert wait_for_connected(receiver_collector) is not None, "Receiver did not reach Connected/PartiallyConnected state"
-
-                delay(MESH_SETTLE_S)
+                assert wait_for_mesh(receiver_collector), "receiver gossipsub mesh has no peer"
 
                 sender.send(to_base64(m2))
 
@@ -504,7 +489,6 @@ class TestChannelDelivery:
             sender_config = {
                 **node_config,
                 "staticnodes": [get_node_multiaddr(receiver)],
-                "portsShift": 1,
             }
 
             subscribe_result = receiver.subscribe_content_topic(RC10_CONTENT_TOPIC)
@@ -516,7 +500,6 @@ class TestChannelDelivery:
                 channel_id=channel_id,
                 sender_id=SENDER_A,
                 payload_b64=to_base64(m1),
-                settle_s=MESH_SETTLE_S,
             ) as sender:
                 arrived = wait_for_message_received(receiver_collector, RC10_CONTENT_TOPIC, DELIVERY_TIMEOUT_S)
                 assert arrived is not None, (
@@ -529,8 +512,6 @@ class TestChannelDelivery:
 
                 receiver_create = receiver.channel_create(channel_id, RC10_CONTENT_TOPIC, SENDER_B)
                 assert receiver_create.is_ok(), f"receiver channel_create failed: {receiver_create.err()}"
-
-                delay(RC10_CHANNEL_SETTLE_S)
 
                 sender.send(to_base64(m2))
 
@@ -582,19 +563,17 @@ class TestChannelDelivery:
 
             # C joins first so it is meshed by the time A sends m1.
             with ChannelSenderProcess(
-                {**peer_config, "portsShift": 2},
+                peer_config,
                 content_topic=RC12_CONTENT_TOPIC,
                 channel_id=channel_id,
                 sender_id=SENDER_C,
-                settle_s=MESH_SETTLE_S,
             ) as third_party:
                 with ChannelSenderProcess(
-                    {**peer_config, "portsShift": 1},
+                    peer_config,
                     content_topic=RC12_CONTENT_TOPIC,
                     channel_id=channel_id,
                     sender_id=SENDER_A,
                     payload_b64=to_base64(m1),
-                    settle_s=MESH_SETTLE_S,
                 ):
                     assert (
                         wait_for_channel_received(receiver_collector, channel_id, DELIVERY_TIMEOUT_S) is not None
@@ -644,7 +623,6 @@ class TestChannelDelivery:
             sender_config = {
                 **node_config,
                 "staticnodes": [get_node_multiaddr(receiver)],
-                "portsShift": 1,
             }
 
             subscribe_result = receiver.subscribe_content_topic(RC13_CONTENT_TOPIC)
@@ -659,7 +637,6 @@ class TestChannelDelivery:
                 channel_id=channel_id,
                 sender_id=SENDER_A,
                 payload_b64=to_base64(m1),
-                settle_s=MESH_SETTLE_S,
             ) as sender:
                 first = wait_for_channel_received(receiver_collector, channel_id, DELIVERY_TIMEOUT_S)
                 assert first is not None, (
@@ -715,7 +692,6 @@ class TestChannelDelivery:
             sender_config = {
                 **node_config,
                 "staticnodes": [get_node_multiaddr(receiver)],
-                "portsShift": 1,
             }
 
             subscribe_result = receiver.subscribe_content_topic(CLOSED_CONTENT_TOPIC)
@@ -736,7 +712,6 @@ class TestChannelDelivery:
                 channel_id=channel_id,
                 sender_id=SENDER_A,
                 payload_b64=payload_b64,
-                settle_s=MESH_SETTLE_S,
             ):
                 arrived = wait_for_message_received(receiver_collector, CLOSED_CONTENT_TOPIC, DELIVERY_TIMEOUT_S)
                 assert arrived is not None, (
