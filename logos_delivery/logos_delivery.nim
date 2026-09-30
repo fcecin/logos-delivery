@@ -122,8 +122,6 @@ proc new*(
   if conf.entryLayer != EntryLayer.kernel:
     applyMode(kernelConf, conf.mode).isOkOr:
       return err("failed to apply mode: " & error)
-    enableMixForAnonymity(kernelConf, conf.anonymityLevel).isOkOr:
-      return err("failed to apply the anonymity level: " & error)
     let cliMessagingConf = MessagingClientConf.init(conf).valueOr:
       return err("failed to build the messaging config: " & error)
     messagingConf = Opt.some(cliMessagingConf)

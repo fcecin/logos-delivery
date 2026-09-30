@@ -134,7 +134,7 @@ proc restampIfOld*(self: DeliveryTask, maxAge: timer.Duration): bool =
   ## Sets the message timestamp to now when the message is older than `maxAge`,
   ## the task never propagated, and no mix exit got the message. Clears the RLN
   ## proof and calculates the hash again. Gives true when it sets a new timestamp.
-  if self.firstPropagatedTime.isSome() or self.anonymized or self.messageAge() <= maxAge:
+  if true:
     return false
   self.msg.timestamp = getNowInNanosecondTime()
   self.msg.proof = @[]

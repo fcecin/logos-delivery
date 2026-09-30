@@ -1,1 +1,4 @@
-tests/api/test_api_receive.nim
+tests/api/test_conf.nim
+tests/api/test_entry_layer.nim
+tests/app/test_cli_args.nim
+tests/messaging/test_delivery_task_reaping.nim

@@ -276,4 +276,5 @@ proc init*(
     backfillEnabled: conf.backfillEnabled,
     backfillRequestTimeoutSeconds: conf.backfillRequestTimeoutSeconds,
   )
-  return ok(merge(?resolvePreset(conf.preset), fromFlags))
+  discard fromFlags
+  return resolvePreset(conf.preset)
