@@ -62,6 +62,12 @@ proc attachRlnProof*(
   ## error's kind tells the caller whether a retry can succeed.
   return await attachProof(self.node.rlnPlugin, message)
 
+proc makesRlnProof*(self: Waku): bool =
+  ## True when this node attaches an RLN proof to the messages that it sends.
+  let plugin = self.node.rlnPlugin.valueOr:
+    return false
+  return not plugin.generateProof.isNil()
+
 func isRlnRejection*(error: ErrorStatus): bool =
   ## True when a publish failure means "the RLN proof was not accepted", so the
   ## message is worth retrying with a freshly generated proof rather than being

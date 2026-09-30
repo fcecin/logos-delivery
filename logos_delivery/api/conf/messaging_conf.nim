@@ -91,7 +91,7 @@ type MessagingClientConf* = object
     ## Share of the epoch budget, in percent, at which the quota counts as
     ## approached (default 80).
   maxParkedAgeSec* {.name: "max-parked-age-sec".}: Opt[uint]
-    ## Max age, from the message timestamp, of a send still waiting for
+    ## Max age, from the call to `send`, of a send still waiting for
     ## rate-limit budget before it fails with `MessageErrorEvent` (default 1800).
   sendQueueCapacity* {.name: "send-queue-capacity".}: Opt[uint]
     ## Max messages tracked by the send service; sends beyond it are rejected

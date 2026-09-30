@@ -10,7 +10,8 @@ import
   logos_delivery/waku/factory/waku_conf,
   logos_delivery/messaging/rate_limit_manager/rate_limit_manager,
   logos_delivery/messaging/delivery_service/send_service/
-    [send_service, send_processor, delivery_task]
+    [send_service, send_processor, delivery_task],
+  logos_delivery/waku/waku_archive/archive
 import ../testlib/[testasync, wakunodeconf]
 
 ## The service pass sends queued tasks in batches of `MaxSendsInFlight`, and
@@ -66,6 +67,20 @@ proc newScripted(
   ScriptedProcessor(
     gate: newFuture[void]("send-loop-gate"), stalled: stalled, raising: raising
   )
+
+type NoAnswerProcessor = ref object of BaseSendProcessor
+  ## The first call ends as an attempt that got no answer from the service node.
+  ## Later calls propagate the task.
+  calls: int
+
+method process(self: NoAnswerProcessor, task: DeliveryTask): Future[void] {.async.} =
+  inc self.calls
+  if self.calls == 1:
+    task.outcomeUnknown = true
+    task.state = DeliveryState.NextRoundRetry
+    return
+  task.state = DeliveryState.SuccessfullyPropagated
+  task.firstPropagatedTime = Opt.some(Moment.now())
 
 type HandOffProcessor = ref object of BaseSendProcessor
   ## Overrides `sendImpl`, so the base chain runs. The first call parks the task
@@ -131,7 +146,7 @@ suite "SendService - batched send pass":
     let msg = WakuMessage(
       contentTopic: "/test/1/send-loop/proto",
       payload: id.toBytes(),
-      timestamp: 1_700_000_000_000_000_000,
+      timestamp: getNowInNanosecondTime(),
     )
     let pubsubTopic = PubsubTopic("/waku/2/rs/3/0")
     return DeliveryTask(
@@ -142,7 +157,7 @@ suite "SendService - batched send pass":
       state: DeliveryState.Entry,
     )
 
-  proc newService(processor: ScriptedProcessor): SendService =
+  proc newService(processor: BaseSendProcessor): SendService =
     let manager =
       RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
     return SendService.new(false, waku, manager, processor).expect("SendService.new")
@@ -176,6 +191,40 @@ suite "SendService - batched send pass":
     processor.gate.complete()
     await pass
     check a.state == DeliveryState.SuccessfullyPropagated
+
+  proc ageBy(task: DeliveryTask, age: timer.Duration) =
+    ## As if the task waited `age` for its next attempt.
+    task.msg.timestamp = getNowInNanosecondTime() - age.nanoseconds
+    task.msgHash = computeMessageHash(task.pubsubTopic, task.msg)
+
+  asyncTest "a message that waited gets a new timestamp before it is sent":
+    let processor = newScripted()
+    let service = newService(processor)
+    let task = buildTask("waited")
+    await service.queue(@[task])
+    task.ageBy(chronos.seconds(30))
+    let oldHash = task.msgHash
+    check archive.validate(task.msg).isErr()
+    await service.trySendMessages()
+    check:
+      task.state == DeliveryState.SuccessfullyPropagated
+      task.messageAge() < MaxUnsentMessageAge
+      task.msgHash != oldHash
+      task.msgHash == computeMessageHash(task.pubsubTopic, task.msg)
+      archive.validate(task.msg).isOk()
+
+  asyncTest "a message whose send attempt got no answer keeps its timestamp":
+    let processor = NoAnswerProcessor()
+    let service = newService(processor)
+    let task = buildTask("no-answer")
+    await service.send(task)
+    check task.outcomeUnknown
+    task.ageBy(chronos.seconds(30))
+    let oldHash = task.msgHash
+    await service.trySendMessages()
+    check:
+      task.state == DeliveryState.SuccessfullyPropagated
+      task.msgHash == oldHash
 
   asyncTest "a pass starts at most MaxSendsInFlight sends before waiting for them":
     let ids = names("t", MaxSendsInFlight + 1)
