@@ -94,6 +94,10 @@ proc attachRlnProof*(
 
   return ok(msgWithProof)
 
+proc makesRlnProof*(self: Waku): bool =
+  ## True when this node attaches an RLN proof to the messages that it sends.
+  return not self.node.rln.isNil() or not self.node.rlnLez.isNil()
+
 func isRlnRejection*(error: ErrorStatus): bool =
   ## True when a publish failure means "the RLN proof was not accepted", so the
   ## message is worth retrying with a freshly generated proof rather than being

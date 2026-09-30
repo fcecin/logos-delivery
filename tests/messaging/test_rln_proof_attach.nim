@@ -9,7 +9,11 @@ import
   logos_delivery/waku/api/publish,
   logos_delivery/waku/api/rln as rln_api,
   logos_delivery/waku/factory/waku_conf,
-  logos_delivery/waku/rln/rln_lez/[rln_lez, transport]
+  logos_delivery/waku/rln/rln_lez/[rln_lez, transport],
+  logos_delivery/api/types,
+  logos_delivery/messaging/rate_limit_manager/rate_limit_manager,
+  logos_delivery/messaging/delivery_service/send_service/
+    [send_service, send_processor, delivery_task]
 import
   ../testlib/[testasync, wakunodeconf],
   ../waku_rln_relay/utils_onchain,
@@ -73,6 +77,36 @@ suite "SendService RLN proof attach":
       quota.rateLimit == 100
       quota.remaining == 7
 
+proc mountTestRln(
+    waku: Waku, manager: RlnEvmGroupManager, epochSizeSec: uint64
+) {.async.} =
+  ## Mounts RLN on `waku` and registers a membership with a limit of 20.
+  (
+    await waku.node.setRlnValidator(
+      getWakuRlnConfig(
+        manager = manager,
+        userMessageLimit = 20,
+        index = MembershipIndex(1),
+        epochSizeSec = epochSizeSec,
+      )
+    )
+  ).expect("setRlnValidator")
+
+  let credentials = generateCredentials()
+  (
+    await cast[RlnEvmGroupManager](waku.node.rln.groupManager).register(
+      credentials, UserMessageLimit(20)
+    )
+  ).isOkOr:
+    assert false, "failed to register RLN credentials: " & error
+
+type PropagatingProcessor = ref object of BaseSendProcessor
+  ## Propagates each task at once.
+
+method process(self: PropagatingProcessor, task: DeliveryTask): Future[void] {.async.} =
+  task.state = DeliveryState.SuccessfullyPropagated
+  task.firstPropagatedTime = Opt.some(Moment.now())
+
 suite "SendService RLN proof attach - RLN mounted":
   var
     waku {.threadvar.}: Waku
@@ -84,24 +118,7 @@ suite "SendService RLN proof attach - RLN mounted":
     manager = await setupRlnEvm(deployContracts = false)
 
     waku = (await Waku.new(testConf())).expect("Waku.new")
-    (
-      await waku.node.setRlnValidator(
-        getWakuRlnConfig(
-          manager = manager,
-          userMessageLimit = 20,
-          index = MembershipIndex(1),
-          epochSizeSec = 600,
-        )
-      )
-    ).expect("setRlnValidator")
-
-    let credentials = generateCredentials()
-    (
-      await cast[RlnEvmGroupManager](waku.node.rln.groupManager).register(
-        credentials, UserMessageLimit(20)
-      )
-    ).isOkOr:
-      assert false, "failed to register RLN credentials: " & error
+    await waku.mountTestRln(manager, epochSizeSec = 600)
 
   asyncTeardown:
     ## The RLN proof-generator provider is registered on the global broker
@@ -141,3 +158,46 @@ suite "SendService RLN proof attach - RLN mounted":
     check:
       first.proof.len > 0
       second.proof == first.proof
+
+suite "SendService RLN proof attach - short epochs":
+  var
+    waku {.threadvar.}: Waku
+    anvilProc {.threadvar.}: Process
+    manager {.threadvar.}: RlnEvmGroupManager
+
+  asyncSetup:
+    anvilProc = runAnvil(stateFile = Opt.some(DEFAULT_ANVIL_STATE_PATH))
+    manager = await setupRlnEvm(deployContracts = false)
+    waku = (await Waku.new(testConf())).expect("Waku.new")
+    await waku.mountTestRln(manager, epochSizeSec = 1)
+
+  asyncTeardown:
+    try:
+      await waku.node.rln.stop()
+    except Exception:
+      assert false, "failed to stop RLN: " & getCurrentExceptionMsg()
+    stopAnvil(anvilProc)
+
+  asyncTest "a send gives a new proof and a new timestamp together":
+    ## The task is younger than `MaxUnsentMessageAge` but older than one epoch.
+    ## Its proof must have the epoch of its timestamp.
+    let rateLimit =
+      RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
+    let service = SendService.new(false, waku, rateLimit, PropagatingProcessor()).expect(
+        "SendService.new"
+      )
+    var msg = testMessage()
+    msg.timestamp = getNowInNanosecondTime() - chronos.seconds(5).nanoseconds
+    let pubsubTopic = PubsubTopic("/waku/2/rs/3/0")
+    let task = DeliveryTask(
+      requestId: RequestId("rln-epoch"),
+      pubsubTopic: pubsubTopic,
+      msg: msg,
+      msgHash: computeMessageHash(pubsubTopic, msg),
+      state: DeliveryState.Entry,
+    )
+    await service.send(task)
+    check:
+      task.state == DeliveryState.SuccessfullyPropagated
+      task.msg.proof.len > 0
+      (await waku.node.rln.validateMessage(task.msg)) == MessageValidationResult.Valid

@@ -30,7 +30,7 @@ proc newTask(id: string): DeliveryTask =
   let msg = WakuMessage(
     contentTopic: "/test/1/store-validation/proto",
     payload: id.toBytes(),
-    timestamp: 1_700_000_000_000_000_000,
+    timestamp: getNowInNanosecondTime(),
   )
   let pubsubTopic = PubsubTopic("/waku/2/rs/3/0")
   return DeliveryTask(

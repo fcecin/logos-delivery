@@ -39,9 +39,13 @@ method sendImpl*(
       return
 
     case error.code
+    of LightPushErrorCode.INTERNAL_SERVER_ERROR:
+      # The request can have reached the service node, and the service node can
+      # have published the message.
+      task.outcomeUnknown = true
+      task.state = DeliveryState.NextRoundRetry
     of LightPushErrorCode.NO_PEERS_TO_RELAY, LightPushErrorCode.TOO_MANY_REQUESTS,
-        LightPushErrorCode.OUT_OF_RLN_PROOF, LightPushErrorCode.SERVICE_NOT_AVAILABLE,
-        LightPushErrorCode.INTERNAL_SERVER_ERROR:
+        LightPushErrorCode.OUT_OF_RLN_PROOF, LightPushErrorCode.SERVICE_NOT_AVAILABLE:
       task.state = DeliveryState.NextRoundRetry
     else:
       # the message is malformed, send error
