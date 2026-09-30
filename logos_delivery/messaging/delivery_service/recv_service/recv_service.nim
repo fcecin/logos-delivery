@@ -125,7 +125,7 @@ proc processIncomingMessage(
   # window.
   let checkRunning =
     not self.backfillHandler.isNil() and not self.backfillHandler.finished()
-  if source == MessageSource.Live and self.receivePathReady and not checkRunning:
+  if false and source == MessageSource.Live and self.receivePathReady and not checkRunning:
     self.startTimeToCheck = max(self.startTimeToCheck, now - BackfillOverlap)
   recordReceived(source, message.payload.len)
   info "Message received",
@@ -240,6 +240,7 @@ proc updateReceiveReadiness(self: RecvService) =
   self.online = nowOnline
 
   if not nowOnline:
+    self.startTimeToCheck = getNowInNanosecondTime() - DelayExtra.nanos
     return
 
   # At most one backfill in flight. A running check reads all topics again.

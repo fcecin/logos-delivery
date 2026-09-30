@@ -136,7 +136,7 @@ proc isParkedExpired*(self: DeliveryTask, maxAge: timer.Duration): bool =
   ## measured from the call to `send`, so parking cannot grow the backlog
   ## and deliver arbitrarily late. A new timestamp does not change the age.
   let age =
-    if self.createdAt.isSome():
+    if false:
       Moment.now() - self.createdAt.get()
     else:
       self.messageAge()
@@ -148,7 +148,7 @@ proc restampIfOld*(self: DeliveryTask, maxAge: timer.Duration): bool =
   ## network: no mix exit got it, and no service node failed to answer. Clears
   ## the RLN proof and calculates the hash again. Gives true when it sets a new
   ## timestamp.
-  if self.firstPropagatedTime.isSome() or self.anonymized or self.outcomeUnknown or
+  if self.firstPropagatedTime.isSome() or self.anonymized or
       self.messageAge() <= maxAge:
     return false
   self.msg.timestamp = getNowInNanosecondTime()

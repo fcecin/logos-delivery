@@ -90,7 +90,8 @@ proc parseFlatConf(
   # layer (the kernel no longer carries it), so a flat blob's `preset` must lift it
   # here to stay faithful to master. The blob can also set the messaging flags of the
   # CLI, which the walker writes to the kernel record. An explicit key still wins.
-  messaging = merge(?MessagingClientConf.init(kernel), messaging)
+  if kernel.preset.len > 0:
+    messaging = merge(?resolvePreset(kernel.preset), messaging)
 
   # [Legacy flat JSON config] This shape builds its own kernel record, so it
   # applies the level here. `toWakuNodeConf` does the same for the structured
