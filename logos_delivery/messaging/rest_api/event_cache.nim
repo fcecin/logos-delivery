@@ -74,7 +74,6 @@ proc recordSend*(
     while self.sendOrder.len > self.maxSendRequests:
       let evicted = self.sendOrder.popFirst()
       self.sendByReqId.del(evicted)
-      logos_delivery_rest_send_dropped.inc()
 
   self.sendByReqId.withValue(requestId, status):
     status[].events.add(record)

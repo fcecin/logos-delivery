@@ -447,10 +447,6 @@ proc admitAndProve(self: SendService, task: DeliveryTask): Future[bool] {.async.
       return false
     task.firstAdmittedTime = Opt.some(Moment.now())
 
-  if task.restampIfOld(MaxUnsentMessageAge):
-    debug "New timestamp for a message that waited to propagate",
-      requestId = task.requestId, msgHash = task.msgHash.to0xHex()
-
   ## A no-op when RLN is not mounted, or when a prior round already attached a
   ## proof; otherwise draws the nonce and attaches.
   task.msg = (await self.waku.attachRlnProof(task.msg)).valueOr:
