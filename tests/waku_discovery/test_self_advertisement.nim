@@ -1,15 +1,21 @@
 {.used.}
 
-import std/[base64, sequtils]
+import std/[base64, net, sequtils, strutils]
 import chronos, results, testutils/unittests
 import brokers/broker_implement
+import libp2p/protocols/connectivity/autonat/[types, service]
+import libp2p/services/reachabilityobservers
+import libp2p_mix/[curve25519, mix_protocol]
 import
   logos_delivery/waku/discovery/self_advertisement,
   logos_delivery/waku/discovery/peer_discovery_interface,
   logos_delivery/waku/factory/waku_conf,
-  logos_delivery/waku/waku_enr/capabilities
+  logos_delivery/waku/waku_enr/capabilities,
+  logos_delivery/waku/[waku_core, waku_mix, waku_node]
 import logos_delivery/waku/waku_core/codecs
 import tools/confutils/cli_args
+import logos_delivery/waku/waku
+import ../testlib/[wakucore, wakunode, wakunodeconf]
 
 ## A backend that records what it was asked to do, so the fan-out rules can be
 ## checked without standing up a DHT.
@@ -19,6 +25,7 @@ type FakeBackend = ref object of IPeerDiscovery
   advertised: seq[string]
   advertisedData: seq[seq[byte]]
   interests: seq[string]
+  stopped: seq[string]
 
 BrokerImplement FakeBackend of IPeerDiscovery:
   proc new(T: typedesc[FakeBackend], id: string, kinds: seq[string]): FakeBackend =
@@ -62,6 +69,7 @@ BrokerImplement FakeBackend of IPeerDiscovery:
   method stopAdvertising(
       self: FakeBackend, key: string
   ): Future[Result[void, string]] {.async.} =
+    self.stopped.add(key)
     ok()
 
   method unregisterInterest(
@@ -175,3 +183,217 @@ suite "Self advertisement":
     check:
       raw.len == 5
       raw[4] == 0b0000_0001'u8 # shard 0 only; 9999 did not fold onto a low bit
+
+const MixKey = ServiceKeyPrefix & MixProtocolID
+
+proc mixConfWith(flags: CapabilitiesBitfield): WakuConf =
+  var conf = confWith(flags)
+  let keys = generateKeyPair().expect("mix key pair")
+  conf.mixConf = Opt.some(MixConf(mixKey: keys.privateKey, mixPubKey: keys.publicKey))
+  conf
+
+type OfferCase = ref object
+  node: WakuNode ## Never started. Its own hop is a loopback address.
+  conf: WakuConf
+  kad: FakeBackend
+  backends: seq[IPeerDiscovery]
+
+proc offerCase(
+    flags = CoreFlags, hopPolicy: PeerAddressPolicy = defaultAddressPolicy
+): Future[OfferCase] {.async.} =
+  let node = newTestWakuNode(
+    generateSecp256k1Key(),
+    parseIpAddress("127.0.0.1"),
+    Port(25610),
+    quicEnabled = false,
+  )
+  let keys = generateKeyPair().expect("mix key pair")
+  (await node.mountMix(DefaultClusterId, keys.privateKey, @[], hopPolicy)).isOkOr:
+    raiseAssert "mountMix: " & $error
+  let kad = FakeBackend.create("service", @["service", "topic", "cap"])
+  return OfferCase(
+    node: node, conf: mixConfWith(flags), kad: kad, backends: @[IPeerDiscovery(kad)]
+  )
+
+proc report(
+    c: OfferCase, reachability: NetworkReachability, source = MixHopSource.Own
+) {.async.} =
+  await updateMixAdvertisement(c.backends, c.conf, c.node.wakuMix, reachability, source)
+
+proc advertise(
+    c: OfferCase, reachability: NetworkReachability, source = MixHopSource.Own
+) {.async.} =
+  await advertiseMix(c.backends, c.conf, c.node.wakuMix, reachability, source)
+
+proc offered(c: OfferCase): bool =
+  c.node.wakuMix.offer.offered
+
+proc startMixWaku(nodeConf: WakuNodeConf): Future[Waku] {.async.} =
+  var conf = nodeConf
+  conf.mix = Opt.some(true)
+  conf.mixPrivateHops = true
+  let wakuConf = conf.toWakuConf().valueOr:
+    raiseAssert error
+  let waku = (await Waku.new(wakuConf)).valueOr:
+    raiseAssert error
+  (await waku.start()).isOkOr:
+    raiseAssert error
+  return waku
+
+suite "Mix hop offer":
+  test "a service node with an acceptable own hop offers itself once autonat confirms":
+    check mixHopOffer(
+      mixConfWith(CoreFlags), true, NetworkReachability.Reachable, MixHopSource.Own
+    )
+      .isOk()
+
+  test "each missing condition stops the offer":
+    for (conf, serves, reachability, source) in [
+      (confWith(CoreFlags), true, NetworkReachability.Reachable, MixHopSource.Own),
+      (mixConfWith(EdgeFlags), true, NetworkReachability.Reachable, MixHopSource.Own),
+      (mixConfWith(CoreFlags), false, NetworkReachability.Reachable, MixHopSource.Own),
+      (mixConfWith(CoreFlags), true, NetworkReachability.Unknown, MixHopSource.Own),
+      (mixConfWith(CoreFlags), true, NetworkReachability.NotReachable, MixHopSource.Own),
+      (
+        mixConfWith(CoreFlags),
+        true,
+        NetworkReachability.Reachable,
+        MixHopSource.Reported,
+      ),
+    ]:
+      check mixHopOffer(conf, serves, reachability, source).isErr()
+
+  asyncTest "the offer follows autonat, and the interest in mix peers stays":
+    let c = await offerCase()
+    await c.advertise(NetworkReachability.Unknown)
+    check:
+      c.kad.interests == @[MixKey]
+      c.kad.advertised.len == 0
+      not c.offered
+
+    await c.report(NetworkReachability.Reachable)
+    check:
+      c.kad.advertised == @[MixKey]
+      c.kad.advertisedData == @[@(c.conf.mixConf.get().mixPubKey)]
+      c.offered
+
+    # The same report again changes nothing.
+    await c.report(NetworkReachability.Reachable)
+    check c.kad.advertised.len == 1
+
+    await c.report(NetworkReachability.NotReachable)
+    check:
+      c.kad.stopped == @[MixKey]
+      not c.offered
+      c.kad.interests == @[MixKey]
+
+  asyncTest "an unknown reachability keeps the offer, not reachable stops it":
+    let c = await offerCase()
+    for reachability in [
+      NetworkReachability.Reachable, NetworkReachability.Unknown,
+      NetworkReachability.Reachable, NetworkReachability.Unknown,
+    ]:
+      await c.report(reachability)
+    check:
+      c.kad.advertised == @[MixKey]
+      c.kad.stopped.len == 0
+      c.offered
+
+    await c.report(NetworkReachability.NotReachable)
+    check:
+      c.kad.stopped == @[MixKey]
+      not c.offered
+
+    # With no offer on, `Unknown` does not make one.
+    await c.report(NetworkReachability.Unknown)
+    check:
+      c.kad.advertised == @[MixKey]
+      not c.offered
+
+  asyncTest "a configured own hop makes the offer without autonat, not reachable stops it":
+    let c = await offerCase()
+    await c.report(NetworkReachability.Unknown, MixHopSource.Configured)
+    check:
+      c.kad.advertised == @[MixKey]
+      c.offered
+
+    await c.report(NetworkReachability.NotReachable, MixHopSource.Configured)
+    check:
+      c.kad.stopped == @[MixKey]
+      not c.offered
+
+  asyncTest "an own hop that only other peers reported makes no offer":
+    ## An autonat v1 dial-back can pass the NAT mapping of this node.
+    let c = await offerCase()
+    await c.report(NetworkReachability.Reachable, MixHopSource.Reported)
+    check:
+      not c.offered
+      c.kad.advertised.len == 0
+      "only other peers reported" in c.node.wakuMix.offer.refusal
+
+    for source in [MixHopSource.Own, MixHopSource.Configured]:
+      await c.report(NetworkReachability.Reachable, source)
+      check c.offered
+      await c.report(NetworkReachability.NotReachable, source)
+      check not c.offered
+
+  asyncTest "a client-only node finds mix peers but never offers itself":
+    let c = await offerCase(flags = EdgeFlags)
+    await c.advertise(NetworkReachability.Reachable)
+    await c.report(NetworkReachability.Reachable)
+    check:
+      c.kad.interests == @[MixKey]
+      c.kad.advertised.len == 0
+      not c.offered
+
+  asyncTest "a node whose own hop the public policy refuses does not offer itself":
+    ## The loopback hop can end its own reply paths. Other nodes cannot dial it.
+    let c = await offerCase(hopPolicy = hopPolicyFor(false))
+    await c.advertise(NetworkReachability.Reachable)
+    check:
+      c.node.wakuMix.selfHopUsable()
+      not c.node.wakuMix.selfHopServes()
+      c.kad.interests == @[MixKey]
+      c.kad.advertised.len == 0
+
+suite "Mix hop offer in a running node":
+  asyncTest "autonat reports drive the mix hop offer":
+    ## The autonat observer of `Waku.new` reaches the mix of the node.
+    let conf = defaultTestWakuNodeConf()
+    let waku = await startMixWaku(conf)
+    defer:
+      discard await waku.stop()
+    require not waku.node.wakuMix.isNil()
+    check:
+      waku.node.wakuMix.selfHopServes()
+      waku.node.mixHopSource() == MixHopSource.Own
+      not waku.node.wakuMix.offer.offered
+
+    await waku.autonat.reachabilityObservers.notify(
+      NetworkReachability.Reachable, Opt.some(1.0)
+    )
+    check waku.node.wakuMix.offer.offered
+
+    await waku.autonat.reachabilityObservers.notify(
+      NetworkReachability.NotReachable, Opt.some(1.0)
+    )
+    check not waku.node.wakuMix.offer.offered
+
+  asyncTest "a node on a configured address offers its hop at start":
+    ## As a bootstrap node, with `--ext-multiaddr`. No autonat report comes.
+    var conf = defaultTestWakuNodeConf()
+    conf.tcpPort = Port(25622)
+    conf.extMultiAddrs = @["/ip4/127.0.0.1/tcp/25622"]
+    conf.extMultiAddrsOnly = true
+    let waku = await startMixWaku(conf)
+    defer:
+      discard await waku.stop()
+    require not waku.node.wakuMix.isNil()
+    check:
+      waku.node.mixHopSource() == MixHopSource.Configured
+      waku.node.wakuMix.offer.offered
+
+    await waku.autonat.reachabilityObservers.notify(
+      NetworkReachability.NotReachable, Opt.some(1.0)
+    )
+    check not waku.node.wakuMix.offer.offered

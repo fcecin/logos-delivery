@@ -42,6 +42,18 @@ const
   MixStoppingError* = "mix is stopping" ## The error of a send after the pool stops.
 
 type
+  MixHopSource* {.pure.} = enum
+    ## Where the address of the own mix hop comes from. See `mixHopOffer`.
+    Reported ## Other peers reported the host, as discv5 and autonat do.
+    Own ## An address of this machine, or a port mapping of its gateway.
+    Configured ## The operator stated the address.
+
+  MixHopOffer* = object
+    ## The offer of this node as a mix hop. `discovery/self_advertisement.nim`
+    ## writes it, and the rendezvous record reads `offered`.
+    offered*: bool
+    refusal*: string ## The last logged reason for no offer.
+
   WakuMix* = ref object of MixProtocol
     peerManager*: PeerManager
     clusterId: uint16
@@ -52,6 +64,7 @@ type
       ## encodes.
     hops*: MixHopPool ## The eligible peers. `nodePool` reads them.
     delays: DelayStrategy ## The delay strategy of `MixProtocol.init`, for `buildSurb`.
+    offer*: MixHopOffer
 
   WakuMixResult*[T] = Result[T, string]
 

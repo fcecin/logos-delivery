@@ -17,10 +17,12 @@
 import std/base64
 import chronos, chronicles, results
 import libp2p_mix/mix_protocol
+import libp2p/protocols/connectivity/autonat/types
 import
   logos_delivery/waku/discovery/peer_discovery_interface,
   logos_delivery/waku/factory/waku_conf,
-  logos_delivery/waku/waku_enr/capabilities
+  logos_delivery/waku/waku_enr/capabilities,
+  logos_delivery/waku/waku_mix
 
 logScope:
   topics = "waku discovery advertise"
@@ -94,6 +96,21 @@ proc selfAdvertisementData*(conf: WakuConf, shards: seq[uint16]): seq[byte] =
 
   return cast[seq[byte]](base64.encode(raw))
 
+type ServiceBackend = tuple[discovery: IPeerDiscovery, id: string]
+
+proc serviceBackends(
+    discoveries: seq[IPeerDiscovery]
+): Future[seq[ServiceBackend]] {.async: (raises: []).} =
+  ## The backends that take service keys, with their ids.
+  var backends: seq[ServiceBackend]
+  for discovery in discoveries:
+    let info = (await discovery.backendInfo()).valueOr:
+      debug "skipping backend with unreadable info", reason = error
+      continue
+    if ServiceKind in info.keyKinds:
+      backends.add((discovery, info.id))
+  return backends
+
 proc advertiseSelf*(
     discoveries: seq[IPeerDiscovery], conf: WakuConf, shards: seq[uint16]
 ): Future[void] {.async: (raises: []).} =
@@ -134,11 +151,103 @@ proc advertiseSelf*(
     info "advertising this node on the delivery network",
       backend = info.id, protocols = conf.wakuFlags.toCodecs()
 
-proc advertiseMix*(
-    discoveries: seq[IPeerDiscovery], conf: WakuConf
+proc mixHopOffer*(
+    conf: WakuConf,
+    selfHopServes: bool,
+    reachability: NetworkReachability,
+    hopSource: MixHopSource,
+): Result[void, string] =
+  ## Ok when this node can be a hop for other nodes, else the reason. A
+  ## `Reported` hop makes no offer, because an autonat v1 dial-back over quic
+  ## passes the NAT mapping of this node. For the same reason `Reachable` is
+  ## weak evidence for an `Own` hop too.
+  if conf.mixConf.isNone():
+    return err("mix is not mounted")
+  if not conf.wakuFlags.isServiceNode():
+    return err("a client-only node sends over mix but does not forward for others")
+  if not selfHopServes:
+    return err("the hop policy does not accept the own mix hop address")
+  if hopSource == MixHopSource.Reported:
+    return err(
+      "only other peers reported the address of the own mix hop. Set " &
+        "--nat=extip or --ext-multiaddr to offer this node as a mix hop"
+    )
+  if reachability != NetworkReachability.Reachable:
+    return err(
+      "autonat does not report that other nodes can dial this node (" & $reachability &
+        ")"
+    )
+  return ok()
+
+proc writeMixOffer(
+    discoveries: seq[IPeerDiscovery], conf: WakuConf, offered: bool, renew: bool
 ): Future[void] {.async: (raises: []).} =
-  ## Advertises this node's mix public key, and registers interest in other mix
-  ## nodes, on every service-capable backend.
+  ## Starts or stops the mix advertisement on each backend. With `renew`, a stop
+  ## comes first, because a backend ignores a second start.
+  let key = ServiceKeyPrefix & MixProtocolID
+  let data = @(conf.mixConf.get().mixPubKey)
+  for (discovery, id) in await serviceBackends(discoveries):
+    if offered:
+      if renew:
+        (await discovery.stopAdvertising(key)).isOkOr:
+          debug "Could not stop the mix advertisement before its renewal",
+            backend = id, reason = error
+      (await discovery.startAdvertising(key, data)).isOkOr:
+        warn "could not advertise this node as a mix node", backend = id, reason = error
+        continue
+      info "advertising this node as a mix node", backend = id
+    else:
+      (await discovery.stopAdvertising(key)).isOkOr:
+        warn "Could not stop advertising this node as a mix node",
+          backend = id, reason = error
+
+proc updateMixAdvertisement*(
+    discoveries: seq[IPeerDiscovery],
+    conf: WakuConf,
+    mix: WakuMix,
+    reachability: NetworkReachability,
+    hopSource: MixHopSource,
+): Future[void] {.async: (raises: []).} =
+  ## Starts or stops the hop offer as `mixHopOffer` decides, on a change only.
+  ## Call it when the reachability or the own hop changes. `Unknown` keeps an
+  ## offer, and makes one for a `Configured` hop, because autonat cannot confirm
+  ## a node that only takes inbound connections. Of the reachability values,
+  ## only `NotReachable` stops it.
+  if mix.isNil() or conf.mixConf.isNone():
+    return
+  let evidence =
+    if reachability == NetworkReachability.Unknown and
+        (mix.offer.offered or hopSource == MixHopSource.Configured):
+      NetworkReachability.Reachable
+    else:
+      reachability
+  let allowed = mixHopOffer(conf, mix.selfHopServes(), evidence, hopSource)
+  # A service node logs each new reason for no offer once.
+  if allowed.isErr() and allowed.error != mix.offer.refusal and
+      conf.wakuFlags.isServiceNode():
+    mix.offer.refusal = allowed.error
+    if not mix.offer.offered:
+      info "Not offering this node as a mix hop to other nodes", reason = allowed.error
+  if allowed.isOk():
+    mix.offer.refusal = ""
+  if allowed.isOk() == mix.offer.offered:
+    return
+  mix.offer.offered = allowed.isOk()
+  if allowed.isOk():
+    info "Offering this node as a mix hop to other nodes"
+  else:
+    info "Stopping the offer of this node as a mix hop", reason = allowed.error
+  await writeMixOffer(discoveries, conf, mix.offer.offered, renew = false)
+
+proc advertiseMix*(
+    discoveries: seq[IPeerDiscovery],
+    conf: WakuConf,
+    mix: WakuMix,
+    reachability: NetworkReachability,
+    hopSource: MixHopSource,
+): Future[void] {.async: (raises: []).} =
+  ## Registers interest in mix nodes on each backend, then makes the hop offer
+  ## when `mixHopOffer` allows it.
   ##
   ## This goes through the interface rather than through
   ## `KademliaDiscoveryConf.servicesToAdvertise`, which is where it used to be
@@ -154,22 +263,12 @@ proc advertiseMix*(
     return
 
   let key = ServiceKeyPrefix & MixProtocolID
-  let data = @(conf.mixConf.get().mixPubKey)
-
-  for discovery in discoveries:
-    let info = (await discovery.backendInfo()).valueOr:
-      debug "skipping backend with unreadable info", reason = error
-      continue
-
-    if ServiceKind notin info.keyKinds:
-      continue
-
+  for (discovery, id) in await serviceBackends(discoveries):
     (await discovery.registerInterest(key)).isOkOr:
-      warn "could not register interest in mix peers", backend = info.id, reason = error
+      warn "could not register interest in mix peers", backend = id, reason = error
 
-    (await discovery.startAdvertising(key, data)).isOkOr:
-      warn "could not advertise this node as a mix node",
-        backend = info.id, reason = error
-      continue
-
-    info "advertising this node as a mix node", backend = info.id
+  if not mix.isNil() and mix.offer.offered:
+    # The offer came before the backends started. Make it again.
+    await writeMixOffer(discoveries, conf, offered = true, renew = true)
+  else:
+    await updateMixAdvertisement(discoveries, conf, mix, reachability, hopSource)

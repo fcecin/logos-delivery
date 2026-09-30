@@ -238,7 +238,8 @@ proc getCapabilitiesGetter(node: WakuNode): GetCapabilities =
 proc getWakuPeerRecordGetter(node: WakuNode): GetWakuPeerRecord =
   return proc(): WakuPeerRecord {.closure, gcsafe, raises: [].} =
     var mixKey: string
-    if not node.wakuMix.isNil():
+    # Without the key, a rendezvous client does not add this node to its pool.
+    if not node.wakuMix.isNil() and node.wakuMix.offer.offered:
       mixKey = node.wakuMix.pubKey.to0xHex()
     return WakuPeerRecord.init(
       peerId = node.switch.peerInfo.peerId,
@@ -289,6 +290,17 @@ proc enrBaseline*(node: WakuNode): EnrBaseline =
       Opt.none(Port)
   return (ip: node.enrHost, tcp: bound)
 
+proc enrEndpoint(node: WakuNode): Opt[MultiAddress] =
+  ## The tcp endpoint of the ENR scalars. Its host comes only from the
+  ## configuration (extip, a dns4 name, or a concrete listen host).
+  let baseline = node.enrBaseline()
+  if baseline.ip.isNone() or baseline.tcp.isNone():
+    return Opt.none(MultiAddress)
+  let address = initTAddress(baseline.ip.get(), baseline.tcp.get())
+  let endpoint = MultiAddress.init(address).valueOr:
+    return Opt.none(MultiAddress)
+  return Opt.some(endpoint)
+
 proc updateMixSelfHop(node: WakuNode) =
   ## Sets mix's own hop, which closes every reply path, to the first address mix
   ## can encode, in this order: a direct address known from outside, the ENR
@@ -299,12 +311,9 @@ proc updateMixSelfHop(node: WakuNode) =
   let wasMissing = node.wakuMix.selfHopMissing()
   let outside = node.enrAddresses()
   var preferred = outside.filterIt(not it.isCircuitRelayMA())
-  let baseline = node.enrBaseline()
-  if baseline.ip.isSome() and baseline.tcp.isSome():
-    let endpoint =
-      MultiAddress.init(initTAddress(baseline.ip.get(), baseline.tcp.get()))
-    if endpoint.isOk() and endpoint.get() notin outside:
-      preferred.add(endpoint.get())
+  node.enrEndpoint().withValue(endpoint):
+    if endpoint notin outside:
+      preferred.add(endpoint)
   preferred.add(outside.filterIt(it.isCircuitRelayMA()))
   let chosen = node.wakuMix.updateSelfHop(preferred, node.announcedAddresses)
   if chosen.isNone():
@@ -319,6 +328,24 @@ proc updateMixSelfHop(node: WakuNode) =
     return
   if chosen.get() != before or wasMissing:
     info "Mix self hop set", hop = $chosen.get(), before = $before
+
+proc mixHopSource*(node: WakuNode): MixHopSource =
+  ## Where the address of the own mix hop comes from. See `mixHopOffer`.
+  if node.wakuMix.isNil() or node.wakuMix.selfHopMissing():
+    return MixHopSource.Reported
+  let hop = node.wakuMix.localMixPubInfo().multiAddr
+  # A node with a dns4 name has the ENR endpoint as its hop.
+  if hop in node.explicitAnnounced or node.enrEndpoint() == Opt.some(hop):
+    return MixHopSource.Configured
+  if hop in node.baseAnnounced.get(@[]):
+    return MixHopSource.Own
+  let nat = node.switch.natService().valueOr:
+    return MixHopSource.Reported
+  let host = hop.getIp().valueOr:
+    return MixHopSource.Reported
+  if nat.externalIp == Opt.some(host):
+    return MixHopSource.Own
+  return MixHopSource.Reported
 
 proc updateEnrConfiguredEndpoint*(node: WakuNode, netConfig: NetConfig) =
   ## A dns4 name can answer differently at start, so the scalars follow that
@@ -590,7 +617,7 @@ proc mountMix*(
 ): Future[Result[void, string]] {.async.} =
   ## `hopPolicy` decides which addresses the hops of a path can carry. The
   ## default takes public direct addresses. Give `defaultAddressPolicy` on a
-  ## private network. The own hop is not subject to it.
+  ## private network. It does not apply to the own hop.
   info "Mounting mix protocol", nodeId = node.info #TODO log the config used
 
   if node.announcedAddresses.len == 0:
