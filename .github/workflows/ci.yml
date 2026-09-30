@@ -1,355 +1,39 @@
 name: ci
 
+# Mutation run. Runs only the test files in .github/mutation-tests.txt. This
+# workflow is for a throwaway fork PR and never goes upstream.
+
 on:
   pull_request:
-  merge_group:
-  push:
-    branches:
-      - master
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 env:
-  NPROC: 2
-  MAKEFLAGS: "-j${NPROC}"
-  NIMFLAGS: "--parallelBuild:${NPROC} --colors:off -d:chronicles_colors:none"
   NIM_VERSION: '2.2.6'
 
 jobs:
-  changes: # run only the jobs relevant to what a PR touches
+  list:
     runs-on: ubuntu-22.04
-    permissions:
-      pull-requests: read
-    steps:
-    - uses: actions/checkout@v4
-      name: Checkout code
-      id: checkout
-    # `all` is a deny-list rather than an allow-list: every path runs the whole
-    # CI unless it is docs or one of the narrow areas below, so a new source
-    # directory is covered without anyone remembering to extend this filter.
-    - uses: dorny/paths-filter@v4
-      id: filter
-      with:
-        # 'some-with-excludes' is what makes the '!' patterns subtractive; the
-        # default 'some' would match every file against the bare '**'.
-        predicate-quantifier: 'some-with-excludes'
-        filters: |
-          all:
-          - '**'
-          - '!**/*.md'
-          - '!docs/**'
-          - '!LICENSE-*'
-          - '!.github/ISSUE_TEMPLATE/**'
-          - '!tests/**'
-          - '!tests-e2e/**'
-          - '!examples/**'
-          - '!docker/**'
-          - '!.dockerignore'
-          - '!nix/**'
-          - '!flake.nix'
-          - '!flake.lock'
-          tests:
-          - 'tests/**'
-          - '!**/*.md'
-          e2e:
-          - 'tests-e2e/**'
-          - '!**/*.md'
-          examples:
-          - 'examples/**'
-          - '!**/*.md'
-          docker:
-          - 'docker/**'
-          - '.dockerignore'
-          - '!**/*.md'
-          nix:
-          - 'nix/**'
-          - 'flake.nix'
-          - 'flake.lock'
-          - '!**/*.md'
-
     outputs:
-      # A push to master runs everything so every master commit keeps a full CI record.
-      all: ${{ github.event_name == 'push' || steps.filter.outputs.all == 'true' }}
-      tests: ${{ steps.filter.outputs.tests }}
-      e2e: ${{ steps.filter.outputs.e2e }}
-      examples: ${{ steps.filter.outputs.examples }}
-      docker: ${{ steps.filter.outputs.docker }}
-      nix: ${{ steps.filter.outputs.nix }}
-
-  # Also on nix changes: it is the only check that compares nix/deps.nix
-  # against nimble.lock, and the Nix build itself never reads the lock.
-  build-health:
-    needs: changes
-    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.nix == 'true' }}
-    uses: ./.github/workflows/build-health.yml
-
-  # Also feeds the e2e jobs with liblogosdelivery.so.
-  build:
-    needs: changes
-    if: >-
-      ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.examples == 'true'
-      || needs.changes.outputs.e2e == 'true' || needs.changes.outputs.docker == 'true' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, macos-15]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
-
-    name: build-${{ matrix.os }}
+      tests: ${{ steps.read.outputs.tests }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - id: read
+        run: echo "tests=$(jq -R -s -c 'split("\n") | map(select(length > 0))' .github/mutation-tests.txt)" >> "$GITHUB_OUTPUT"
 
-      - name: Install Nim ${{ env.NIM_VERSION }}
-        uses: jiro4989/setup-nim-action@v2
-        with:
-          nim-version: ${{ env.NIM_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install nimble deps
-        uses: ./.github/actions/nimble-deps
-        with:
-          nim-version: ${{ env.NIM_VERSION }}
-
-      - name: Build binaries
-        # -j1: `all` builds logosdeliverynode and liblogosdelivery, each via `nimble
-        # <task>`. Under -j2 the two nimble invocations re-resolve git deps
-        # concurrently and clobber each other in the shared ~/.nimble/pkgcache
-        # (e.g. "destination already exists", "could not lock config file"),
-        # failing the build. Serializing the targets removes the race; Nim's
-        # own --parallelBuild still parallelizes compilation. Mirrors the test
-        # job, which already forces -j1.
-        run: make V=1 -j1 all
-
-      - name: Build FFI examples
-        run: make V=1 -j1 ffi-examples
-
-      - name: Audit installed deps
-        run: make audit-deps
-
-      # Publish the freshly built shared library so the tests-e2e-c-abi workflow
-      # can run the C ABI suite against it without rebuilding. Only the Linux
-      # build is uploaded since those jobs run on ubuntu-22.04.
-      - name: Upload liblogosdelivery.so
-        if: matrix.os == 'ubuntu-22.04'
-        uses: actions/upload-artifact@v4
-        with:
-          name: liblogosdelivery
-          path: build/liblogosdelivery.so
-          retention-days: 1
-
-  # Runs `make liblogosdelivery` with the default flags to test compile and link.
-  liblogosdelivery-default:
-    needs: changes
-    if: ${{ needs.changes.outputs.all == 'true' }}
+  test:
+    needs: list
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-15]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
-    env:
-      NIMFLAGS: ""
-
-    name: liblogosdelivery default build - ${{ matrix.os }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Nim ${{ env.NIM_VERSION }}
-        uses: jiro4989/setup-nim-action@v2
-        with:
-          nim-version: ${{ env.NIM_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install nimble deps
-        uses: ./.github/actions/nimble-deps
-        with:
-          nim-version: ${{ env.NIM_VERSION }}
-
-      - name: make liblogosdelivery
-        run: make V=1 -j1 liblogosdelivery
-
-      - name: Check liblogosdelivery exports no OpenSSL symbols
-        run: scripts/check_lib_exports.sh build/liblogosdelivery.${{ runner.os == 'macOS' && 'dylib' || 'so' }}
-
-  build-windows:
-    needs: changes
-    if: ${{ needs.changes.outputs.all == 'true' }}
-    uses: ./.github/workflows/windows-build.yml
-    with:
-      branch: ${{ github.ref }}
-
-  build-android:
-    needs: changes
-    if: ${{ needs.changes.outputs.all == 'true' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        # arm64 only: amd64 is blocked by a nim-lsquic android type mismatch,
-        # 32-bit ABIs by int overflows in nim-brokers and waku_store_sync.
-        target: [arm64]
+        test: ${{ fromJSON(needs.list.outputs.tests) }}
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
-
-    name: build-android-${{ matrix.target }}
+    timeout-minutes: 90
+    name: ${{ matrix.test }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Nim ${{ env.NIM_VERSION }}
-        uses: jiro4989/setup-nim-action@v2
-        with:
-          nim-version: ${{ env.NIM_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Setup Android NDK
-        id: setup-ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27c
-
-      # Keyed on the script so a change of the pinned cross rev invalidates it.
-      - name: Cache cross
-        uses: actions/cache@v3
-        with:
-          path: ~/.cargo/bin/cross
-          key: ${{ runner.os }}-cross-${{ hashFiles('scripts/build_rln_android.sh') }}
-
-      - name: Install nimble deps
-        uses: ./.github/actions/nimble-deps
-        with:
-          nim-version: ${{ env.NIM_VERSION }}
-          # The NDK compiler rewrites the nimbledeps archives, so this job does not share the host jobs' cache.
-          cache: 'false'
-
-      - name: Build liblogosdelivery for android-${{ matrix.target }}
-        # -j1: see the build job.
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: make V=1 -j1 liblogosdelivery-android-${{ matrix.target }}
-
-      - name: Audit installed deps
-        run: make audit-deps
-
-      - name: Upload android libraries
-        uses: actions/upload-artifact@v4
-        with:
-          name: liblogosdelivery-android-${{ matrix.target }}
-          path: build/android/
-          retention-days: 1
-
-  # macos-15 runners ship full Xcode with the iOS SDKs preinstalled.
-  build-ios:
-    needs: changes
-    if: ${{ needs.changes.outputs.all == 'true' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        sdk: [device, simulator]
-    runs-on: macos-15
-    timeout-minutes: 60
-
-    name: build-ios-${{ matrix.sdk }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Nim ${{ env.NIM_VERSION }}
-        uses: jiro4989/setup-nim-action@v2
-        with:
-          nim-version: ${{ env.NIM_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # Shares the host macOS cache: the iOS build never writes into nimbledeps/.
-      - name: Install nimble deps
-        uses: ./.github/actions/nimble-deps
-        with:
-          nim-version: ${{ env.NIM_VERSION }}
-
-      - name: Build liblogosdelivery for ios-${{ matrix.sdk }}
-        # -j1: see the build job.
-        run: make V=1 -j1 liblogosdelivery-ios-${{ matrix.sdk }}
-
-      - name: Audit installed deps
-        run: make audit-deps
-
-      - name: Upload iOS library
-        uses: actions/upload-artifact@v4
-        with:
-          name: liblogosdelivery-ios-${{ matrix.sdk }}
-          path: |
-            build/ios/*/liblogosdelivery.a
-            build/ios/*/liblogosdelivery.h
-          retention-days: 1
-
-  tests:
-    needs: changes
-    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.tests == 'true' }}
-    uses: ./.github/workflows/tests.yml
-
-  build-docker-image:
-    needs: changes
-    if: >-
-      ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.e2e == 'true'
-      || needs.changes.outputs.docker == 'true' }}
-    uses: ./.github/workflows/container-image.yml
-    secrets: inherit
-    with:
-      artifact_fallback: true
-
-  # C ABI E2E tests run the in-repo tests-e2e/ C ABI suite against the
-  # liblogosdelivery.so built by the `build` job (downloaded as the
-  # `liblogosdelivery` artifact). An empty node_image falls back to
-  # DEFAULT_NWAKU (fork PRs lack the quay secrets).
-  tests-e2e-c-abi:
-    needs: [changes, build, build-docker-image]
-    if: >-
-      ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.e2e == 'true'
-      || needs.changes.outputs.docker == 'true' }}
-    uses: ./.github/workflows/tests-e2e-c-abi.yml
-    with:
-      node_image: ${{ needs.build-docker-image.outputs.image }}
-      node_image_artifact: ${{ needs.build-docker-image.outputs.image_artifact }}
-    secrets: inherit
-
-  # E2E tests that run the node docker image and drive it over its REST API
-  tests-e2e-rest:
-    needs: [changes, build-docker-image]
-    if: >-
-      ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.e2e == 'true'
-      || needs.changes.outputs.docker == 'true' }}
-    uses: ./.github/workflows/tests-e2e-rest.yml
-    with:
-      node_image: ${{ needs.build-docker-image.outputs.image }}
-      node_image_artifact: ${{ needs.build-docker-image.outputs.image_artifact }}
-    secrets: inherit
-
-  nix:
-    needs: changes
-    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.nix == 'true' }}
-    permissions:
-      contents: read
-      pull-requests: read
-    uses: ./.github/workflows/ci-nix.yml
-    secrets: inherit
-
-  lint:
-    name: "Lint"
-    runs-on: ubuntu-22.04
-    needs: [changes, build]
-    # Still waits for `build` when it runs, but a tests-only PR skips `build`
-    # and must be linted anyway.
-    if: >-
-      ${{ !cancelled() && needs.build.result != 'failure'
-      && (needs.changes.outputs.all == 'true' || needs.changes.outputs.tests == 'true'
-      || needs.changes.outputs.examples == 'true') }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Install Nim ${{ env.NIM_VERSION }}
         uses: jiro4989/setup-nim-action@v2
@@ -362,40 +46,11 @@ jobs:
         with:
           nim-version: ${{ env.NIM_VERSION }}
 
-      - name: Build nph
+      - name: Install the RLN test dependencies (anvil)
+        run: make rln-deps
+
+      - name: Run one test file
         run: |
-          make build-nph
-
-      - name: Check nph formatting
-        run: |
-          shopt -s extglob  # Enable extended globbing
-          NPH=$(make print-nph-path)
-          echo "using nph at ${NPH}"
-          "${NPH}" examples logos_delivery tests tools apps *.@(nim|nims|nimble)
-          git diff --exit-code
-
-  # The single required check for this workflow. A matrix or reusable-workflow
-  # job skipped at job level reports under its raw name (e.g.
-  # `build-${{ matrix.os }}`), so requiring the per-job names blocks forever.
-  # A skipped job is not relevant to the change and counts as passing here.
-  ci-required:
-    if: always()
-    needs:
-      - changes
-      - build-health
-      - build
-      - liblogosdelivery-default
-      - build-windows
-      - build-android
-      - build-ios
-      - tests
-      - build-docker-image
-      - tests-e2e-c-abi
-      - tests-e2e-rest
-      - nix
-      - lint
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Fail if a job failed or was cancelled
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
-        run: exit 1
+          export MAKEFLAGS="-j1"
+          export NIMFLAGS="--colors:off -d:chronicles_colors:none"
+          make V=1 test ${{ matrix.test }}
