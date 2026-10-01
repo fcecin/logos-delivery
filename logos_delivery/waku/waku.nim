@@ -12,6 +12,7 @@ import
   libp2p/protocols/ping,
   libp2p/services/autorelayservice,
   libp2p/services/hpservice,
+  libp2p/protocols/connectivity/autonat/service,
   libp2p/peerid,
   libp2p/wire,
   eth/p2p/discoveryv5/enr,
@@ -102,6 +103,9 @@ type Waku* = ref object ## Implements `KernelApi` (ops in `waku/api/*`).
 
   healthMonitor*: NodeHealthMonitor
 
+  autonat*: AutonatService
+    ## Reports whether other nodes can dial this node, for the mix advertisement.
+
   restServer*: WakuRestServerRef
   metricsServer*: MetricsHttpServerRef
   appCallbacks*: AppCallbacks
@@ -112,7 +116,8 @@ type Waku* = ref object ## Implements `KernelApi` (ops in `waku/api/*`).
 
 proc setupSwitchServices*(
     node: WakuNode, conf: WakuConf, circuitRelay: Relay, rng: crypto.Rng
-) =
+): AutonatService =
+  ## Adds the autonat service (with autorelay for a relay client) and returns it.
   proc onReservation(addresses: seq[MultiAddress]) {.gcsafe, raises: [].} =
     ## This callback only logs the change. When a reservation drops, libp2p
     ## keeps peerInfo unchanged and the route stays until the next update.
@@ -139,6 +144,8 @@ proc setupSwitchServices*(
     newService.setup(node.switch)
   except ServiceSetupError as e:
     error "failed to set up libp2p switch service", error = e.msg
+
+  return autonatService
 
 ## Initialisation
 
@@ -187,6 +194,22 @@ proc setupAppCallbacks(
     healthMonitor.onConnectionStatusChange = appCallbacks.connectionStatusChangeHandler
 
   return ok()
+
+proc reachability(waku: Waku): NetworkReachability =
+  ## What autonat last reported about this node, `Unknown` before a report.
+  if waku.autonat.isNil():
+    return NetworkReachability.Unknown
+  return waku.autonat.reachabilityObservers.lastReachability()
+
+proc checkMixAdvertisement(waku: Waku) {.async: (raises: []).} =
+  ## Gives the reachability and the self hop to the mix advertisement.
+  await updateMixAdvertisement(
+    waku.node.discoveries,
+    waku.conf,
+    waku.node.wakuMix,
+    waku.reachability(),
+    waku.node.selfHopSource(),
+  )
 
 proc new*(
     T: type Waku, wakuConf: WakuConf, appCallbacks: AppCallbacks = nil
@@ -240,7 +263,15 @@ proc new*(
     brokerCtx: brokerCtx,
   )
 
-  waku.node.setupSwitchServices(wakuConf, relay, rng)
+  waku.autonat = waku.node.setupSwitchServices(wakuConf, relay, rng)
+  discard waku.autonat.reachabilityObservers.add(
+    proc(
+        status: NetworkReachability,
+        confidence: Opt[float],
+        dialBackAddr: Opt[MultiAddress],
+    ) {.async: (raises: [CancelledError]).} =
+      await waku.checkMixAdvertisement()
+  )
 
   if wakuConf.discv5Conf.isSome():
     waku.discv5Discovery = Discv5PeerDiscovery.create(
@@ -539,6 +570,8 @@ proc start*(waku: Waku): Future[Result[void, string]] {.async: (raises: []).} =
   ## Set the callback before the explicit refresh in updateWaku,
   ## so a commit in between reaches the ENR.
   waku.node.onCommittedAddresses = proc() {.gcsafe, raises: [].} =
+    # A new self hop can change the mix advertisement.
+    asyncSpawn waku.checkMixAdvertisement()
     refreshEnrAddrs(waku.node, waku.key, waku.wakuDiscv5).isOkOr:
       error "failed to refresh ENR multiaddrs", error = $error
       return
@@ -577,7 +610,13 @@ proc start*(waku: Waku): Future[Result[void, string]] {.async: (raises: []).} =
     waku.conf,
     waku.node.getShardsGetter(waku.conf.subscribeShards)(),
   )
-  await advertiseMix(waku.node.discoveries, waku.conf)
+  await advertiseMix(
+    waku.node.discoveries,
+    waku.conf,
+    waku.node.wakuMix,
+    waku.reachability(),
+    waku.node.selfHopSource(),
+  )
 
   ## Health Monitor
   waku.healthMonitor.startHealthMonitor().isOkOr:
