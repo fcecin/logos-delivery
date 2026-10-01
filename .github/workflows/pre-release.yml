@@ -17,7 +17,6 @@ env:
   NPROC: 2
   MAKEFLAGS: "-j${NPROC}"
   NIMFLAGS: ""
-  NIM_VERSION: '2.2.6'
 
 jobs:
   tag-name:
@@ -55,12 +54,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      # macos images ship no nim/nimble; make dies at "nimble: No such file or directory".
-      - name: Install Nim ${{ env.NIM_VERSION }}
-        uses: ./.github/actions/install-nim
-        with:
-          nim-version: ${{ env.NIM_VERSION }}
 
       - name: Cache the Nimble package cache
         uses: actions/cache@v3
