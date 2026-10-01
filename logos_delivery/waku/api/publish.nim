@@ -92,9 +92,11 @@ proc selectMixLightpushPeer*(self: Waku, shard: PubsubTopic): Opt[RemotePeerInfo
   ## Selects a lightpush service peer for `shard` that mix can route to. With
   ## `exit_is_dest` the server is the last node of the sphinx path, so the mix
   ## pool must hold a `MixPubInfo` for it. The selection reads the service slot
-  ## first, then draws one usable pool member uniformly.
+  ## first, then draws one member of the mix path pool uniformly.
+  if self.node.wakuMix.isNil():
+    return Opt.none(RemotePeerInfo)
   let peerStore = self.node.peerManager.switch.peerStore
-  let pool = MixNodePool.new(peerStore)
+  let pool = self.node.wakuMix.nodePool
 
   let slotted = self.node.peerManager.serviceSlots.getOrDefault(WakuLightPushCodec)
   if not slotted.isNil() and pool.get(slotted.peerId).isSome():

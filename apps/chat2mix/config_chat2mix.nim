@@ -91,6 +91,13 @@ type
       name: "mixnode"
     .}: seq[MixNodePubInfo]
 
+    mixPrivateHops* {.
+      desc:
+        "Let mix paths use hops on private, shared or loopback addresses, and circuit relay routes. Only for a private network or a single host.",
+      defaultValue: false,
+      name: "mix-private-hops"
+    .}: bool
+
     keepAlive* {.
       desc: "Enable keep-alive for idle connections: true|false",
       defaultValue: false,
