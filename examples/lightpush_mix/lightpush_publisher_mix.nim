@@ -148,7 +148,7 @@ proc setupAndPublish(rng: crypto.Rng, conf: LightPushMixConf) {.async.} =
         return
       conn = connOpt.get()
     else:
-      # `exitConnection` makes the reply link before the send.
+      # `exitConnection` prepares the reply path before the send.
       conn = (
         await node.wakuMix.exitConnection(
           dPeerId, # destination lightpush peer
@@ -159,7 +159,10 @@ proc setupAndPublish(rng: crypto.Rng, conf: LightPushMixConf) {.async.} =
         )
       ).valueOr:
         error "failed to create mix connection", error = error
-        return
+        logos_delivery_lp_mix_failed.inc(labelValues = ["no_mix_connection"])
+        i = i + 1
+        await sleepAsync(conf.msgIntervalMilliseconds)
+        continue
     i = i + 1
     let text =
       """Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nullam venenatis magna ut tortor faucibus, in vestibulum nibh commodo. Aenean eget vestibulum augue. Nullam suscipit urna non nunc efficitur, at iaculis nisl consequat. Mauris quis ultrices elit. Suspendisse lobortis odio vitae laoreet facilisis. Cras ornare sem felis, at vulputate magna aliquam ac. Duis quis est ultricies, euismod nulla ac, interdum dui. Maecenas sit amet est vitae enim commodo gravida. Proin vitae elit nulla. Donec tempor dolor lectus, in faucibus velit elementum quis. Donec non mauris eu nibh faucibus cursus ut egestas dolor. Aliquam venenatis ligula id velit pulvinar malesuada. Vestibulum scelerisque, justo non porta gravida, nulla justo tempor purus, at sollicitudin erat erat vel libero.
@@ -172,10 +175,6 @@ proc setupAndPublish(rng: crypto.Rng, conf: LightPushMixConf) {.async.} =
       ephemeral: true, # tell store nodes to not store it
       timestamp: getNowInNanosecondTime(),
     ) # current timestamp
-
-    let res = await node.wakuLightpushClient.publish(
-      Opt.some(LightpushPubsubTopic), message, conn
-    )
 
     let startTime = getNowInNanosecondTime()
 
