@@ -650,6 +650,13 @@ suite "Mix send path - exit peer selection":
       waku.lightpushPeerAvailable(shard) # usable for a plain send
       waku.selectMixLightpushPeer(shard).isNone() # but not as a mix exit
 
+  asyncTest "a lightpush peer that this node failed to dial is not a mix exit":
+    let peerId = addLightpushPeer(mixCapable = true)
+    check waku.selectMixLightpushPeer(shard).isSome()
+
+    waku.node.peerManager.recordDialFailure(peerId, "test")
+    check waku.selectMixLightpushPeer(shard).isNone()
+
   asyncTest "a mix key alone does not make a peer a usable exit":
     ## Mix routes IPv4 TCP and QUIC-v1 addresses only. A peer with another
     ## address is not in the pool, whatever its mix key is. Mix evicts such a

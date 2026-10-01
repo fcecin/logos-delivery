@@ -1,9 +1,9 @@
 ## The mix pool. It follows the peer store of the node, keeps one hop address
-## for each eligible peer, and dials pool peers.
+## for each eligible peer, and reconnects to peers after a failed dial.
 
 {.push raises: [].}
 
-import std/[sequtils, tables]
+import std/[sequtils, strutils, tables]
 import chronicles, chronos, results
 
 import
@@ -16,16 +16,19 @@ import
 
 import
   logos_delivery/waku/node/peer_manager,
-  logos_delivery/waku/node/peer_manager/waku_peer_store
+  logos_delivery/waku/node/peer_manager/waku_peer_store,
+  logos_delivery/waku/node/delivery_dialer
 
 export peeraddrpolicy
 
 logScope:
   topics = "waku mix pool"
 
-const MinMixPoolSize* = 4
-  ## The smallest pool that mix can build a path from. `PathLength` is 3, and
-  ## with `exit_is_dest` the exit node is a pool member and not one of the hops.
+const
+  MinMixPoolSize* = 4
+    ## The smallest pool that mix can build a path from. `PathLength` is 3, and
+    ## with `exit_is_dest` the exit node is a pool member and not one of the hops.
+  ReconnectsPerPass = 2
 
 type MixPool* = ref object
   peerManager: PeerManager
@@ -35,10 +38,13 @@ type MixPool* = ref object
   pathPool: MixNodePool ## The pool over `eligible` that nim-libp2p-mix reads.
   dials: Table[PeerId, Future[bool].Raising([CancelledError])]
     ## The running mix dial of each peer. A later attempt joins it.
-  dialsStopped: bool ## True from `stop` to `start`. Then no send starts a dial.
+  dialsStopped: bool
+    ## True from `stop` to `start`. Then no send or observer starts a dial.
   loop: Future[void]
-  # The tunable is public for tests.
+  # The three tunables are public for tests.
   poolLoopInterval*: Duration = chronos.seconds(15)
+  reconnectBackoff*: Duration = chronos.seconds(30)
+  reconnectMaxBackoff*: Duration = chronos.minutes(30)
 
 const publicDirectAddressPolicy* = proc(ma: MultiAddress): bool {.gcsafe, raises: [].} =
   ## A public address that is not a relay route. Only a relay client can dial
@@ -87,12 +93,15 @@ proc hopAddress(pool: MixPool, peerId: PeerId): Opt[MultiAddress] =
   return Opt.some(carried[0])
 
 proc eligibleHop(pool: MixPool, peerId: PeerId): Opt[MixPubInfo] =
-  ## The pool entry for `peerId`. It needs a secp256k1 key and a hop address.
+  ## The pool entry for `peerId`. It needs a secp256k1 key, a hop address and
+  ## no failed-dial record.
   let store = pool.store
   if peerId == pool.peerManager.switch.peerInfo.peerId:
     return Opt.none(MixPubInfo)
   let mixPubKey = store[MixPubKeyBook][peerId]
   if mixPubKey == default(Curve25519Key):
+    return Opt.none(MixPubInfo)
+  if store[NumberFailedConnBook][peerId] > 0:
     return Opt.none(MixPubInfo)
   # `addPeer` and `MixNodePool.add` write the key book with each mix key.
   let pubKey = store[KeyBook][peerId]
@@ -152,6 +161,7 @@ proc followPeerStore(pool: MixPool) =
   store[AddressBook].addHandler(onChange)
   store[LastSeenOutboundBook].addHandler(onChange)
   store[KeyBook].addHandler(onChange)
+  store[NumberFailedConnBook].addHandler(onChange)
 
 proc addChangeHandler*(pool: MixPool, handler: PeerBookChangeHandler) =
   ## Calls `handler` when a peer joins or leaves the pool.
@@ -161,11 +171,25 @@ proc add*(pool: MixPool, info: MixPubInfo) =
   ## Adds a configured mix node to the peer store.
   pool.known.add(info)
 
+proc isLocalDialLimit(error: string): bool =
+  ## True when a dial failed at a limit of this node (libp2p gives text only).
+  return
+    "getOutgoingSlot" in error or "connections limit reached" in error or
+    "Outbound stream budget exceeded" in error or "can't dial self" in error
+
+proc recordFailure(pool: MixPool, peerId: PeerId, reason: string, error = reason) =
+  ## Records a failed dial against `peerId`, except while this node is offline
+  ## or at a local limit. So one outage does not empty the whole pool.
+  if not pool.peerManager.isOnline() or isLocalDialLimit(error):
+    trace "Mix dial failed for a cause of this node", peerId = peerId, error = error
+    return
+  pool.peerManager.recordDialFailure(peerId, reason)
+
 proc dialHop(
     pool: MixPool, peerId: PeerId
 ): Future[bool] {.async: (raises: [CancelledError]).} =
-  ## Dials `peerId` at its hop addresses. An existing connection counts as a
-  ## success.
+  ## Dials `peerId` at its hop addresses and records the result. An existing
+  ## connection counts as a success.
   let addresses = pool.hopAddresses(peerId)
   if addresses.len == 0:
     return false
@@ -173,11 +197,14 @@ proc dialHop(
     await pool.peerManager.switch.connect(peerId, addresses).wait(DefaultDialTimeout)
   except AsyncTimeoutError:
     debug "Mix peer dial timed out", peerId = peerId, addresses = $addresses
+    pool.recordFailure(peerId, "mix dial timed out")
     return false
   except DialFailedError as exc:
     debug "Mix peer dial failed",
       peerId = peerId, addresses = $addresses, error = exc.msg
+    pool.recordFailure(peerId, "mix dial failed", exc.msg)
     return false
+  pool.peerManager.recordDialSuccess(peerId, "mix")
   debug "Mix peer dial succeeded", peerId = peerId
   return true
 
@@ -201,10 +228,73 @@ proc stopped*(pool: MixPool): bool =
   ## True from `stop` to `start`.
   pool.dialsStopped
 
-proc maintain*(pool: MixPool) {.async: (raises: [CancelledError]).} =
-  ## One pass of the pool loop. It sees what no handler reports (an address TTL).
+proc isFirstHopDial(
+    pool: MixPool, peerId: PeerId, addrs: seq[MultiAddress], protos: seq[string]
+): bool =
+  ## True for a mix stream dial to a pool peer at its hop address, with no
+  ## connection. nim-libp2p-mix also dials addresses from the packets of other
+  ## nodes, which prove nothing.
+  if pool.dialsStopped or MixProtocolID notin protos:
+    return false
+  let hop = pool.pathPool.get(peerId).valueOr:
+    return false
+  return addrs == @[hop.multiAddr] and not pool.peerManager.switch.isConnected(peerId)
+
+proc recordStreamDialFailure(
+    pool: MixPool,
+    peerId: PeerId,
+    addrs: seq[MultiAddress],
+    protos: seq[string],
+    error: string,
+) =
+  ## Records a failed stream dial that `isFirstHopDial` accepts.
+  if not pool.isFirstHopDial(peerId, addrs, protos):
+    return
+  debug "Mix stream dial failed", peerId = peerId, error = error
+  pool.recordFailure(peerId, "mix stream dial failed", error)
+
+proc redialStoppedFirstHop(
+    pool: MixPool, peerId: PeerId, addrs: seq[MultiAddress], protos: seq[string]
+) =
+  ## A send stops its first hop dial at `MixReplyTimeout`, before a tcp dial to a
+  ## host that is down has a result. One pool dial follows and records it.
+  if not pool.isFirstHopDial(peerId, addrs, protos):
+    return
+  debug "Mix first hop dial stopped, the pool dials the peer", peerId = peerId
+  discard pool.dial(peerId)
+
+proc backoff*(pool: MixPool, failures: int): Duration =
+  ## The wait after `failures` failed dials in a row before the next dial.
   ## Public for tests.
+  var pause = pool.reconnectBackoff
+  for _ in 1 ..< failures:
+    if pause >= pool.reconnectMaxBackoff:
+      break
+    pause = pause * 2
+  return min(pause, pool.reconnectMaxBackoff)
+
+proc reconnect*(pool: MixPool) {.async: (raises: [CancelledError]).} =
+  ## Dials again the peers with a failed dial whose backoff is over. A success
+  ## returns the peer to the pool. The pool has its own backoff, because a fleet
+  ## node must come back soon and discovery cannot clear a record. Public for
+  ## tests.
+  if not pool.peerManager.isOnline():
+    return
+  let now = dialFailureClock()
+  var due: seq[PeerId]
+  for peerId in pool.known.peerIds():
+    let failures = pool.store[NumberFailedConnBook][peerId]
+    if failures == 0 or pool.hopAddress(peerId).isNone():
+      continue
+    if now >= pool.store[LastFailedConnBook][peerId] + pool.backoff(failures):
+      due.add(peerId)
+  await allFutures(due[0 ..< min(due.len, ReconnectsPerPass)].mapIt(pool.dial(it)))
+
+proc maintain*(pool: MixPool) {.async: (raises: [CancelledError]).} =
+  ## One pass of the pool loop. It sees what no handler reports (an address TTL),
+  ## and dials failed peers again. Public for tests.
   pool.refresh()
+  await pool.reconnect()
 
 proc poolLoop(pool: MixPool) {.async: (raises: [CancelledError]).} =
   while true:
@@ -238,5 +328,20 @@ proc new*(
     pathPool: MixNodePool.new(eligible),
   )
   pool.followPeerStore()
+  # The dialer sees each hop dial of nim-libp2p-mix.
+  if peerManager.switch.dialer of DeliveryDialer:
+    let dialer = DeliveryDialer(peerManager.switch.dialer)
+    dialer.dialFailureObservers.add(
+      proc(
+          peerId: PeerId, addrs: seq[MultiAddress], protos: seq[string], error: string
+      ) {.gcsafe, raises: [].} =
+        pool.recordStreamDialFailure(peerId, addrs, protos, error)
+    )
+    dialer.dialStopObservers.add(
+      proc(
+          peerId: PeerId, addrs: seq[MultiAddress], protos: seq[string]
+      ) {.gcsafe, raises: [].} =
+        pool.redialStoppedFirstHop(peerId, addrs, protos)
+    )
   pool.refresh()
   return pool

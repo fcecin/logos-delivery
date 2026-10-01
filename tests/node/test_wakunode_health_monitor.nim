@@ -810,6 +810,12 @@ suite "Health Monitor - mix readiness":
     nodeA.peerManager.switch.peerStore.delete(nodeA.wakuMix.nodePool.peerIds()[0])
     check await waitForStatus(ConnectionStatus.Disconnected)
 
+    # A failed dial takes a peer out of the pool, with no peer store delete.
+    nodeA.addMixPeer(62100, lightpush = true)
+    check await waitForStatus(ConnectionStatus.PartiallyConnected)
+    nodeA.peerManager.recordDialFailure(nodeA.wakuMix.nodePool.peerIds()[0], "test")
+    check await waitForStatus(ConnectionStatus.Disconnected)
+
     await monitorA.stopHealthMonitor()
     await nodeB.stop()
     await nodeA.stop()
