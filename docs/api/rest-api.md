@@ -55,6 +55,8 @@ logosdeliverynode --entry-layer=messaging --mode=core --preset=logos.test \
   --rest=true --rest-address=127.0.0.1 --rest-port=8645 --storenode=<multiaddr>
 ```
 
+[Run a Messaging API node](../operators/how-to/run-messaging.md#messaging-api-flags) lists the Messaging API flags.
+
 | Method and route | Body | Response |
 |---|---|---|
 | `POST /messaging/v1/subscriptions` | `["/app/1/topic/proto", ...]` | `200 OK` |
@@ -71,7 +73,14 @@ A send is asynchronous. `200` means that the node accepted the message. The resu
 * `sent`: a Store peer confirmed that it holds the message, or, for a send over mix, the mix exit replied
 * `error`: the send failed (rejected message, no peer within the retry window, no Store confirmation within about 60 s of propagation, ...)
 
-`sent` and `error` are final. `sent` needs store-based reliability, and never comes for an ephemeral message. A send over the plain path also needs a Store peer for `sent`. The network preset sets reliability (on for `logos.dev` and `logos.test`, off for `twn` and `status.prod`, on without a preset). For library and JSON configs, `reliability` overrides the preset. Without reliability, and for an ephemeral message, `propagated` is the last event. Clients must ignore kinds that they do not know. A `404` on `GET /events/send/{requestId}` means that nothing is buffered for that id now: the id is unknown, already polled, or has no event yet. Keep polling until the last event.
+After a `sent` or `error` event, no more events come for that message.
+
+* The `sent` event needs reliability. A send without mix also needs a Store peer.
+* A message sent with `"ephemeral": true` gets no `sent` event, because Store nodes do not keep ephemeral messages.
+* Reliability is on by default, and off for the `twn` and `status.prod` presets. `--reliability` overrides that.
+* Without reliability, or for an ephemeral message, `propagated` is the last event.
+* Later versions can add new event types. A client must skip an event type that it does not know.
+* `GET /messaging/v1/events/send/{requestId}` answers `404` while the node has no event for that request: the request id is unknown, a client already read its events, or no event came yet. Call it again until the last event comes.
 
 The receivers can have the message after an `error` event. The node does not resend a message after its `propagated` event.
 

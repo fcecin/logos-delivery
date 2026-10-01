@@ -516,3 +516,16 @@ suite "Waku external config - REST server caches":
     conf.rest = true
     conf.restRelayCacheCapacity = 0
     check conf.toWakuConf().isErr()
+
+suite "Node config - Messaging API flags":
+  test "the messaging flags parse from the command line":
+    let conf = LogosDeliveryNodeConf.load(
+      version = "", cmdLine = @["--reliability=false", "--anonymity-level=Required"]
+    )
+    check:
+      conf.messaging.reliabilityEnabled == Opt.some(false)
+      conf.messaging.anonymityLevel == Opt.some(AnonymityLevel.Required)
+
+  test "the messaging flags are unset by default":
+    let conf = LogosDeliveryNodeConf.load(version = "", cmdLine = @[])
+    check not conf.messaging.isSet()

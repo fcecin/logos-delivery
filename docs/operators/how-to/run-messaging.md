@@ -6,12 +6,20 @@ A node started with `--entry-layer=messaging` runs the Messaging API. With `--re
 
 - Set a network preset (`--preset=twn`, `--preset=logos.dev`, `--preset=logos.test` or `--preset=status.prod`), or set `--cluster-id` and `--num-shards-in-network`.
 
+## Messaging API flags
+
+| Flag | What it sets | Default |
+|---|---|---|
+| `--reliability` | Confirm each send with a Store node | on, off for the `twn` and `status.prod` presets |
+| `--anonymity-level` | Mix anonymity level: `None`, `Preferred` or `Required`. A level above `None` mounts mix. | `None` |
+
 ## Store nodes
 
 The `sent` event of a send confirms that a Store node has the message. Run Store nodes with `--store=true`.
 
 - A Store node does not confirm its own sends, so give each sender another Store node as a peer.
 - Without a Store peer, each send gets an `error` event about a minute after it goes out.
+- Without Store nodes, set `--reliability=false`.
 
 ## Readiness
 
