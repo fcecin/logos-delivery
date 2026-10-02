@@ -806,7 +806,13 @@ suite "Health Monitor - mix readiness":
       nodeA.addMixPeer(62000 + i, lightpush = true)
     check await waitForStatus(ConnectionStatus.PartiallyConnected)
 
+    # A failed dial takes a peer out of the pool, below the minimum again.
+    nodeA.wakuMix.pool.countFailure(nodeA.wakuMix.nodePool.peerIds()[0])
+    check await waitForStatus(ConnectionStatus.Disconnected)
+
     # With no news for too long, each discovered peer leaves the pool.
+    nodeA.addMixPeer(62100, lightpush = true)
+    check await waitForStatus(ConnectionStatus.PartiallyConnected)
     nodeA.wakuMix.pool.discoveredTtl = ZeroDuration
     await nodeA.wakuMix.pool.maintain()
     check await waitForStatus(ConnectionStatus.Disconnected)

@@ -94,8 +94,22 @@ proc bootnode*(address: string): MixNodePubInfo =
 proc peerId*(entry: MixNodePubInfo): PeerId =
   parsePeerInfo(entry.multiAddr).tryGet().peerId
 
+proc deadPeers*(node: WakuNode, ports: varargs[int]): seq[PeerId] =
+  ## Discovered mix peers on loopback ports where no mix node listens.
+  ports.mapIt(node.discover(@["/ip4/127.0.0.1/tcp/" & $it]))
+
 proc inPool*(node: WakuNode, peerId: PeerId): bool =
   node.wakuMix.nodePool.get(peerId).isSome()
+
+proc failed*(node: WakuNode, peerId: PeerId): bool =
+  node.wakuMix.pool.failed(peerId)
+
+proc addOtherConnection*(node: WakuNode, port: int): Future[WakuNode] {.async.} =
+  ## Starts a node without mix and connects `node` to it. A failed mix dial
+  ## counts only while the node has another connection.
+  let other = await startNodeWithoutMix(port)
+  await node.switch.connect(other.peerInfo.peerId, other.peerInfo.addrs)
+  return other
 
 proc hopOf*(node: WakuNode, peerId: PeerId): MultiAddress =
   node.wakuMix.nodePool.get(peerId).expect("pool entry").multiAddr
@@ -219,6 +233,11 @@ proc stop*(net: MixNet, senders: seq[WakuNode]) {.async.} =
     await node.stop()
   for node in net.nodes:
     await node.stop()
+
+proc connectExit*(net: MixNet, sender: WakuNode) {.async.} =
+  ## Connects the sender to the exit. A failed mix dial counts only while the
+  ## sender has another connection.
+  await sender.switch.connect(net.exit.peerInfo.peerId, net.exit.peerInfo.addrs)
 
 proc connectedNodes*(net: MixNet, sender: WakuNode): seq[int] =
   (0 ..< MixNodeCount).toSeq().filterIt(

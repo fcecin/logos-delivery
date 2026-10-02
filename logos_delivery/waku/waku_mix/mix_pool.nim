@@ -6,7 +6,7 @@
 {.push raises: [].}
 
 import std/[sequtils, tables]
-import chronicles, chronos, results
+import chronicles, chronos, metrics, results
 
 import
   libp2p/crypto/curve25519,
@@ -20,7 +20,9 @@ from eth/p2p/discoveryv5/enr import Record
 import
   logos_delivery/waku/node/peer_manager,
   logos_delivery/waku/node/peer_manager/waku_peer_store,
-  logos_delivery/waku/waku_enr/sharding
+  logos_delivery/waku/node/delivery_dialer,
+  logos_delivery/waku/waku_enr/sharding,
+  ./protocol_metrics
 
 export peeraddrpolicy
 
@@ -38,7 +40,7 @@ type
 
   KnownMixNode = object
     ## A mix node that the pool knows. It is a pool member while it has a hop
-    ## address.
+    ## address and no failed dial.
     source: MixNodeSource
     mixPubKey: Curve25519Key
     libp2pPubKey: SkPublicKey
@@ -51,6 +53,7 @@ type
     enr: Record
     shards: seq[uint16]
     lastSeen: Moment ## The last peer record, successful dial or connection.
+    failedAt: Opt[Moment] ## The last failed dial that counts.
 
 type MixPool* = ref object
   peerManager: PeerManager
@@ -60,10 +63,14 @@ type MixPool* = ref object
   nodePool: MixNodePool ## The pool over `members` that nim-libp2p-mix reads.
   dials: Table[PeerId, Future[bool].Raising([CancelledError])]
     ## The running mix dial of each peer. A later attempt joins it.
-  dialsStopped: bool ## True from `stop` to `start`. Then no send starts a dial.
+  dialsStopped: bool
+    ## True from `stop` to `start`. Then no send starts a dial, and no dial event
+    ## counts.
   loop: Future[void]
   # The settings are public for tests.
   poolLoopInterval*: Duration = chronos.seconds(15)
+  failureWait*: Duration = chronos.minutes(30)
+    ## A discovered node with a failed dial stays off paths for this time.
   discoveredTtl*: Duration = chronos.hours(1)
     ## A discovered node leaves after this time with no peer record, successful
     ## dial or connection.
@@ -120,10 +127,12 @@ proc hopAddress(pool: MixPool, peerId: PeerId): Opt[MultiAddress] =
 
 proc poolEntry(pool: MixPool, peerId: PeerId): Opt[MixPubInfo] =
   ## The pool entry for `peerId`. The pool must know the node, and the node
-  ## needs a hop address.
+  ## needs a hop address and no failed dial.
   var mixPubKey: Curve25519Key
   var libp2pPubKey: SkPublicKey
   pool.known.withValue(peerId, node):
+    if node.failedAt.isSome():
+      return Opt.none(MixPubInfo)
     mixPubKey = node.mixPubKey
     libp2pPubKey = node.libp2pPubKey
   do:
@@ -271,9 +280,11 @@ proc add*(pool: MixPool, info: MixPubInfo) =
   ## call also writes the node to the peer store, so that this node can dial it.
   if info.peerId == pool.peerManager.switch.peerInfo.peerId:
     return
-  # A node that the pool knows keeps its copies.
+  # A node that the pool knows keeps its copies. A configured node has no
+  # failed dials.
   var node = pool.known.getOrDefault(info.peerId)
   node.source = MixNodeSource.Configured
+  node.failedAt = Opt.none(Moment)
   if info.multiAddr notin node.configured:
     node.configured.add(info.multiAddr)
   node.mixPubKey = info.mixPubKey
@@ -283,11 +294,40 @@ proc add*(pool: MixPool, info: MixPubInfo) =
   MixNodePool.new(pool.store).add(info)
   pool.refreshPeer(info.peerId)
 
+proc failed*(pool: MixPool, peerId: PeerId): bool =
+  ## True while the mix node `peerId` is off paths after a failed dial. Public
+  ## for tests.
+  pool.known.withValue(peerId, node):
+    return node.failedAt.isSome()
+  return false
+
+proc countFailure*(pool: MixPool, peerId: PeerId) =
+  ## Counts a failed dial of the discovered node `peerId`. The node stays off
+  ## paths for `failureWait`. A configured node stays on paths, so its failed
+  ## dials do not count. Public for tests.
+  pool.known.withValue(peerId, node):
+    if node.source == MixNodeSource.Configured:
+      return
+    node.failedAt = Opt.some(Moment.now())
+  do:
+    return
+  logos_delivery_mix_dial_failures.inc()
+  pool.refreshPeer(peerId)
+
+proc recordFailure(pool: MixPool, peerId: PeerId, reason: string) =
+  ## Records a failed dial of `peerId`. It counts only while this node has a
+  ## connection to another peer, so one outage does not empty the pool.
+  if not pool.peerManager.switch.connectedPeers().anyIt(it != peerId):
+    trace "Mix dial failure not counted, this node has no other connection",
+      peerId = peerId, reason = reason
+    return
+  pool.countFailure(peerId)
+
 proc dialPeer(
     pool: MixPool, peerId: PeerId
 ): Future[bool] {.async: (raises: [CancelledError]).} =
-  ## Dials `peerId` at its hop addresses. An existing connection counts as a
-  ## success.
+  ## Dials `peerId` at its hop addresses and records the result. An existing
+  ## connection counts as a success.
   let addresses = pool.hopAddresses(peerId)
   if addresses.len == 0:
     return false
@@ -295,13 +335,17 @@ proc dialPeer(
     await pool.peerManager.switch.connect(peerId, addresses).wait(DefaultDialTimeout)
   except AsyncTimeoutError:
     debug "Mix peer dial timed out", peerId = peerId, addresses = $addresses
+    pool.recordFailure(peerId, "mix dial timed out")
     return false
   except DialFailedError as exc:
     debug "Mix peer dial failed",
       peerId = peerId, addresses = $addresses, error = exc.msg
+    pool.recordFailure(peerId, exc.msg)
     return false
   pool.known.withValue(peerId, node):
+    node.failedAt = Opt.none(Moment)
     node.lastSeen = Moment.now()
+  pool.refreshPeer(peerId)
   debug "Mix peer dial succeeded", peerId = peerId
   return true
 
@@ -325,6 +369,55 @@ proc stopped*(pool: MixPool): bool =
   ## True from `stop` to `start`.
   pool.dialsStopped
 
+proc isFirstHopDial(
+    pool: MixPool, peerId: PeerId, addrs: seq[MultiAddress], protos: seq[string]
+): bool =
+  ## True for a mix stream dial to a pool peer at its hop address, with no
+  ## connection. nim-libp2p-mix also dials addresses from the packets of other
+  ## nodes, which say nothing about the pool peer.
+  if pool.dialsStopped or MixProtocolID notin protos:
+    return false
+  let hop = pool.nodePool.get(peerId).valueOr:
+    return false
+  return addrs == @[hop.multiAddr] and not pool.peerManager.switch.isConnected(peerId)
+
+proc recordStreamDialFailure(
+    pool: MixPool,
+    peerId: PeerId,
+    addrs: seq[MultiAddress],
+    protos: seq[string],
+    error: string,
+) =
+  ## Records a failed stream dial that `isFirstHopDial` accepts.
+  if not pool.isFirstHopDial(peerId, addrs, protos):
+    return
+  debug "Mix stream dial failed", peerId = peerId, error = error
+  pool.recordFailure(peerId, error)
+
+proc recordCancelledFirstHop(
+    pool: MixPool, peerId: PeerId, addrs: seq[MultiAddress], protos: seq[string]
+) =
+  ## A send cancels its first hop dial at `MixReplyTimeout`. A tcp dial to a host
+  ## that drops each packet has no result in that time, so the cancel counts as
+  ## a failed dial.
+  if not pool.isFirstHopDial(peerId, addrs, protos):
+    return
+  debug "Mix first hop dial cancelled", peerId = peerId
+  pool.recordFailure(peerId, "mix first hop dial cancelled")
+
+proc readmit(pool: MixPool) =
+  ## Returns each discovered node to paths when `failureWait` has passed since
+  ## its failed dial. The pool does not dial it for that.
+  let now = Moment.now()
+  var due: seq[PeerId]
+  for peerId, node in pool.known:
+    if node.failedAt.isSome() and now - node.failedAt.get() >= pool.failureWait:
+      due.add(peerId)
+  for peerId in due:
+    pool.known.withValue(peerId, node):
+      node.failedAt = Opt.none(Moment)
+    pool.refreshPeer(peerId)
+
 proc age(pool: MixPool) =
   ## Removes each discovered node with no peer record, successful dial or
   ## connection for `discoveredTtl`.
@@ -343,9 +436,10 @@ proc age(pool: MixPool) =
     pool.refreshPeer(peerId)
 
 proc maintain*(pool: MixPool) {.async: (raises: [CancelledError]).} =
-  ## One pass of the pool loop. It removes old discovered nodes. Public for
-  ## tests.
+  ## One pass of the pool loop. It removes old discovered nodes, and returns
+  ## failed nodes to paths after their wait. Public for tests.
   pool.age()
+  pool.readmit()
 
 proc poolLoop(pool: MixPool) {.async: (raises: [CancelledError]).} =
   while true:
@@ -380,4 +474,20 @@ proc new*(
   pool.addBookHandlers()
   for peerId in toSeq(pool.store[MixPubKeyBook].book.keys()):
     pool.learn(peerId)
+  # The dialer reports the stream dials of nim-libp2p-mix.
+  if peerManager.switch.dialer of DeliveryDialer:
+    DeliveryDialer(peerManager.switch.dialer).dialEventHandlers.add(
+      proc(
+          kind: DialEventKind,
+          peerId: PeerId,
+          addrs: seq[MultiAddress],
+          protos: seq[string],
+          error: string,
+      ) {.gcsafe, raises: [].} =
+        case kind
+        of DialEventKind.Failed:
+          pool.recordStreamDialFailure(peerId, addrs, protos, error)
+        of DialEventKind.Cancelled:
+          pool.recordCancelledFirstHop(peerId, addrs, protos)
+    )
   return pool

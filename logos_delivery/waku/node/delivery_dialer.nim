@@ -67,10 +67,28 @@ method upgrade*(
 ): Future[Muxer] {.async: (raises: [CancelledError, LPError], raw: true).} =
   self.quic.upgrade(conn, peerId)
 
+type
+  DialEventKind* {.pure.} = enum
+    Failed ## libp2p raised `DialFailedError`.
+    Cancelled ## The caller cancelled the dial before libp2p had a result.
+
+  DialEventHandler* = proc(
+    kind: DialEventKind,
+    peerId: PeerId,
+    addrs: seq[MultiAddress],
+    protos: seq[string],
+    error: string,
+  ) {.gcsafe, raises: [].}
+    ## Gets a stream dial that failed or that its caller cancelled, with its
+    ## addresses and protocols. `error` is empty for a cancelled dial.
+
 type DeliveryDialer* = ref object of Dialer
   ## Logos Delivery dial policy layer. Replaces the switch dialer, so connect
   ## and dial go through here. Dials quic addresses before tcp, and bounds the
   ## quic handshake so tcp is still tried when quic does not answer.
+  dialEventHandlers*: seq[DialEventHandler]
+    ## Called when a stream dial fails or its caller cancels it. The addresses
+    ## can come from another node, so a handler must check them.
 
 proc install*(
     T: typedesc[DeliveryDialer], switch: Switch, quicDialTimeout = QuicDialTimeout
@@ -105,4 +123,14 @@ method dial*(
     protos: seq[string],
     forceDial = false,
 ): Future[Stream] {.async: (raises: [DialFailedError, CancelledError]).} =
-  await procCall Dialer(self).dial(peerId, sortQuicFirst(addrs), protos, forceDial)
+  try:
+    return
+      await procCall Dialer(self).dial(peerId, sortQuicFirst(addrs), protos, forceDial)
+  except DialFailedError as exc:
+    for handler in self.dialEventHandlers:
+      handler(DialEventKind.Failed, peerId, addrs, protos, exc.msg)
+    raise exc
+  except CancelledError as exc:
+    for handler in self.dialEventHandlers:
+      handler(DialEventKind.Cancelled, peerId, addrs, protos, "")
+    raise exc
