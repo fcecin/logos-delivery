@@ -122,6 +122,25 @@ The following options are available:
 <...>
 ```
 
+### Flag groups
+
+Many flags only configure a feature that another flag enables. If such a flag is set while its feature is disabled, the node starts anyway and logs one warning for that flag, e.g. `--rest-port is ignored: --rest is not enabled`. A feature enabled by `--preset` or `--mode` counts as enabled.
+
+| Enabling flag | Dependent flags |
+| --- | --- |
+| `--store` | `--store-message-retention-policy`, `--store-message-db-url`, `--store-message-db-vacuum`, `--store-message-db-migration`, `--store-max-num-db-connections`, `--store-resume`, `--store-sync` |
+| `--store-sync` | `--store-sync-interval`, `--store-sync-range`, `--store-sync-relay-jitter` |
+| `--filter` | `--filter-subscription-timeout`, `--filter-max-peers-to-serve`, `--filter-max-criteria` |
+| `--rest` | `--rest-address`, `--rest-port`, `--rest-relay-cache-capacity`, `--rest-messaging-cache-capacity`, `--rest-admin`, `--rest-allow-origin` |
+| `--metrics-server` | `--metrics-server-address`, `--metrics-server-port` |
+| `--discv5-discovery` | `--discv5-udp-port`, `--discv5-bootstrap-node`, `--discv5-enr-auto-update`, `--discv5-table-ip-limit`, `--discv5-bucket-ip-limit`, `--discv5-bits-per-hop` |
+| `--websocket-support` | `--websocket-port`, `--websocket-secure-support` |
+| `--websocket-secure-support` | `--websocket-secure-key-path`, `--websocket-secure-cert-path` |
+| `--quic-support` | `--quic-port` |
+| `--mix` | `--mixkey`, `--mixnode` |
+| `--enable-kad-discovery` or `--plugin-kad-discovery` | `--kad-bootstrap-node`, `--kad-random-lookup-interval`, `--kad-service-lookup-interval` |
+| `--rln-relay` | `--rln-relay-cred-path`, `--rln-relay-cred-password`, `--rln-relay-eth-client-address`, `--rln-relay-eth-contract-address`, `--rln-relay-chain-id`, `--rln-relay-user-message-limit`, `--rln-relay-epoch-sec`, `--rln-relay-membership-index` |
+
 ## Configuration use cases
 
 This is an index of tutorials explaining how to configure your nwaku node for different use cases.

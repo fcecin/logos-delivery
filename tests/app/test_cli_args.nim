@@ -529,3 +529,93 @@ suite "Node config - Messaging API flags":
   test "the messaging flags are unset by default":
     let conf = LogosDeliveryNodeConf.load(version = "", cmdLine = @[])
     check not conf.messaging.isSet()
+
+suite "Waku external config - deprecated flags":
+  test "deprecated flags still parse and leave the config unchanged":
+    ## Given
+    let cmdLine = @["--dns-discovery", "--rln-relay-eth-private-key=0xabc"]
+
+    ## When
+    var conf = WakuNodeConf.load(version = "", cmdLine = cmdLine)
+    applyModeFlags(conf, DefaultKernelModeFlags)
+    let wakuConf = conf.toWakuConf().valueOr:
+      raiseAssert error
+    let defaultWakuConf = defaultKernelConf().get().toWakuConf().valueOr:
+        raiseAssert error
+
+    ## Then
+    check:
+      conf.dnsDiscovery == true
+      conf.rlnRelayEthPrivateKey == "0xabc"
+      wakuConf.dnsDiscoveryConf.isNone()
+      wakuConf.discv5Conf.isSome() == defaultWakuConf.discv5Conf.isSome()
+      wakuConf.rlnEvmConf.isNone()
+
+  test "on-chain RLN no longer needs --rln-relay-dynamic":
+    ## Given
+    var conf = defaultKernelConf().get()
+    conf.rlnRelay = Opt.some(true)
+    conf.rlnRelayChainId = 1
+    conf.rlnRelayEthContractAddress = "0x0000000000000000000000000000000000000001"
+
+    ## When
+    let wakuConf = conf.toWakuConf().valueOr:
+      raiseAssert error
+
+    ## Then
+    check:
+      wakuConf.rlnEvmConf.isSome()
+      wakuConf.rlnEvmConf.get().dynamic
+
+suite "Waku external config - ignored dependent flags":
+  proc warningsOf(conf: WakuNodeConf): seq[string] =
+    let defaults = defaultKernelConf(ModeProtocolFlags()).get()
+    let wakuConf = conf.toWakuConf().valueOr:
+      raiseAssert error
+    return ignoredFlagWarnings(conf, defaults, wakuConf)
+
+  test "default config reports nothing":
+    check warningsOf(defaultKernelConf().get()).len == 0
+
+  test "flags set while their feature is disabled are reported":
+    ## Given
+    var conf = defaultKernelConf().get()
+    conf.storeResume = true
+    conf.restPort = 9000
+    conf.metricsServerPort = 9001
+    conf.quicSupport = false
+    conf.quicPort = Opt.some(Port(9002))
+    conf.websocketSecureKeyPath = "/key.pem"
+    conf.rlnRelayCredIndex = Opt.some(1'u)
+
+    ## When / Then
+    check warningsOf(conf) ==
+      @[
+        "--store-resume is ignored: --store is not enabled",
+        "--rest-port is ignored: --rest is not enabled",
+        "--metrics-server-port is ignored: --metrics-server is not enabled",
+        "--websocket-secure-key-path is ignored: --websocket-secure-support is not enabled",
+        "--quic-port is ignored: --quic-support is not enabled",
+        "--rln-relay-membership-index is ignored: --rln-relay is not enabled",
+      ]
+
+  test "flags of an enabled feature are not reported":
+    ## Given
+    var conf = defaultKernelConf().get()
+    conf.store = Opt.some(true)
+    conf.storeResume = true
+    conf.rest = true
+    conf.restPort = 9000
+    conf.discv5UdpPort = Port(9003)
+
+    ## When / Then
+    check warningsOf(conf).len == 0
+
+  test "a feature enabled by the preset does not report its flags":
+    ## Given: the TWN preset enables RLN
+    var conf = defaultKernelConf().get()
+    conf.preset = "twn"
+    conf.rlnRelayCredIndex = Opt.some(1'u)
+
+    ## When / Then
+    check warningsOf(conf).len == 0
