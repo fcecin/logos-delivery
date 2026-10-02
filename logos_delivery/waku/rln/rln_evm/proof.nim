@@ -127,7 +127,7 @@ proc proveWithRootRefresh(
     return ok(proofBytes)
 
   debug "RLN: stale merkle root detected; refreshing merkle path and regenerating proof"
-  rlnEvm.groupManager.invalidateMerkleProofCache()
+  rlnEvm.groupManager.scheduleMerkleProofRefresh()
   let refreshed = (
     await rlnEvm.generateRLNProofWithNonce(input, senderEpochTime, nonce)
   ).valueOr:
