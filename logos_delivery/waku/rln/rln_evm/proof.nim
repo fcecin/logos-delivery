@@ -10,6 +10,7 @@ import
     rln/rln_evm/conversion_utils,
     rln/rln_evm/group_manager,
     rln/rln_evm/nonce_manager,
+    rln/rln_evm/message_id_store,
   ]
 import logos_delivery/waku/rln/types as rln_api_types
 import ../signal
@@ -73,6 +74,101 @@ proc absDiff*(e1, e2: Epoch): uint64 =
   else:
     return epoch2 - epoch1
 
+proc ensureMessageIdsLoaded*(
+    rlnEvm: RlnEvm
+): Future[Result[void, RlnError]] {.async: (raises: [CancelledError]).} =
+  ## Loads this identity's saved message id count on first use; no id may be
+  ## drawn until this succeeds. Fails `Permanent` without a broker context,
+  ## otherwise `NotReady`, and the next call retries.
+  ##
+  ## A count saved for an epoch ahead of the clock also sets `refusedUntil`:
+  ## no ids are drawn until the clock reaches that epoch.
+  if not rlnEvm.messageIdStore.isNil():
+    return ok()
+
+  let credentials = rlnEvm.groupManager.idCredentials.valueOr:
+    return err(RlnError.notReady("no identity credential to key the message id store"))
+  let brokerCtx = rlnEvm.brokerCtx.valueOr:
+    return err(
+      RlnError.permanent("mounted without a broker context, so no message id store")
+    )
+  let job = openMessageIdStore(brokerCtx).valueOr:
+    debug "RLN message id store not available", error = error
+    return err(RlnError.notReady("message id store not available: " & error))
+  let key = messageIdKey(credentials.idSecretHash)
+  let stored = (await job.loadMessageIds(key)).valueOr:
+    debug "RLN message id store could not be read", error = error
+    return err(RlnError.notReady("message id store could not be read: " & error))
+
+  if stored.isSome():
+    let row = stored.get()
+    rlnEvm.nonceManager.restore(row.epochIndex, row.nextId)
+    let now = epochTime()
+    let currentEpoch = rlnEvm.epochIndexOf(now)
+    if row.epochIndex > currentEpoch:
+      rlnEvm.refusedUntil = row.epochIndex
+      # Within the timestamp tolerance this is a message stamped early;
+      # beyond it, the clock or the saved row is wrong.
+      let rowEpochStart = float64(row.epochIndex) * float64(rlnEvm.rlnEpochSizeSec)
+      if rowEpochStart - now > float64(rlnEvm.rlnMaxTimestampGap):
+        warn "RLN message ids were last drawn in an epoch ahead of the clock; no ids are drawn until the clock reaches it. If the clock is right, deleting rln.db resets the counter",
+          storedEpoch = row.epochIndex, currentEpoch = currentEpoch
+
+  rlnEvm.messageIdStore = job
+  rlnEvm.messageIdKey = key
+  info "RLN message id store loaded"
+  return ok()
+
+proc reserveDurably(
+    rlnEvm: RlnEvm, epochIndex: uint64
+): Future[Result[Nonce, RlnError]] {.async: (raises: [CancelledError]).} =
+  ## Draws a message id and saves the new count before returning it, so a
+  ## restart never reissues an id already in a proof. Holds `reserveLock` so
+  ## saves land in draw order. An unloaded store is `NotReady`; a failed save
+  ## returns the id and is `Transient`.
+  await rlnEvm.reserveLock.acquire()
+  defer:
+    try:
+      rlnEvm.reserveLock.release()
+    except AsyncLockError as e:
+      error "RLN reserveLock released while not held", error = e.msg
+
+  ?(await rlnEvm.ensureMessageIdsLoaded())
+  let id = ?rlnEvm.nonceManager.reserve(epochIndex)
+  (
+    await rlnEvm.messageIdStore.saveMessageIds(
+      rlnEvm.messageIdKey, epochIndex, rlnEvm.nonceManager.nextId
+    )
+  ).isOkOr:
+    rlnEvm.nonceManager.release(epochIndex, id)
+    return err(RlnError.transient("could not save the message id count: " & error))
+  return ok(id)
+
+proc releaseDurably(
+    rlnEvm: RlnEvm, epochIndex: uint64, id: Nonce
+) {.async: (raises: [CancelledError]).} =
+  ## Returns `id` after a failed proof generation and saves the lowered count,
+  ## unless another draw followed. A failed save is only logged: a higher
+  ## stored count is safe, and at worst a restart skips the id.
+  await rlnEvm.reserveLock.acquire()
+  defer:
+    try:
+      rlnEvm.reserveLock.release()
+    except AsyncLockError as e:
+      error "RLN reserveLock released while not held", error = e.msg
+
+  let before = rlnEvm.nonceManager.nextId
+  rlnEvm.nonceManager.release(epochIndex, id)
+  if rlnEvm.nonceManager.nextId == before:
+    return
+  (
+    await rlnEvm.messageIdStore.saveMessageIds(
+      rlnEvm.messageIdKey, epochIndex, rlnEvm.nonceManager.nextId
+    )
+  ).isOkOr:
+    debug "RLN message id count not lowered in the store after a failed proof generation",
+      error = error
+
 proc generateRLNProofWithNonce(
     rlnEvm: RlnEvm, input: seq[byte], senderEpochTime: float64, nonce: Nonce
 ): Future[Result[seq[byte], string]] {.async: (raises: []).} =
@@ -90,31 +186,25 @@ proc generateRLNProofWithNonce(
 
 proc generateRLNProof*(
     rlnEvm: RlnEvm, input: seq[byte], senderEpochTime: float64
-): Future[Result[seq[byte], string]] {.async: (raises: []).} =
-  ## Draws a message id from the epoch of `senderEpochTime`, the epoch the
-  ## proof carries, and builds the proof. A failed generation returns the id
-  ## to the epoch's budget, since no proof carrying it exists.
+): Future[Result[seq[byte], string]] {.async: (raises: [CancelledError]).} =
+  ## Draws a message id for the epoch of `senderEpochTime`, saves the new
+  ## count and builds the proof. A failed generation returns the id.
   rlnEvm.checkTimestampBounds(senderEpochTime).isOkOr:
     return err($error)
   let epochIndex = rlnEvm.epochIndexOf(senderEpochTime)
-  let nonce = rlnEvm.nonceManager.reserve(epochIndex).valueOr:
+  let nonce = (await rlnEvm.reserveDurably(epochIndex)).valueOr:
     return err("could not get new message id to generate an rln proof: " & $error)
   let proof = await rlnEvm.generateRLNProofWithNonce(input, senderEpochTime, nonce)
   if proof.isErr():
-    rlnEvm.nonceManager.release(epochIndex, nonce)
+    await rlnEvm.releaseDurably(epochIndex, nonce)
   return proof
 
 proc proveWithRootRefresh(
     rlnEvm: RlnEvm, input: seq[byte], senderEpochTime: float64, nonce: Nonce
 ): Future[Result[seq[byte], RlnError]] {.async.} =
-  ## Generates a proof against an already drawn `nonce` and checks its merkle
-  ## root against the acceptable-root window. If the root is stale, invalidates
-  ## the cache and regenerates once against a refetched path.
-  ##
-  ## The regeneration reuses `nonce`: only the merkle path differs between the
-  ## two, so drawing again would spend two message ids from the epoch budget on
-  ## a message that is sent once. That would drift the budget the rate limit
-  ## manager accounts for away from the one the nonce manager enforces.
+  ## Generates a proof with `nonce`; if its merkle root is stale, refetches the
+  ## merkle path and regenerates once. The retry reuses `nonce` so one message
+  ## spends one id, matching what the rate limit manager counts.
   let proofBytes = (
     await rlnEvm.generateRLNProofWithNonce(input, senderEpochTime, nonce)
   ).valueOr:
@@ -137,22 +227,17 @@ proc proveWithRootRefresh(
 proc generateRLNProofWithRootRefresh*(
     rlnEvm: RlnEvm, input: seq[byte], senderEpochTime: float64
 ): Future[Result[seq[byte], RlnError]] {.async.} =
-  ## Generates an RLN proof whose merkle root is in the acceptable-root window,
-  ## see `proveWithRootRefresh`. Returns the proof bytes.
+  ## Generates an RLN proof with an acceptable merkle root (see
+  ## `proveWithRootRefresh`), drawing and saving its message id first.
   ##
-  ## The message id is drawn from the epoch of `senderEpochTime`, the epoch
-  ## the proof carries, once the time is within the validators' bound. A
-  ## spent epoch budget is `BudgetExhausted`; a time out of bounds or an
-  ## epoch the manager has already moved past is `Permanent`, since no later
-  ## retry can prove it.
-  ##
-  ## A failed generation is `Transient` and returns the id to the epoch's
-  ## budget: no proof carrying it is returned, so the send service's retry of
-  ## the same task draws it again instead of spending a second id.
+  ## Fails `Permanent` for a time out of bounds or an epoch already passed,
+  ## `BudgetExhausted` when the epoch's ids are spent, `NotReady` when the store
+  ## is not loaded, and `Transient` when the save or generation fails. A failed
+  ## generation returns the id, so the retry reuses it.
   ?rlnEvm.checkTimestampBounds(senderEpochTime)
   let epochIndex = rlnEvm.epochIndexOf(senderEpochTime)
-  let nonce = ?rlnEvm.nonceManager.reserve(epochIndex)
+  let nonce = ?(await rlnEvm.reserveDurably(epochIndex))
   let proof = await rlnEvm.proveWithRootRefresh(input, senderEpochTime, nonce)
   if proof.isErr():
-    rlnEvm.nonceManager.release(epochIndex, nonce)
+    await rlnEvm.releaseDurably(epochIndex, nonce)
   return proof
