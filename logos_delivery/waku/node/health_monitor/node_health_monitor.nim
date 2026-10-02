@@ -307,9 +307,8 @@ proc hasMixExit(hm: NodeHealthMonitor): bool =
   let slotted = hm.node.peerManager.serviceSlots.getOrDefault(WakuLightPushCodec)
   if not slotted.isNil() and pool.get(slotted.peerId).isSome():
     return true
-  let peerStore = hm.node.switch.peerStore
   return pool.peerIds().anyIt(
-      peerStore[ProtoBook][it].contains(WakuLightPushCodec) and pool.get(it).isSome()
+      hm.node.wakuMix.pool.hasProtocol(it, WakuLightPushCodec) and pool.get(it).isSome()
     )
 
 proc getMixHealth(hm: NodeHealthMonitor): ProtocolHealth =

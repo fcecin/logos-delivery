@@ -119,10 +119,10 @@ proc poolSize*(mix: WakuMix): int =
   mix.pool.len
 
 proc updatePoolSize*(size: int) =
-  ## Sets `mix_pool_size`; this is its only writer. The mount, `addBootNodes`
-  ## and each health pass publish the count they just read: routability can
-  ## change when no peer-store handler fires, as when an `AddressBook` entry's
-  ## TTL runs out.
+  ## Sets `mix_pool_size`. This is its only writer. The mount, `addBootNodes`
+  ## and each health pass publish the count that they read. The count can change
+  ## when no peer store handler fires, as when the pool loop removes an old
+  ## discovered node.
   mix_pool_size.set(size)
 
 proc replyHops(mix: WakuMix, excluded: openArray[PeerId]): seq[MixPubInfo] =
