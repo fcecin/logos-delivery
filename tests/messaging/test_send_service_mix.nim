@@ -18,6 +18,7 @@ import
   logos_delivery/waku/rln/rln_plugin,
   logos_delivery/waku/waku_lightpush/common,
   logos_delivery/waku/waku_core,
+  logos_delivery/waku/waku_enr,
   logos_delivery/api/types,
   logos_delivery/api/events/messaging_client_events,
   logos_delivery/waku/factory/waku_conf,
@@ -206,7 +207,11 @@ suite "SendService - anonymity level with a mounted mix":
   asyncSetup:
     waku = (await Waku.new(testConf())).expect("Waku.new")
     let mixKeys = generateKeyPair().expect("mix key pair")
-    (await waku.node.mountMix(3'u16, mixKeys.privateKey, @[])).isOkOr:
+    (
+      await waku.node.mountMix(
+        3'u16, mixKeys.privateKey, @[], addressPolicy = defaultAddressPolicy
+      )
+    ).isOkOr:
       raiseAssert "Failed to mount mix: " & $error
 
   asyncTeardown:
@@ -581,11 +586,19 @@ suite "SendService - anonymity level with a mounted mix":
 suite "Mix send path - exit peer selection":
   ## With `exit_is_dest` the lightpush server is the last node of the sphinx
   ## path. Mix refuses a destination that has no mix public key. The selection
-  ## must skip a plain lightpush peer.
+  ## must skip a plain lightpush peer. It reads the pool of the mounted mix, and
+  ## the test peers are on loopback, so mix takes loopback hops here.
   var waku {.threadvar.}: Waku
 
   asyncSetup:
     waku = (await Waku.new(testConf())).expect("Waku.new")
+    let mixKeys = generateKeyPair().expect("mix key pair")
+    (
+      await waku.node.mountMix(
+        3'u16, mixKeys.privateKey, @[], addressPolicy = defaultAddressPolicy
+      )
+    ).isOkOr:
+      raiseAssert "Failed to mount mix: " & $error
 
   asyncTeardown:
     discard await waku.stop()
@@ -613,6 +626,23 @@ suite "Mix send path - exit peer selection":
     )
     waku.node.peerManager.switch.peerStore.setShardInfo(peerId, @[0'u16])
     return peerId
+
+  asyncTest "no exit is chosen when mix is not mounted":
+    let bare = (await Waku.new(testConf())).expect("Waku.new")
+    defer:
+      discard await bare.stop()
+    let peerId = PeerId.init(generateSecp256k1Key()).tryGet()
+    let keyPair = generateKeyPair().expect("mix key pair")
+    bare.node.peerManager.addPeer(
+      RemotePeerInfo.init(
+        peerId,
+        @[MultiAddress.init("/ip4/127.0.0.1/tcp/60000").tryGet()],
+        protocols = @[WakuLightPushCodec],
+        shards = @[0'u16],
+        mixPubKey = Opt.some(keyPair.publicKey),
+      )
+    )
+    check bare.selectMixLightpushPeer(shard).isNone()
 
   asyncTest "a plain lightpush peer is never offered as a mix exit":
     discard addLightpushPeer(mixCapable = false)
@@ -837,6 +867,7 @@ suite "Mix send path - the node's own hop":
         3'u16,
         mixKeys.privateKey,
         @[],
+        defaultAddressPolicy,
       )
       .expect("WakuMix.new")
     for i in 0 ..< MinMixPoolSize:
