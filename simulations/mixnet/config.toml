@@ -7,7 +7,9 @@ lightpush = true
 max-connections = 150
 peer-exchange = false
 metrics-logging = false
-cluster-id = 2
+# A cluster id without a network preset. Cluster 2 applies the logos.dev
+# preset, and the nodes then join the public logos.dev network.
+cluster-id = 66
 discv5-discovery = false
 discv5-udp-port = 9000
 discv5-enr-auto-update = true
