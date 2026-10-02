@@ -1,7 +1,7 @@
 {.used.}
 
 import
-  std/[strformat, sets, tables],
+  std/[strformat, sets, tables, sequtils],
   testutils/unittests,
   chronos,
   libp2p/protocols/pubsub/[pubsub, gossipsub],
@@ -584,8 +584,14 @@ suite "Waku Relay":
         await handlerFuture2.withTimeout(FUTURE_TIMEOUT)
         await otherHandlerFuture1.withTimeout(FUTURE_TIMEOUT)
         await otherHandlerFuture2.withTimeout(FUTURE_TIMEOUT)
-        not await anotherHandlerFuture1.withTimeout(FUTURE_TIMEOUT)
-        not await anotherHandlerFuture2.withTimeout(FUTURE_TIMEOUT)
+      check (
+        await allFinished(
+          [
+            anotherHandlerFuture1.withTimeout(FUTURE_TIMEOUT),
+            anotherHandlerFuture2.withTimeout(FUTURE_TIMEOUT),
+          ]
+        )
+      ).allIt(not it.read())
 
       let
         (topic3, msg3) = handlerFuture.read()
@@ -622,11 +628,17 @@ suite "Waku Relay":
 
       # Then the messages are only published in anotherNode because it's disconnected from
       # the rest of the network
+      check (
+        await allFinished(
+          [
+            handlerFuture.withTimeout(FUTURE_TIMEOUT),
+            handlerFuture2.withTimeout(FUTURE_TIMEOUT),
+            otherHandlerFuture1.withTimeout(FUTURE_TIMEOUT),
+            otherHandlerFuture2.withTimeout(FUTURE_TIMEOUT),
+          ]
+        )
+      ).allIt(not it.read())
       check:
-        not await handlerFuture.withTimeout(FUTURE_TIMEOUT)
-        not await handlerFuture2.withTimeout(FUTURE_TIMEOUT)
-        not await otherHandlerFuture1.withTimeout(FUTURE_TIMEOUT)
-        not await otherHandlerFuture2.withTimeout(FUTURE_TIMEOUT)
         await anotherHandlerFuture1.withTimeout(FUTURE_TIMEOUT)
         await anotherHandlerFuture2.withTimeout(FUTURE_TIMEOUT)
 
@@ -664,8 +676,14 @@ suite "Waku Relay":
         await handlerFuture2.withTimeout(FUTURE_TIMEOUT)
         await otherHandlerFuture1.withTimeout(FUTURE_TIMEOUT)
         await otherHandlerFuture2.withTimeout(FUTURE_TIMEOUT)
-        not await anotherHandlerFuture1.withTimeout(FUTURE_TIMEOUT)
-        not await anotherHandlerFuture2.withTimeout(FUTURE_TIMEOUT)
+      check (
+        await allFinished(
+          [
+            anotherHandlerFuture1.withTimeout(FUTURE_TIMEOUT),
+            anotherHandlerFuture2.withTimeout(FUTURE_TIMEOUT),
+          ]
+        )
+      ).allIt(not it.read())
 
       let
         (topic5, msg5) = handlerFuture.read()
