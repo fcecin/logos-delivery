@@ -1,6 +1,7 @@
 {.used.}
 
-## The mix pool keeps its mix nodes when the peer store deletes them.
+## The mix pool keeps its mix nodes when the peer store deletes them, and keeps
+## its own record of failed dials.
 
 import
   std/[net, sequtils],
@@ -198,3 +199,126 @@ suite "Waku Mix - the pool keeps its mix nodes":
       node.inPool(newest)
       configured.allIt(node.inPool(it.peerId))
       node.getMixNodePoolSize() == 4
+
+suite "Waku Mix - the failed dials of the pool":
+  asyncTest "at the limit of discovered nodes, a node with a failed dial goes first":
+    let node = await mixNode()
+    node.wakuMix.pool.maxDiscovered = 2
+    let older = node.discover(@["/ip4/1.1.3.1/tcp/30303"])
+    let failed = node.discover(@["/ip4/1.1.3.2/tcp/30303"])
+    node.wakuMix.pool.countFailure(failed)
+
+    let newer = node.discover(@["/ip4/1.1.3.3/tcp/30303"])
+    check:
+      # The pool no longer knows the failed node, so its failed dial is gone.
+      not node.failed(failed)
+      node.inPool(older)
+      node.inPool(newer)
+
+  asyncTest "a failed dial does not take a configured node off paths":
+    let configured = bootnode("/ip4/1.2.3.4/tcp/30303")
+    let node = await mixNode(bootnodes = @[configured])
+    node.wakuMix.pool.countFailure(configured.peerId)
+    check:
+      not node.failed(configured.peerId)
+      node.inPool(configured.peerId)
+
+    # A discovered node with a failed dial returns to paths when the
+    # configuration adds it.
+    let entry = bootnode("/ip4/1.2.3.5/tcp/30303")
+    node.discover(@["/ip4/1.2.3.5/tcp/30303"], entry.peerId)
+    node.wakuMix.pool.countFailure(entry.peerId)
+    check not node.inPool(entry.peerId)
+    node.wakuMix.addBootNodes(@[entry])
+    check:
+      not node.failed(entry.peerId)
+      node.inPool(entry.peerId)
+
+  asyncTest "a configured node gets no more dials after its dial fails":
+    let accepted = new int
+    proc serve(server: StreamServer, transp: StreamTransport) {.async: (raises: []).} =
+      accepted[].inc()
+      await transp.closeWait()
+
+    let server = createStreamServer(
+      initTAddress("127.0.0.1", Port(26460)), serve, {ServerFlags.ReuseAddr}
+    )
+    server.start()
+    let node = await startMixNode(26461)
+    let other = await node.addOtherConnection(26462)
+    defer:
+      await node.stop()
+      await other.stop()
+      server.stop()
+      await server.closeWait()
+    let configured = bootnode("/ip4/127.0.0.1/tcp/26460")
+    node.wakuMix.addBootNodes(@[configured])
+    let peerId = configured.peerId
+    let hop = MultiAddress.init("/ip4/127.0.0.1/tcp/26460").tryGet()
+
+    check:
+      not await node.wakuMix.pool.dial(peerId)
+      accepted[] == 1
+      not node.failed(peerId)
+      node.inPool(peerId)
+
+    await node.wakuMix.pool.maintain()
+    # A send that cancels its first hop dial starts no pool dial either.
+    for handler in DeliveryDialer(node.switch.dialer).dialEventHandlers:
+      handler(DialEventKind.Cancelled, peerId, @[hop], @[MixProtocolID], "")
+    await sleepAsync(chronos.milliseconds(300))
+    check:
+      accepted[] == 1
+      node.inPool(peerId)
+
+  asyncTest "a failed peer stays out after a peer store delete and a new record":
+    let node = await mixNode()
+    let peerId = node.discover(@["/ip4/1.1.3.3/tcp/30303"])
+    node.wakuMix.pool.countFailure(peerId)
+
+    node.switch.peerStore.delete(peerId)
+    node.discover(@["/ip4/1.1.3.3/tcp/30303"], peerId)
+    check:
+      node.failed(peerId)
+      not node.inPool(peerId)
+
+  asyncTest "mix and the peer manager keep separate records of failed dials":
+    let node = await startMixNode(26430)
+    let other = await node.addOtherConnection(26431)
+    defer:
+      await node.stop()
+      await other.stop()
+    let store = node.switch.peerStore
+
+    let mixDead = node.discover(@["/ip4/127.0.0.1/tcp/26432"])
+    check:
+      not await node.wakuMix.pool.dial(mixDead)
+      node.failed(mixDead)
+      store[NumberFailedConnBook][mixDead] == 0
+      store[ConnectionBook][mixDead] != CannotConnect
+
+    let relayDead = node.discover(@["/ip4/127.0.0.1/tcp/26433"])
+    check:
+      not await node.peerManager.connectPeer(store.getPeer(relayDead))
+      store[NumberFailedConnBook][relayDead] == 1
+      not node.failed(relayDead)
+      node.inPool(relayDead)
+
+  asyncTest "a failed dial counts only while this node has another connection":
+    let node = await startMixNode(26440)
+    defer:
+      await node.stop()
+    let dead = node.discover(@["/ip4/127.0.0.1/tcp/26441"])
+    check:
+      node.switch.connectedPeers().len == 0
+      not await node.wakuMix.pool.dial(dead)
+      not node.failed(dead)
+      node.inPool(dead)
+
+    let other = await node.addOtherConnection(26442)
+    defer:
+      await other.stop()
+    check:
+      not await node.wakuMix.pool.dial(dead)
+      node.failed(dead)
+      not node.inPool(dead)
