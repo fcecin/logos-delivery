@@ -231,6 +231,29 @@ suite "parseLogosDeliveryConf - JSON parsing":
       lc.messagingConf.get().anonymityLevel == Opt.some(AnonymityLevel.Required)
       WakuNodeConf(lc.kernelConf).mix == Opt.some(true)
 
+  test "the option for private mix addresses reaches the mix conf from a flat blob":
+    ## A flat config blob sets it by its CLI name.
+    let lc = parseLogosDeliveryConf(
+      """{"mix": true, "mix-allow-private-addresses": true}"""
+    ).valueOr:
+      raiseAssert error
+    check WakuNodeConf(lc.kernelConf).mixAllowPrivateAddresses
+    let wakuConf = WakuNodeConf(lc.kernelConf).toWakuConf().valueOr:
+        raiseAssert error
+    require wakuConf.mixConf.isSome()
+    check wakuConf.mixConf.get().allowPrivateAddresses
+
+  test "the option for private mix addresses reaches the mix conf from messaging overrides":
+    let lc = parseLogosDeliveryConf(
+      """{"messagingOverrides": {"anonymityLevel": "Required", "mix-allow-private-addresses": true}}"""
+    ).valueOr:
+      raiseAssert error
+    check WakuNodeConf(lc.kernelConf).mixAllowPrivateAddresses
+    let wakuConf = WakuNodeConf(lc.kernelConf).toWakuConf().valueOr:
+        raiseAssert error
+    require wakuConf.mixConf.isSome()
+    check wakuConf.mixConf.get().allowPrivateAddresses
+
   test "a flat blob's anonymity level is lifted to the messaging record":
     let lc = parseLogosDeliveryConf("""{"anonymityLevel": "Preferred"}""").valueOr:
       raiseAssert error
