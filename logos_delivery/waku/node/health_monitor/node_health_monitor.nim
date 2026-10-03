@@ -843,4 +843,11 @@ proc new*(
       if peerId in node.switch.peerStore[MixPubKeyBook]:
         hm.onMixPoolChange()
   )
+  # The pool changes when a member joins or leaves. `Waku.new` mounts mix
+  # before it makes the monitor.
+  if not node.wakuMix.isNil():
+    node.wakuMix.pool.addChangeHandler(
+      proc(peerId: PeerId) {.gcsafe, raises: [].} =
+        hm.onMixPoolChange()
+    )
   return hm
