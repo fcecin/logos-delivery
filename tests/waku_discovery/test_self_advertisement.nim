@@ -1,15 +1,19 @@
 {.used.}
 
-import std/[base64, sequtils]
+import std/[base64, net, sequtils, strutils]
 import chronos, results, testutils/unittests
 import brokers/broker_implement
+import libp2p_mix/[curve25519, mix_protocol]
 import
   logos_delivery/waku/discovery/self_advertisement,
   logos_delivery/waku/discovery/peer_discovery_interface,
   logos_delivery/waku/factory/waku_conf,
-  logos_delivery/waku/waku_enr/capabilities
+  logos_delivery/waku/waku_enr/capabilities,
+  logos_delivery/waku/[waku_core, waku_mix, waku_node]
 import logos_delivery/waku/waku_core/codecs
 import tools/confutils/cli_args
+import logos_delivery/waku/waku
+import ../testlib/[wakucore, wakunode, wakunodeconf]
 
 ## A backend that records what it was asked to do, so the fan-out rules can be
 ## checked without standing up a DHT.
@@ -19,6 +23,7 @@ type FakeBackend = ref object of IPeerDiscovery
   advertised: seq[string]
   advertisedData: seq[seq[byte]]
   interests: seq[string]
+  stopped: seq[string]
 
 BrokerImplement FakeBackend of IPeerDiscovery:
   proc new(T: typedesc[FakeBackend], id: string, kinds: seq[string]): FakeBackend =
@@ -62,6 +67,7 @@ BrokerImplement FakeBackend of IPeerDiscovery:
   method stopAdvertising(
       self: FakeBackend, key: string
   ): Future[Result[void, string]] {.async.} =
+    self.stopped.add(key)
     ok()
 
   method unregisterInterest(
@@ -175,3 +181,162 @@ suite "Self advertisement":
     check:
       raw.len == 5
       raw[4] == 0b0000_0001'u8 # shard 0 only; 9999 did not fold onto a low bit
+
+const MixKey = ServiceKeyPrefix & MixProtocolID
+
+proc mixConfWith(flags: CapabilitiesBitfield): WakuConf =
+  var conf = confWith(flags)
+  let keys = generateKeyPair().expect("mix key pair")
+  conf.mixConf = Opt.some(MixConf(mixKey: keys.privateKey, mixPubKey: keys.publicKey))
+  conf
+
+type AdvertiseCase = ref object
+  node: WakuNode ## Never started. Its self hop is a loopback address.
+  conf: WakuConf
+  kad: FakeBackend
+  backends: seq[IPeerDiscovery]
+
+proc advertiseCase(
+    flags = CoreFlags, addressPolicy: PeerAddressPolicy = defaultAddressPolicy
+): Future[AdvertiseCase] {.async.} =
+  let node = newTestWakuNode(
+    generateSecp256k1Key(),
+    parseIpAddress("127.0.0.1"),
+    Port(25610),
+    quicEnabled = false,
+  )
+  let keys = generateKeyPair().expect("mix key pair")
+  (await node.mountMix(DefaultClusterId, keys.privateKey, @[], addressPolicy)).isOkOr:
+    raiseAssert "mountMix: " & $error
+  let kad = FakeBackend.create("service", @["service", "topic", "cap"])
+  return AdvertiseCase(
+    node: node, conf: mixConfWith(flags), kad: kad, backends: @[IPeerDiscovery(kad)]
+  )
+
+proc report(c: AdvertiseCase, source = SelfHopSource.Local) {.async.} =
+  await updateMixAdvertisement(c.backends, c.conf, c.node.wakuMix, source)
+
+proc advertise(c: AdvertiseCase, source = SelfHopSource.Local) {.async.} =
+  await advertiseMix(c.backends, c.conf, c.node.wakuMix, source)
+
+proc advertised(c: AdvertiseCase): bool =
+  c.node.wakuMix.advertised
+
+proc startMixWaku(nodeConf: WakuNodeConf): Future[Waku] {.async.} =
+  var conf = nodeConf
+  conf.mix = Opt.some(true)
+  conf.mixAllowPrivateAddresses = true
+  let wakuConf = conf.toWakuConf().valueOr:
+    raiseAssert error
+  let waku = (await Waku.new(wakuConf)).valueOr:
+    raiseAssert error
+  (await waku.start()).isOkOr:
+    raiseAssert error
+  return waku
+
+suite "Mix advertisement":
+  test "a service node with a configured or local self hop advertises itself":
+    for source in [SelfHopSource.Configured, SelfHopSource.Local]:
+      check canAdvertiseMix(mixConfWith(CoreFlags), true, source).isOk()
+
+  test "each missing condition stops the advertisement":
+    for (conf, allowed, source) in [
+      (confWith(CoreFlags), true, SelfHopSource.Local),
+      (mixConfWith(EdgeFlags), true, SelfHopSource.Local),
+      (mixConfWith(CoreFlags), false, SelfHopSource.Local),
+      (mixConfWith(CoreFlags), true, SelfHopSource.Observed),
+    ]:
+      check canAdvertiseMix(conf, allowed, source).isErr()
+
+  asyncTest "the advertisement follows the self hop, and the interest in mix peers stays":
+    let c = await advertiseCase()
+    await c.advertise(SelfHopSource.Observed)
+    check:
+      c.kad.interests == @[MixKey]
+      c.kad.advertised.len == 0
+      not c.advertised
+
+    await c.report(SelfHopSource.Local)
+    check:
+      c.kad.advertised == @[MixKey]
+      c.kad.advertisedData == @[@(c.conf.mixConf.get().mixPubKey)]
+      c.advertised
+
+    # The same self hop again changes nothing.
+    await c.report(SelfHopSource.Local)
+    check c.kad.advertised.len == 1
+
+    await c.report(SelfHopSource.Observed)
+    check:
+      c.kad.stopped == @[MixKey]
+      not c.advertised
+      c.kad.interests == @[MixKey]
+
+  asyncTest "a self hop that only other peers observed does not advertise":
+    ## Behind a NAT with no port forward, the host that peers observe takes no new
+    ## connection.
+    let c = await advertiseCase()
+    await c.report(SelfHopSource.Observed)
+    check:
+      not c.advertised
+      c.kad.advertised.len == 0
+      "only other peers observed" in c.node.wakuMix.notAdvertisingReason
+
+    for source in [SelfHopSource.Local, SelfHopSource.Configured]:
+      await c.report(source)
+      check c.advertised
+      await c.report(SelfHopSource.Observed)
+      check not c.advertised
+
+  asyncTest "a client-only node finds mix peers but never advertises itself":
+    let c = await advertiseCase(flags = EdgeFlags)
+    await c.advertise()
+    await c.report()
+    check:
+      c.kad.interests == @[MixKey]
+      c.kad.advertised.len == 0
+      not c.advertised
+
+  asyncTest "a node whose self hop the public policy refuses does not advertise itself":
+    ## The loopback hop can end its own reply paths. Other nodes cannot dial it.
+    let c = await advertiseCase(addressPolicy = mixAddressPolicy(false))
+    await c.advertise()
+    check:
+      c.node.wakuMix.selfHopUsable()
+      not c.node.wakuMix.selfHopAllowed()
+      c.kad.interests == @[MixKey]
+      c.kad.advertised.len == 0
+
+suite "Mix advertisement in a running node":
+  asyncTest "a node with a local self hop advertises itself, and each address commit checks again":
+    let waku = await startMixWaku(defaultTestWakuNodeConf())
+    defer:
+      discard await waku.stop()
+    require not waku.node.wakuMix.isNil()
+    check:
+      waku.node.wakuMix.selfHopAllowed()
+      waku.node.selfHopSource() == SelfHopSource.Local
+      waku.node.wakuMix.advertised
+
+    # An address commit runs the check again, which starts the advertisement.
+    waku.node.wakuMix.advertised = false
+    waku.node.onCommittedAddresses()
+    for _ in 0 ..< 50:
+      if waku.node.wakuMix.advertised:
+        break
+      await sleepAsync(chronos.milliseconds(10))
+    check waku.node.wakuMix.advertised
+
+  asyncTest "a node on a configured address advertises itself at start":
+    ## This node is a bootstrap node with `--ext-multiaddr`.
+    var conf = defaultTestWakuNodeConf()
+    conf.tcpPort = Port(25622)
+    conf.extMultiAddrs = @["/ip4/127.0.0.1/tcp/25622"]
+    conf.extMultiAddrsOnly = true
+    let waku = await startMixWaku(conf)
+    defer:
+      discard await waku.stop()
+    require not waku.node.wakuMix.isNil()
+    check:
+      waku.node.selfHopSource() == SelfHopSource.Configured
+      waku.node.wakuMix.advertised
