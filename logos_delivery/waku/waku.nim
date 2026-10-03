@@ -188,6 +188,12 @@ proc setupAppCallbacks(
 
   return ok()
 
+proc checkMixAdvertisement(waku: Waku) {.async: (raises: []).} =
+  ## Checks the mix advertisement against the source of the current self hop.
+  await updateMixAdvertisement(
+    waku.node.discoveries, waku.conf, waku.node.wakuMix, waku.node.selfHopSource()
+  )
+
 proc new*(
     T: type Waku, wakuConf: WakuConf, appCallbacks: AppCallbacks = nil
 ): Future[Result[Waku, string]] {.async.} =
@@ -539,6 +545,8 @@ proc start*(waku: Waku): Future[Result[void, string]] {.async: (raises: []).} =
   ## Set the callback before the explicit refresh in updateWaku,
   ## so a commit in between reaches the ENR.
   waku.node.onCommittedAddresses = proc() {.gcsafe, raises: [].} =
+    # A new self hop can change the mix advertisement.
+    asyncSpawn waku.checkMixAdvertisement()
     refreshEnrAddrs(waku.node, waku.key, waku.wakuDiscv5).isOkOr:
       error "failed to refresh ENR multiaddrs", error = $error
       return
@@ -577,7 +585,9 @@ proc start*(waku: Waku): Future[Result[void, string]] {.async: (raises: []).} =
     waku.conf,
     waku.node.getShardsGetter(waku.conf.subscribeShards)(),
   )
-  await advertiseMix(waku.node.discoveries, waku.conf)
+  await advertiseMix(
+    waku.node.discoveries, waku.conf, waku.node.wakuMix, waku.node.selfHopSource()
+  )
 
   ## Health Monitor
   waku.healthMonitor.startHealthMonitor().isOkOr:

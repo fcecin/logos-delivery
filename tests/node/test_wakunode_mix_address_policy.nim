@@ -117,6 +117,7 @@ suite "Waku Mix - hop address policy":
     check:
       node.wakuMix.updateSelfHop(@[route], @[]) == Opt.some(route)
       node.wakuMix.selfHopUsable()
+      not node.wakuMix.selfHopAllowed()
 
   test "a default node has no transport for a relay route":
     ## `publicDirectAddressPolicy` rejects relay routes because of this.
@@ -186,3 +187,4 @@ suite "Waku Mix - hop address policy":
     check:
       node.wakuMix.updateSelfHop(@[selfHop], @[]) == Opt.some(selfHop)
       node.wakuMix.selfHopUsable()
+      not node.wakuMix.selfHopAllowed()
