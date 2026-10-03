@@ -141,6 +141,7 @@ type
     armed: bool
     entered*: AsyncEvent
     release*: AsyncEvent
+    heldResult*: Opt[WakuLightPushResult] ## The result of the held request.
 
   MixNet* = object
     nodes*: seq[WakuNode]
@@ -159,11 +160,14 @@ proc mountHeldLightpush(node: WakuNode, hold: ExitHold) =
   let handler: PushMessageHandler = proc(
       pubsubTopic: PubsubTopic, message: WakuMessage
   ): Future[WakuLightPushResult] {.async.} =
-    if hold.armed:
-      hold.armed = false
-      hold.entered.fire()
-      await hold.release.wait()
-    return await relayHandler(pubsubTopic, message)
+    if not hold.armed:
+      return await relayHandler(pubsubTopic, message)
+    hold.armed = false
+    hold.entered.fire()
+    await hold.release.wait()
+    let held = await relayHandler(pubsubTopic, message)
+    hold.heldResult = Opt.some(held)
+    return held
   node.wakuLightPush = WakuLightPush.new(
     node.peerManager,
     node.rng,
