@@ -1,18 +1,21 @@
 {.push raises: [].}
 
-import std/strutils
+import std/[sequtils, strutils]
 import chronicles, chronos, results, metrics
 
 import
   libp2p/crypto/curve25519,
   libp2p/crypto/crypto,
+  libp2p/crypto/rng,
   libp2p_mix,
   libp2p_mix/mix_node,
   libp2p_mix/mix_protocol,
   libp2p_mix/mix_metrics,
   libp2p_mix/multiaddr as mix_multiaddr,
   libp2p_mix/delay_strategy,
-  libp2p/[multiaddress, peerid],
+  libp2p_mix/serialization as mix_serialization,
+  libp2p_mix/sphinx as mix_sphinx,
+  libp2p/[multiaddress, peerid, switch],
   eth/common/keys
 
 import
@@ -20,12 +23,24 @@ import
   logos_delivery/waku/waku_core,
   logos_delivery/waku/waku_enr,
   logos_delivery/waku/node/peer_manager/waku_peer_store,
-  ./mix_pool
+  logos_delivery/waku/node/delivery_dialer,
+  ./mix_pool,
+  ./protocol_metrics
 
 export mix_pool
 
 logScope:
   topics = "waku mix"
+
+const
+  NoReplyHopError* = "no mix peer has a connection that can carry the reply"
+    ## The last reply hop needs an existing connection to this node.
+  MixReplyHopTimeout* = QuicDialTimeout + chronos.seconds(2)
+    ## How long a send waits for the dials of `prepareReplyPath`, which try quic
+    ## before tcp. The dials continue after this time, up to `DefaultDialTimeout`,
+    ## as the dials of the peer manager do.
+  MixReplyHopMaxDials = 2
+  MixStoppingError* = "mix is stopping" ## The error of a send after the pool stops.
 
 type
   WakuMix* = ref object of MixProtocol
@@ -37,6 +52,7 @@ type
       ## The hop that mix still holds is then a leftover, unusable even if it
       ## encodes.
     pool*: MixPool ## The pool members. `nodePool` reads them.
+    delays: DelayStrategy ## The delay strategy of `MixProtocol.init`, for `buildSurb`.
 
   WakuMixResult*[T] = Result[T, string]
 
@@ -108,6 +124,128 @@ proc updatePoolSize*(size: int) =
   ## change when no peer-store handler fires, as when an `AddressBook` entry's
   ## TTL runs out.
   mix_pool_size.set(size)
+
+proc replyHops(mix: WakuMix, excluded: openArray[PeerId]): seq[MixPubInfo] =
+  ## The pool entries that a reply path can use, except `excluded`.
+  var hops: seq[MixPubInfo]
+  for peerId in mix.nodePool.peerIds():
+    if peerId in excluded:
+      continue
+    let hop = mix.nodePool.get(peerId).valueOr:
+      continue
+    hops.add(hop)
+  return hops
+
+proc connected(mix: WakuMix, hop: MixPubInfo): bool =
+  ## True when `hop` has a connection to this node, which can carry a reply.
+  mix.switch.isConnected(hop.peerId)
+
+proc replyPath*(
+    mix: WakuMix, destPeerId: PeerId, exitPeerId: PeerId
+): Result[seq[MixPubInfo], string] =
+  ## Returns the reply path, which ends at this node. The last hop before this
+  ## node has a connection to it, so a node behind NAT gets its reply. The other
+  ## hops are random.
+  let local = mix.localMixPubInfo()
+  let candidates = mix.replyHops([local.peerId, destPeerId, exitPeerId])
+  if candidates.len < PathLength - 1:
+    return err(
+      "not enough mix peers for a reply path: " & $candidates.len & " of " &
+        $(PathLength - 1)
+    )
+
+  let last = mix.switch.rng.pickOne(candidates.filterIt(mix.connected(it))).valueOr:
+    return err(NoReplyHopError)
+  let others = candidates.filterIt(it.peerId != last.peerId)
+  let preceding = mix.switch.rng.pick(others, PathLength - 2).valueOr:
+    return err("not enough mix peers for a reply path")
+  let path = preceding & @[last, local]
+  # nim-libp2p-mix logs the forward hops.
+  debug "Mix reply path selected",
+    hops = path.mapIt(shortLog(it.peerId)), addresses = path.mapIt($it.multiAddr)
+  return ok(path)
+
+method buildSurb*(
+    mix: WakuMix, id: SURBIdentifier, destPeerId: PeerId, exitPeerId: PeerId
+): Result[SURB, string] {.gcsafe, raises: [].} =
+  ## Builds the SURB on `replyPath`, with the delay strategy of the forward path.
+  let path = ?mix.replyPath(destPeerId, exitPeerId)
+
+  var
+    keys: seq[Curve25519Key]
+    hops: seq[Hop]
+    delays: seq[Delay]
+  for i, hop in path:
+    let encoded = mix_multiaddr.multiAddrToBytes(hop.peerId, hop.multiAddr).valueOr:
+      mix_messages_error.inc(labelValues = ["Entry/SURB", "INVALID_MIX_INFO"])
+      return err("failed to convert multiaddress to bytes: " & error)
+    keys.add(hop.mixPubKey)
+    hops.add(Hop.init(encoded))
+    # The last hop is this node. It adds no delay.
+    delays.add(
+      if i < path.len - 1:
+        mix.delays.generateForEntry()
+      else:
+        NoDelay
+    )
+
+  return createSURB(keys, delays, hops, id, mix.switch.rng)
+
+proc dialReplyHop(
+    mix: WakuMix, candidates: seq[MixPubInfo]
+): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+  ## Dials up to `MixReplyHopMaxDials` of `candidates`, which have no connection.
+  ## Returns at the first success or at `MixReplyHopTimeout`. The dials continue
+  ## after the return, because a cancel could close a connection that
+  ## `buildSurb` chose.
+  let chosen = mix.switch.rng.pick(candidates, MixReplyHopMaxDials).valueOr:
+    return err(NoReplyHopError & ", and the pool has no peer to dial")
+  var pending = chosen.mapIt(mix.pool.dial(it.peerId))
+  let deadline = sleepAsync(MixReplyHopTimeout)
+  try:
+    while pending.len > 0 and not deadline.finished():
+      try:
+        discard await race(pending.mapIt(FutureBase(it)) & @[FutureBase(deadline)])
+      except ValueError:
+        break
+      if pending.anyIt(it.completed() and it.value()):
+        return ok()
+      pending.keepItIf(not it.finished())
+  finally:
+    await deadline.cancelAndWait()
+  if pending.len > 0:
+    return err(
+      NoReplyHopError & ", and no dial to a pool peer answered within " &
+        $MixReplyHopTimeout
+    )
+  return err(NoReplyHopError & ", and " & $chosen.len & " dials to pool peers failed")
+
+proc prepareReplyPath*(
+    mix: WakuMix, exitPeerId: PeerId
+): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+  ## Makes sure that a pool peer other than the exit has a connection to this
+  ## node, so that `buildSurb` has a last reply hop.
+  if mix.pool.stopped():
+    return err(MixStoppingError)
+  let candidates = mix.replyHops([mix.switch.peerInfo.peerId, exitPeerId])
+  if candidates.anyIt(mix.connected(it)):
+    return ok()
+  let attempt = await mix.dialReplyHop(candidates)
+  if attempt.isErr():
+    logos_delivery_mix_reply_hop_failures.inc()
+    return attempt
+  debug "Mix reply hop ready"
+  return ok()
+
+when defined(libp2p_mix_experimental_exit_is_dest):
+  proc exitConnection*(
+      mix: WakuMix, exitPeerId: PeerId, codec: string, params: MixParameters
+  ): Future[Result[Connection, string]] {.async: (raises: [CancelledError]).} =
+    ## The entry point for sends. Prepares the reply path when `params` expects
+    ## a reply.
+    if params.expectReply.get(false):
+      ?(await mix.prepareReplyPath(exitPeerId))
+    return mix.toConnection(MixDestination.exitNode(exitPeerId), codec, params)
 
 method start*(mix: WakuMix) {.async: (raises: [CancelledError]).} =
   await procCall MixProtocol(mix).start()
@@ -193,20 +331,18 @@ proc new*(
     peermgr.switch.peerInfo.publicKey.skkey, peermgr.switch.peerInfo.privateKey.skkey,
   )
 
+  let delays = DelayStrategy(
+    ExponentialDelayStrategy.new(meanDelay = 50'u16, rng = crypto.newRng())
+  )
   let m = WakuMix(
     peerManager: peermgr,
     clusterId: clusterId,
     pubKey: mixPubKey,
     pool: MixPool.new(peermgr, addressPolicy),
+    delays: delays,
   )
   procCall MixProtocol(m).init(
-    localMixNodeInfo,
-    peermgr.switch,
-    delayStrategy = Opt.some(
-      DelayStrategy(
-        ExponentialDelayStrategy.new(meanDelay = 50'u16, rng = crypto.newRng())
-      )
-    ),
+    localMixNodeInfo, peermgr.switch, delayStrategy = Opt.some(delays)
   )
   # Paths come from the pool members only.
   m.nodePool = m.pool.nodePool
