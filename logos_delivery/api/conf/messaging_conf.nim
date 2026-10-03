@@ -64,6 +64,9 @@ type MessagingClientConf* = object
     ## Enable store-based send reliability.
   anonymityLevel*: Opt[AnonymityLevel]
     ## Sender anonymity level. A level above `None` mounts and uses mix.
+  mixAllowPrivateAddresses* {.name: "mix-allow-private-addresses".}: Opt[bool]
+    ## Lets mix paths use private, shared, loopback and relay-route hops. Use it
+    ## only on a private network or a single host.
   store*: Opt[bool] ## Enable the store protocol.
   storenode* {.name: "storenode".}: Opt[string]
   storeMessageDbUrl* {.name: "store-message-db-url".}: Opt[string]
@@ -149,6 +152,8 @@ proc toWakuNodeConf*(
     conf.kadServiceLookupIntervalSec = self.kadServiceLookupIntervalSec.get()
   if self.maxPureLibp2pPeers.isSome():
     conf.maxPureLibp2pPeers = self.maxPureLibp2pPeers
+  if self.mixAllowPrivateAddresses.isSome():
+    conf.mixAllowPrivateAddresses = self.mixAllowPrivateAddresses.get()
   if self.ethRpcEndpoints.isSome():
     conf.ethClientUrls = self.ethRpcEndpoints.get()
   if self.rlnContractAddress.isSome():
