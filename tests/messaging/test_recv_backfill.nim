@@ -3,7 +3,7 @@
 ## Few multi-phase cases. Each `test` block costs three GC-tracked globals, and
 ## the refc runtime caps the test binary at 3500.
 
-import std/[os, tempfiles, sequtils, tables]
+import std/[os, sets, strutils, tempfiles, sequtils, tables]
 import chronos, results, testutils/unittests
 import stew/byteutils
 
@@ -58,28 +58,82 @@ proc catchUp(
     queryTimeout = chronos.seconds(10),
     progress: TableRef[BackfillTopic, Timestamp] = nil,
 ): Future[seq[BackfillTopic]] {.async.} =
-  let pages =
+  ## A pass over `topics` in order, as the worker runs it, in which each topic
+  ## with no start in `progress` starts at `since`. The topics with no more
+  ## rows.
+  let starts =
     if progress.isNil():
       newTable[BackfillTopic, Timestamp]()
     else:
       progress
-  return
-    await runCatchUpPass(topics, pages, since, cutoff, queryTimeout, query, deliver)
+  let record = TopicRecord(at: since + BackfillOverlap, owed: true)
+    # an owed record whose catch-up starts at `since`
+  var exhausted: seq[BackfillTopic]
+  for topic in topics:
+    starts.setStartIfMissing(topic, record)
+    if await catchUpTopic(topic, starts, cutoff, queryTimeout, query, deliver):
+      exhausted.add(topic)
+  return exhausted
 
 proc waitStored(
     job: Job, category: string, recordKey: Key, expected: seq[byte]
-) {.async.} =
+): Future[bool] {.async.} =
+  ## Writes are fire-and-forget. True when the record reads as `expected`
+  ## within two seconds.
   let deadline = Moment.now() + 2.seconds
-  while (await job.get(category, recordKey)).get() != Opt.some(expected):
-    doAssert Moment.now() < deadline
+  while Moment.now() < deadline:
+    let stored = (await job.get(category, recordKey)).valueOr(Opt.none(seq[byte]))
+    if stored == Opt.some(expected):
+      return true
     await sleepAsync(10.milliseconds)
+  return false
 
-proc waitHint(job: Job, expected: Opt[Timestamp]) {.async.} =
-  ## Writes are fire-and-forget. Waits until the record reads as `expected`.
+proc waitHint(job: Job, expected: Opt[Timestamp]): Future[bool] {.async.} =
+  ## Writes are fire-and-forget. True when the hint reads as `expected` within
+  ## two seconds.
   let deadline = Moment.now() + 2.seconds
-  while (await job.readRecoveryHint()).get() != expected:
-    doAssert Moment.now() < deadline
+  while Moment.now() < deadline:
+    let stored = await job.readRecoveryHint()
+    if stored.isOk() and stored.get() == expected:
+      return true
     await sleepAsync(10.milliseconds)
+  return false
+
+proc recordTable(
+    job: Job, hint = Opt.none(Timestamp)
+): Future[Table[BackfillTopic, TopicRecord]] {.async.} =
+  ## The stored topic records, by topic. Empty when the read fails.
+  let records =
+    (await job.readTopicRecords(hint)).valueOr(newSeq[(BackfillTopic, TopicRecord)]())
+  return records.toTable()
+
+proc waitRecords(
+    job: Job, expected: Table[BackfillTopic, TopicRecord]
+): Future[bool] {.async.} =
+  ## Writes are fire-and-forget. True when the topic records read as `expected`
+  ## within two seconds.
+  let deadline = Moment.now() + 2.seconds
+  while Moment.now() < deadline:
+    if (await job.recordTable()) == expected:
+      return true
+    await sleepAsync(10.milliseconds)
+  return false
+
+proc waitRecordCount(job: Job, count: int): Future[int] {.async.} =
+  ## Writes are fire-and-forget. The count of topic records, once it is
+  ## `count`, or the last count after five seconds.
+  let deadline = Moment.now() + 5.seconds
+  var stored = 0
+  while Moment.now() < deadline:
+    stored = (await job.recordTable()).len
+    if stored == count:
+      return stored
+    await sleepAsync(50.milliseconds)
+  return stored
+
+proc keysAndPayloads(ops: openArray[TxOp]): seq[(Key, seq[byte])] =
+  ## The key and the value of each write, for a comparison.
+  return ops.mapIt((it.key, it.payload))
 
 proc names(payloads: openArray[string]): seq[string] =
   return payloads.deduplicate()
@@ -94,7 +148,7 @@ suite "Receive backfill":
       let job = persistency.openJob(MessagingJobId).get()
       check (await job.readRecoveryHint()).get().isNone()
       await job.writeRecoveryHint(Base)
-      await job.waitHint(Opt.some(Base))
+      check await job.waitHint(Opt.some(Base))
       persistency.close()
     block:
       let persistency = Persistency.new(root).get()
@@ -108,12 +162,214 @@ suite "Receive backfill":
         @[0x08'u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01],
       ]:
         await job.persistPut(BackfillCategory, LastOnlineKey, badRecord)
-        await job.waitStored(BackfillCategory, LastOnlineKey, badRecord)
+        check await job.waitStored(BackfillCategory, LastOnlineKey, badRecord)
         check (await job.readRecoveryHint()).get().isNone()
       await job.writeRecoveryHint(Base + Hour)
-      await job.waitHint(Opt.some(Base + Hour))
+      check await job.waitHint(Opt.some(Base + Hour))
       persistency.closeJob(MessagingJobId)
       check (await job.readRecoveryHint()).isErr()
+
+  asyncTest "topic records: Persistency reopen, bad records":
+    let root = createTempDir("recv-backfill-records-", "")
+    defer:
+      removeDir(root)
+    let liveRecord = TopicRecord(at: Base, owed: false)
+    let owedRecord = TopicRecord(at: Base + Hour, owed: true)
+    # A topic name too long for a key gets no record.
+    let tooLong: BackfillTopic = (TestTopic.pubsubTopic, "/" & 'x'.repeat(StringLenMax))
+    check topicRecordOp(tooLong, liveRecord).isNone()
+    block:
+      let persistency = Persistency.new(root).get()
+      let job = persistency.openJob(MessagingJobId).get()
+      check (await job.recordTable()).len == 0
+      await job.writeTopicRecords(
+        @[
+          topicRecordOp(TestTopic, liveRecord).get(),
+          topicRecordOp(OtherTopic, owedRecord).get(),
+        ]
+      )
+      check await job.waitRecords(
+        {TestTopic: liveRecord, OtherTopic: owedRecord}.toTable()
+      )
+      # The hint is in the same category and is not a topic record.
+      await job.writeRecoveryHint(Base)
+      check await job.waitHint(Opt.some(Base))
+      persistency.close()
+    block:
+      let persistency = Persistency.new(root).get()
+      defer:
+        persistency.close()
+      let job = persistency.openJob(MessagingJobId).get()
+      check (await job.recordTable()) ==
+        {TestTopic: liveRecord, OtherTopic: owedRecord}.toTable()
+      # A value that does not decode counts as owed from the hint. With no
+      # hint, it is left out.
+      let badTopic: BackfillTopic = ("/waku/2/rs/3/0", "/backfill/1/bad/proto")
+      let badKey = key("topic", badTopic.pubsubTopic, badTopic.contentTopic)
+      let hint = Base + 2 * Hour
+      for badRecord in [
+        @[0x08'u8, 0x01], # `at` only
+        @[0x08'u8, 0x01, 0x10, 0x02], # `owed` = 2
+        @[0xff'u8, 0x01, 0x02],
+      ]:
+        await job.persistPut(BackfillCategory, badKey, badRecord)
+        check await job.waitStored(BackfillCategory, badKey, badRecord)
+        check (await job.recordTable()) ==
+          {TestTopic: liveRecord, OtherTopic: owedRecord}.toTable()
+        check (await job.recordTable(Opt.some(hint))) ==
+          @[
+            (TestTopic, liveRecord),
+            (OtherTopic, owedRecord),
+            (badTopic, TopicRecord(at: hint, owed: true)),
+          ].toTable()
+      await job.persistDelete(BackfillCategory, badKey)
+      # A key that does not decode is left out, with a hint too.
+      for otherKey in [
+        key("topic", "/waku/2/rs/3/0"),
+        key("topic", "/waku/2/rs/3/0", "/backfill/1/bad/proto", "/extra"),
+        key("topic", "", "/backfill/1/bad/proto"),
+      ]:
+        await job.persistPut(
+          BackfillCategory, otherKey, topicRecordOp(TestTopic, liveRecord).get().payload
+        )
+        check await job.waitStored(
+          BackfillCategory, otherKey, topicRecordOp(TestTopic, liveRecord).get().payload
+        )
+        check (await job.recordTable(Opt.some(hint))) ==
+          {TestTopic: liveRecord, OtherTopic: owedRecord}.toTable()
+        await job.persistDelete(BackfillCategory, otherKey)
+      persistency.closeJob(MessagingJobId)
+      check (await job.readTopicRecords()).isErr()
+    # One transaction of 2000 records stores all of them.
+    block:
+      let bulkRoot = createTempDir("recv-backfill-bulk-", "")
+      defer:
+        removeDir(bulkRoot)
+      let persistency = Persistency.new(bulkRoot).get()
+      defer:
+        persistency.close()
+      let job = persistency.openJob(MessagingJobId).get()
+      var bulk: seq[TxOp]
+      for i in 0 ..< 2000:
+        let topic: BackfillTopic =
+          ("/waku/2/rs/3/0", "/backfill/1/bulk-" & $i & "/proto")
+        bulk.add(topicRecordOp(topic, liveRecord).get())
+      await job.writeTopicRecords(bulk)
+      let stored = await job.waitRecordCount(2000)
+      check stored == 2000
+
+  test "topic records: the rules at a start, a change and the end of a pass":
+    let liveRecord = TopicRecord(at: Base, owed: false)
+    let owedRecord = TopicRecord(at: Base + Hour, owed: true)
+    # At a start, a live topic becomes owed from the later of its own time and
+    # the hint. An owed topic keeps its time.
+    check liveRecord.atStart(Opt.some(Base + Hour)) ==
+      TopicRecord(at: Base + Hour, owed: true)
+    check liveRecord.atStart(Opt.some(Base - Hour)) == TopicRecord(at: Base, owed: true)
+    check liveRecord.atStart(Opt.none(Timestamp)) == TopicRecord(at: Base, owed: true)
+    check owedRecord.atStart(Opt.some(Base + 2 * Hour)) == owedRecord
+    # An unsubscribe makes a live topic owed from the later of its own time and
+    # the last receipt. An owed topic keeps its time.
+    check liveRecord.afterUnsubscribe(Base + Minute) ==
+      TopicRecord(at: Base + Minute, owed: true)
+    check liveRecord.afterUnsubscribe(Base - Minute) == TopicRecord(
+      at: Base, owed: true
+    )
+    check owedRecord.afterUnsubscribe(Base + 2 * Hour) == owedRecord
+    # The records at a start, and the writes of the ones that changed.
+    let (startRecords, startOps) = recordsAtStart(
+      [(TestTopic, liveRecord), (OtherTopic, owedRecord)], Opt.some(Base + 2 * Hour)
+    )
+    let startedLive = TopicRecord(at: Base + 2 * Hour, owed: true)
+    check startRecords == {TestTopic: startedLive, OtherTopic: owedRecord}.toTable()
+    check keysAndPayloads(startOps) ==
+      keysAndPayloads([topicRecordOp(TestTopic, startedLive).get()])
+    # Changes apply in order. A subscription of a topic with no record makes a
+    # live record at the time of the change. A subscription of a known topic
+    # writes nothing.
+    let topicC: BackfillTopic = ("/waku/2/rs/3/0", "/backfill/1/c/proto")
+    var records = {TestTopic: liveRecord}.toTable()
+    var subscribed: HashSet[BackfillTopic]
+    let newC = TopicRecord(at: Base + 2 * Hour, owed: false)
+    var ops = applyChanges(
+      records,
+      subscribed,
+      [
+        SubscriptionChange(topic: TestTopic, subscribed: true, at: Base + Hour),
+        SubscriptionChange(topic: topicC, subscribed: true, at: Base + 2 * Hour),
+      ],
+      Opt.none(Timestamp),
+    )
+    check records == {TestTopic: liveRecord, topicC: newC}.toTable()
+    check subscribed == [TestTopic, topicC].toHashSet()
+    check keysAndPayloads(ops) == keysAndPayloads([topicRecordOp(topicC, newC).get()])
+    # An unsubscription uses the last receipt of the change, not its time. A
+    # subscription and an unsubscription in one batch write the final record
+    # one time. An unsubscription of a topic with no record writes nothing.
+    let owedC = TopicRecord(at: Base + 3 * Hour, owed: true)
+    ops = applyChanges(
+      records,
+      subscribed,
+      [
+        SubscriptionChange(
+          topic: topicC,
+          subscribed: false,
+          at: Base + 4 * Hour,
+          lastReceivedAt: Base + 3 * Hour,
+        ),
+        SubscriptionChange(topic: OtherTopic, subscribed: true, at: Base + 5 * Hour),
+        SubscriptionChange(
+          topic: OtherTopic,
+          subscribed: false,
+          at: Base + 6 * Hour,
+          lastReceivedAt: Base + 5 * Hour + Minute,
+        ),
+        SubscriptionChange(
+          topic: ("/waku/2/rs/3/0", "/backfill/1/none/proto"),
+          subscribed: false,
+          at: Base,
+          lastReceivedAt: Base,
+        ),
+      ],
+      Opt.none(Timestamp),
+    )
+    let owedOther = TopicRecord(at: Base + 5 * Hour + Minute, owed: true)
+    check records ==
+      {TestTopic: liveRecord, topicC: owedC, OtherTopic: owedOther}.toTable()
+    check subscribed == [TestTopic].toHashSet()
+    check keysAndPayloads(ops) ==
+      keysAndPayloads(
+        [topicRecordOp(topicC, owedC).get(), topicRecordOp(OtherTopic, owedOther).get()]
+      )
+    # In the first run after an upgrade, a topic with no record is owed from the
+    # hint.
+    var upgraded: Table[BackfillTopic, TopicRecord]
+    var upgradedSubscribed: HashSet[BackfillTopic]
+    ops = applyChanges(
+      upgraded,
+      upgradedSubscribed,
+      [SubscriptionChange(topic: TestTopic, subscribed: true, at: Base + Hour)],
+      Opt.some(Base - Hour),
+    )
+    let fromHint = TopicRecord(at: Base - Hour, owed: true)
+    check upgraded == {TestTopic: fromHint}.toTable()
+    check keysAndPayloads(ops) ==
+      keysAndPayloads([topicRecordOp(TestTopic, fromHint).get()])
+    # A topic with no start begins its catch-up at its `at` minus the overlap.
+    # A topic with a start keeps it.
+    let starts = newTable[BackfillTopic, Timestamp]()
+    starts[TestTopic] = Base + Minute
+    starts.setStartIfMissing(TestTopic, owedRecord)
+    starts.setStartIfMissing(OtherTopic, owedRecord)
+    check starts[] ==
+      {TestTopic: Base + Minute, OtherTopic: owedRecord.at - BackfillOverlap}.toTable()
+    # The end of a pass makes its topics live from the cutoff.
+    var passRecords = {TestTopic: owedRecord, OtherTopic: owedRecord}.toTable()
+    let liveAtCutoff = TopicRecord(at: Base + 7 * Hour, owed: false)
+    ops = passRecords.setLive([TestTopic], Base + 7 * Hour)
+    check passRecords == {TestTopic: liveAtCutoff, OtherTopic: owedRecord}.toTable()
+    check keysAndPayloads(ops) ==
+      keysAndPayloads([topicRecordOp(TestTopic, liveAtCutoff).get()])
 
   asyncTest "catch-up: topics in order, page progress, range bounds, failures":
     let t0 = Base
@@ -126,12 +382,14 @@ suite "Receive backfill":
     var content: Table[BackfillTopic, seq[WakuMessageKeyValue]]
     var pageSize = 3
     var calls = 0
+    var cursors = 0 # queries with a cursor, which the catch-up never sends
     var seen: seq[(Timestamp, Timestamp)]
     let query: BackfillQuery = proc(
         request: StoreQueryRequest
     ): Future[Result[StoreQueryResponse, string]] {.async.} =
       inc calls
-      doAssert request.paginationCursor.isNone()
+      if request.paginationCursor.isSome():
+        inc cursors
       seen.add((request.startTime.get(), request.endTime.get()))
       let topic: BackfillTopic = (request.pubsubTopic.get(), request.contentTopics[0])
       let inRange = content.getOrDefault(topic).filterIt(
@@ -163,9 +421,11 @@ suite "Receive backfill":
     var exhausted = await catchUp(topics, t0, t1, query, deliver)
     check calls == 6 and exhausted == topics
     for topic in topics:
-      check delivered[topic].names() == toSeq(1 .. 6).mapIt("msg-" & $it)
-      check delivered[topic].len == 9 # msg-2..4 twice: shared instant, boundary
-    check seen[0] == (t0, t1)
+      check delivered.getOrDefault(topic).names() == toSeq(1 .. 6).mapIt("msg-" & $it)
+      check delivered.getOrDefault(topic).len == 9
+        # msg-2..4 twice: shared instant, boundary
+    check seen.len > 0 and seen[0] == (t0, t1)
+    check cursors == 0
     # Phase 2: the range includes `since` and excludes `cutoff`. A topic whose
     # start is at or past `cutoff` completes with zero queries.
     var got: seq[string]
@@ -196,6 +456,7 @@ suite "Receive backfill":
     check calls == 4 and exhausted == @[busy]
     check got.names() == toSeq(1 .. 5).mapIt("msg-" & $it)
     check got.count("msg-1") == 1
+    check cursors == 0
     # Phase 4: a failure ends the topic for this catch-up and completes
     # nothing. An error, a timeout, a raising query, a declined delivery,
     # and malformed pages.
@@ -290,7 +551,7 @@ suite "Receive backfill":
     let progress = newTable[BackfillTopic, Timestamp]()
     exhausted =
       await catchUp(@[TestTopic], t0, t1, failsSecondPage, progress = progress)
-    check exhausted.len == 0 and progress[TestTopic] == t0 + 2 * Minute
+    check exhausted.len == 0 and progress.getOrDefault(TestTopic, 0) == t0 + 2 * Minute
     exhausted =
       await catchUp(@[TestTopic], t0, t1, failsSecondPage, progress = progress)
     check exhausted == @[TestTopic] and
@@ -319,6 +580,29 @@ suite "Receive backfill":
       return page(toSeq(1 .. int(MaxPageSize)).mapIt(rowAt(start + int64(it), it)))
     exhausted = await catchUp(@[TestTopic], t0, t1, fullPage, collect)
     check exhausted == @[TestTopic] and got.len == int(MaxPageSize)
+    # Each topic starts at its own start. A topic with no start has nothing to
+    # query and completes.
+    var firstStarts: Table[BackfillTopic, Timestamp]
+    let firstStart: BackfillQuery = proc(
+        request: StoreQueryRequest
+    ): Future[Result[StoreQueryResponse, string]] {.async.} =
+      let topic: BackfillTopic = (request.pubsubTopic.get(), request.contentTopics[0])
+      if topic notin firstStarts:
+        firstStarts[topic] = request.startTime.get()
+      return page(@[])
+    let ownStarts = newTable[BackfillTopic, Timestamp]()
+    ownStarts[TestTopic] = t0 + 10 * Minute
+    ownStarts[OtherTopic] = t0 + 30 * Minute
+    exhausted = @[]
+    for topic in [TestTopic, OtherTopic, busy]:
+      if await catchUpTopic(
+        topic, ownStarts, t1, chronos.seconds(10), firstStart, accept
+      ):
+        exhausted.add(topic)
+    check exhausted == @[TestTopic, OtherTopic, busy]
+    check firstStarts ==
+      {TestTopic: t0 + 10 * Minute, OtherTopic: t0 + 30 * Minute}.toTable()
+    check ownStarts.len == 0
 
   asyncTest "catch-up: a range longer than the Store limit is split into windows":
     let t0 = Base

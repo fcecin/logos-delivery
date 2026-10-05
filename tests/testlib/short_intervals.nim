@@ -3,7 +3,6 @@ import logos_delivery
 
 proc shortenIntervals*(node: LogosDelivery) =
   ## Shortens the receive, send and edge filter intervals of a node not started yet.
-  node.messagingClient.recvService.catchUpSettlePeriod = 500.milliseconds
   node.messagingClient.recvService.activityWriteInterval = 500.milliseconds
   node.messagingClient.sendService.archiveTime = 300.milliseconds
   # A shorter interval would exceed a filter service's 30 requests per minute

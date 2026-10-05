@@ -77,7 +77,7 @@ Emitted when a send is held back because the current epoch's rate-limit budget i
 - `messageHash`: Hash of the message that was held back
 
 ### 5. message_received
-Emitted once for every message accepted on a subscribed content topic, whether it arrived live from the network or was recovered from a Store peer (at startup, or after a connectivity gap). The `source` field tells the two apart.
+Emitted once for every message accepted on a subscribed content topic, whether it arrived live from the network or was recovered from a Store peer (for a content topic that the node had before, or after a connectivity gap). The `source` field tells the two apart.
 
 **JSON Structure:**
 ```json
