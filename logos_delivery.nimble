@@ -35,6 +35,7 @@ requires "nim == 2.2.6",
   "libp2p == 2.4.1",
   # 0.9.0 is the locked version; an unversioned "eth" resolves to nim-eth HEAD,
   # which no longer ships eth/p2p/discoveryv5/enr.
+  "snappy#a99d113197e81bf764a3b005b0ade3f9f3758069",
   "eth == 0.9.0",
   # nat_traversal stays in the graph through libp2p, which links
   # the miniupnpc and libnatpmp static libs. Nat.mk and the iOS steps stay.
@@ -88,8 +89,6 @@ requires "https://github.com/status-im/nim-leopard#2e8de41205ea44b6f33b5cad676ba
 # keeps the resolution at the validated release instead of floating to
 # the newest one.
 requires "https://github.com/vacp2p/nim-lsquic#fb293834a3f90368e1f6c57aec2360cf8d840c5a"
-
-requires "https://github.com/vacp2p/nim-boringssl#v0.0.13"
 
 # No tag at pinning time; revision was one commit after v0.2.0.
 requires "https://github.com/vacp2p/nim-jwt.git#057ec95eb5af0eea9c49bfe9025b3312c95dc5f2"
