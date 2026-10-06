@@ -119,6 +119,13 @@ If `logosdeliverynode.exe` or `liblogosdelivery` isn't generated:
 ### Nim and dependencies
 The first `make` run installs Nim into `~/.nim/nim-<version>` (linked from `~/.nimble/bin`) unless the right version is already on PATH, and installs the project dependencies into `nimbledeps/pkgs2`.
 
+`make check-consumer-deps` runs `nimble setup` in a temporary consumer that
+requires this checkout, using an empty package cache and no consumer lockfile.
+This checks that downstream packages can resolve our requirements. It needs
+network access and runs in build-health CI on relevant changes and daily.
+The existing `make audit-deps` checks the root build's installed revisions
+against `nimble.lock`; it does not exercise consumer dependency solving.
+
 ### Test Suite
 
 ```bash

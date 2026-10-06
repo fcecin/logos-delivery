@@ -7,6 +7,7 @@ jobs:
   build-health:
     name: "Build health"
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -18,3 +19,6 @@ jobs:
 
       - name: Audit installed deps
         run: make audit-deps
+
+      - name: Resolve dependencies from a clean consumer
+        run: make check-consumer-deps

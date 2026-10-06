@@ -148,6 +148,11 @@ $(NIMBLEDEPS_STAMP): nimble.lock logos_delivery.nimble | install-nimble logos_de
 audit-deps:
 	$(NIMBLE) auditdeps $(NIMBLE_TASK_FLAGS)
 
+# Exercise dependency solving with this checkout below a separate root package.
+.PHONY: check-consumer-deps
+check-consumer-deps: | install-nimble
+	scripts/check_consumer_deps.sh "$(NIMBLE)" $(if $(NIM),"$(NIM)")
+
 # Must be phony so the recipe always runs and the sub-make re-evaluates
 # BEARSSL_NIMBLEDEPS_DIR / NAT_TRAVERSAL_NIMBLEDEPS_DIR (parse-time variables)
 # after nimble setup has populated nimbledeps/.
