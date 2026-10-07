@@ -46,6 +46,7 @@
 {.push raises: [].}
 
 import std/macros
+import results
 import ./types
 
 const
@@ -176,5 +177,29 @@ proc prefixRange*(prefix: Key): KeyRange =
       return KeyRange(start: prefix, stop: Key(stop))
     dec i
   return KeyRange(start: prefix, stop: Key(@[]))
+
+# ── Decoding ────────────────────────────────────────────────────────────
+
+proc stringParts*(k: Key): Opt[seq[string]] =
+  ## The parts of a key that `key` or `toKey` built from `string` parts only,
+  ## in order. None when the bytes do not split into length-prefixed parts.
+  ## A key with parts of other types can split by chance, so use this only
+  ## for keys of `string` parts.
+  let raw = bytes(k)
+  var parts: seq[string]
+  var i = 0
+  while i < raw.len:
+    if raw.len - i < 2:
+      return Opt.none(seq[string])
+    let length = (int(raw[i]) shl 8) or int(raw[i + 1])
+    i += 2
+    if raw.len - i < length:
+      return Opt.none(seq[string])
+    var part = newString(length)
+    for j in 0 ..< length:
+      part[j] = char(raw[i + j])
+    parts.add(part)
+    i += length
+  return Opt.some(parts)
 
 {.pop.}

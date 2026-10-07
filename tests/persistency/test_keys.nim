@@ -1,7 +1,7 @@
 {.used.}
 
-import std/[algorithm, sequtils]
-import testutils/unittests
+import std/[algorithm, sequtils, strutils]
+import results, testutils/unittests
 import logos_delivery/waku/persistency/[types, keys]
 
 proc cmpBytes(a, b: Key): int =
@@ -133,3 +133,16 @@ suite "Persistency keys":
     let r = prefixRange(prefix)
     check r.start == prefix
     check bytes(r.stop).len == 0
+
+  test "stringParts splits a key of string parts":
+    check key("topic", "/waku/2/rs/3/0", "/app/1/chat/proto").stringParts() ==
+      Opt.some(@["topic", "/waku/2/rs/3/0", "/app/1/chat/proto"])
+    check key("").stringParts() == Opt.some(@[""])
+    check key().stringParts() == Opt.some(newSeq[string]())
+    # A part of 300 bytes needs both bytes of its length.
+    check key("a".repeat(300), "b").stringParts() == Opt.some(@["a".repeat(300), "b"])
+    # A length with one byte only, and a length past the end.
+    check Key(@[0x00'u8]).stringParts().isNone()
+    check Key(@[0x00'u8, 0x05, 0x61]).stringParts().isNone()
+    # The int64 part gives the length 0x8000, past the end.
+    check key("x", 1'i64).stringParts().isNone()

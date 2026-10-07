@@ -88,11 +88,11 @@ The receivers can have the message after an `error` event. The node does not res
 * Each received message comes as a JSON object with:
   * the message hash
   * the full `WakuMessage`
-  * a `source`: `live` for a message that arrived when it was published, or `history` for a message that a Store peer returned at startup or after the node came back online
+  * a `source`: `live` for a message that arrived when it was published, or `history` for a message that a Store peer returned
 * The node keeps messages only for the content topics subscribed through `/messaging/v1/subscriptions`. A relay subscription to the shard is not enough.
 * A send subscribes the node to its content topic, so the sender also receives its own messages.
 
-At startup, the node gets from Store the messages that it missed while it was down. On its first start, it gets the last 24 h.
+When a client subscribes a content topic that the node had before, the node gets from Store the messages that it missed on that topic. A content topic that the node subscribes for the first time gets no earlier messages. The node keeps the content topics that it had under `--local-storage-path`. With a path that does not survive a restart, such as `:memory:` or a container with no volume, the node does not get the messages that it missed while it was down.
 
 `GET /messaging/v1/events/received` returns the messages that arrived since the last call, and the node then removes them. With more than one client, each message goes to one client only. Between two calls, the node holds at most `--rest-messaging-cache-capacity` messages (default 50), and drops the oldest ones when more arrive. Two signals show dropped messages:
 
