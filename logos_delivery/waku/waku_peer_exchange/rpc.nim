@@ -1,4 +1,4 @@
-import results
+import results, ../common/protobuf
 
 type
   PeerExchangeResponseStatusCode* {.pure.} = enum
@@ -10,23 +10,24 @@ type
     SERVICE_UNAVAILABLE = uint32(503)
     DIAL_FAILURE = uint32(599)
 
-  PeerExchangePeerInfo* = object
-    enr*: seq[byte] # RLP encoded ENR: https://eips.ethereum.org/EIPS/eip-778
+  PeerExchangePeerInfo* {.proto3.} = object
+    enr* {.fieldNumber: 1.}: seq[byte]
+      # RLP encoded ENR: https://eips.ethereum.org/EIPS/eip-778
 
-  PeerExchangeRequest* = object
-    numPeers*: uint64
+  PeerExchangeRequest* {.proto3.} = object
+    numPeers* {.fieldNumber: 1, pint.}: uint64
 
-  PeerExchangeResponse* = object
-    peerInfos*: seq[PeerExchangePeerInfo]
-    status_code*: PeerExchangeResponseStatusCode
-    status_desc*: Opt[string]
+  PeerExchangeResponse* {.proto3.} = object
+    peerInfos* {.fieldNumber: 1.}: seq[PeerExchangePeerInfo]
+    status_code* {.fieldNumber: 10, ext.}: PeerExchangeResponseStatusCode
+    status_desc* {.fieldNumber: 11.}: Opt[string]
 
   PeerExchangeResponseStatus* =
     tuple[status_code: PeerExchangeResponseStatusCode, status_desc: Opt[string]]
 
-  PeerExchangeRpc* = object
-    request*: PeerExchangeRequest
-    response*: PeerExchangeResponse
+  PeerExchangeRpc* {.proto3.} = object
+    request* {.fieldNumber: 1.}: PeerExchangeRequest
+    response* {.fieldNumber: 2.}: PeerExchangeResponse
 
 proc makeRequest*(T: type PeerExchangeRpc, numPeers: uint64): T =
   return T(request: PeerExchangeRequest(numPeers: numPeers))

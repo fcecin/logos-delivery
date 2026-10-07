@@ -1,5 +1,6 @@
 {.used.}
 
+import results, stew/byteutils
 import
   std/net,
   testutils/unittests,
@@ -23,7 +24,7 @@ suite "Peer Exchange RPC":
   asyncTest "Encode - Decode":
     # Setup
     let rpcReq = PeerExchangeRpc.makeRequest(2)
-    let rpcReqBuffer: seq[byte] = rpcReq.encode().buffer
+    let rpcReqBuffer: seq[byte] = rpcReq.encode()
     let resReq = PeerExchangeRpc.decode(rpcReqBuffer)
 
     check:
@@ -47,7 +48,7 @@ suite "Peer Exchange RPC":
     let rpc = PeerExchangeRpc.makeResponse(peerInfos)
 
     # When encoding and decoding
-    let rpcBuffer: seq[byte] = rpc.encode().buffer
+    let rpcBuffer: seq[byte] = rpc.encode()
     let res = PeerExchangeRpc.decode(rpcBuffer)
 
     # Then the peerInfos match the originals
@@ -71,3 +72,19 @@ suite "Peer Exchange RPC":
     check:
       resEnr1 == enr1
       resEnr2 == enr2
+
+suite "Peer Exchange - RPC codec bytes":
+  test "a response without a request decodes":
+    # Field 2 only. It has one peer with ENR bytes e1 e2, and status 200.
+    let res = PeerExchangeRpc.decode(hexToSeqByte("12090a040a02e1e250c801"))
+    check:
+      res.isOk()
+      res.get().request.numPeers == 0
+      res.get().response.status_code == PeerExchangeResponseStatusCode.SUCCESS
+      res.get().response.peerInfos == @[PeerExchangePeerInfo(enr: @[byte 0xe1, 0xe2])]
+
+  test "a response without a status code decodes as UNKNOWN":
+    let res = PeerExchangeRpc.decode(hexToSeqByte("12060a040a02e1e2"))
+    check:
+      res.isOk()
+      res.get().response.status_code == PeerExchangeResponseStatusCode.UNKNOWN

@@ -9,13 +9,12 @@ const
   VarIntLen = 9
   AvgCapacity = 1000
 
-proc encode*(value: WakuMessageAndTopic): ProtoBuffer =
-  var pb = initProtoBuffer()
+proc validateDecoded(value: WakuMessageAndTopic): ProtobufResult[void] =
+  if value.pubsub.len == 0:
+    return err(ProtobufError.missingRequiredField("pubsub"))
+  validateWakuMessageFields(value.message)
 
-  pb.write3(1, value.pubsub)
-  pb.write3(2, value.message.encode())
-
-  return pb
+protobufCodec(WakuMessageAndTopic, validateDecoded)
 
 proc deltaEncode*(itemSet: ItemSet): seq[byte] =
   # 1 byte for resolved bool and 32 bytes hash plus 9 bytes varint per elements 
@@ -334,18 +333,3 @@ proc deltaDecode*(T: type RangesData, buffer: seq[byte]): Result[T, string] =
       payload.itemSets.add(itemSet)
 
   return ok(payload)
-
-proc decode*(T: type WakuMessageAndTopic, buffer: seq[byte]): ProtobufResult[T] =
-  let pb = initProtoBuffer(buffer)
-
-  var pubsub: string
-  if not ?pb.getField(1, pubsub):
-    return err(ProtobufError.missingRequiredField("pubsub"))
-
-  var proto: ProtoBuffer
-  if not ?pb.getField(2, proto):
-    return err(ProtobufError.missingRequiredField("msg"))
-
-  let message = ?WakuMessage.decode(proto.buffer)
-
-  return ok(WakuMessageAndTopic(pubsub: pubsub, message: message))

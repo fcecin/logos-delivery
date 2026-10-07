@@ -1,13 +1,16 @@
 {.used.}
 
+import results, stew/byteutils
 import std/random, testutils/unittests, chronos
 
 import
+  ../../logos_delivery/waku/common/protobuf,
   ../../logos_delivery/waku/waku_core,
   ../../logos_delivery/waku/waku_core/message/digest,
   ../../logos_delivery/waku/waku_core/time,
   ../../logos_delivery/waku/waku_store_sync/common,
   ../../logos_delivery/waku/waku_store_sync/codec,
+  ../testlib/protobuf_errors,
   ./sync_utils
 
 proc randomItemSet(count: int, startTime: Timestamp, rng: var Rand): ItemSet =
@@ -212,3 +215,16 @@ suite "Waku Store Sync Codec":
       payload.ranges[3][0].b == decodedPayload.ranges[3][0].b
       payload.fingerprints == decodedPayload.fingerprints
       payload.itemSets == decodedPayload.itemSets
+
+suite "Waku Store Sync - message codec refusals":
+  test "a message without a pubsub topic is refused":
+    let res = WakuMessageAndTopic.decode(hexToSeqByte("12070a010112022f74"))
+    check:
+      res.isErr()
+      res.error == ProtobufError.missingRequiredField("pubsub")
+
+  test "a nested message without a content topic is refused":
+    let res = WakuMessageAndTopic.decode(hexToSeqByte("0a022f7312030a0101"))
+    check:
+      res.isErr()
+      res.error == ProtobufError.missingRequiredField("content_topic")
