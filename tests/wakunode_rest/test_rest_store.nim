@@ -1005,11 +1005,9 @@ procSuite "Waku Rest API - Store v3":
     check:
       response.status == 400
 
-    # TODO: logos-delivery#4437
     response = await t.client.getStoreMessagesV3(hashes = hash, startTime = "0")
     check:
-      response.status == 200
-      response.data.messages.mapIt(it.messageHash) == @[hash]
+      response.status == 400
 
   asyncTest "ascending=false returns the tail page in chronological order":
     let t = await RestStoreTest.init(
@@ -1113,7 +1111,7 @@ procSuite "Waku Rest API - Store v3":
       response.data.statusDesc.contains("Failed parsing remote peer info")
       response.data.statusDesc.contains("Error encoding `p2p/")
 
-  asyncTest "pageSize: over 100 returns 100, empty or 0 returns 20, negative returns 100, the largest uint64 returns 400":
+  asyncTest "pageSize: over 100 returns 100, empty or 0 returns 20, negative returns 400, the largest uint64 returns 100":
     let t = await RestStoreTest.init(
       toSeq(1 .. 101).mapIt(fakeWakuMessage(@[byte(it)], ts = int64(it)))
     )
@@ -1131,47 +1129,45 @@ procSuite "Waku Rest API - Store v3":
       response.status == 200
       response.data.messages.mapIt(it.messageHash) == allHashes[0 ..< 20]
 
-    # TODO: logos-delivery#4437
     response = await t.client.getStoreMessagesV3(pageSize = "0")
     check:
       response.status == 200
       response.data.messages.mapIt(it.messageHash) == allHashes[0 ..< 20]
 
-    # A negative pageSize wraps to a value over the maximum instead of being rejected.
     response = await t.client.getStoreMessagesV3(pageSize = "-1")
+    check:
+      response.status == 400
+      response.data.statusDesc.contains("page size parsing error")
+
+    # The largest page size the protocol carries is accepted and capped.
+    response = await t.client.getStoreMessagesV3(pageSize = "18446744073709551615")
     check:
       response.status == 200
       response.data.messages.mapIt(it.messageHash) == allHashes[0 ..< 100]
 
-    # TODO: logos-delivery#4437
-    # The largest page size the protocol carries is rejected.
-    response = await t.client.getStoreMessagesV3(pageSize = "18446744073709551615")
+    response = await t.client.getStoreMessagesV3(pageSize = "18446744073709551616")
     check:
       response.status == 400
-      $response.contentType == $MIMETYPE_TEXT
-      response.data.statusDesc ==
-        "page size parsing error: Parsed integer outside of valid range"
+      response.data.statusDesc.contains("page size parsing error")
 
-  asyncTest "startTime and endTime of zero or less are ignored":
+  asyncTest "startTime and endTime of zero or less are rejected with 400":
     let t =
       await RestStoreTest.init(@[fakeWakuMessage(@[byte 0], ts = -5)] & defaultSeed())
     defer:
       await t.shutdown()
     let allHashes = t.hashes.mapIt(it.toRestStringWakuMessageHash())
 
-    # Unlike a non-numeric time, a time of zero or less is not rejected but ignored.
     for time in ["0", "-1"]:
       let startResponse = await t.client.getStoreMessagesV3(startTime = time)
       let endResponse = await t.client.getStoreMessagesV3(endTime = time)
       let bothResponse =
         await t.client.getStoreMessagesV3(startTime = time, endTime = time)
       check:
-        startResponse.status == 200
-        startResponse.data.messages.mapIt(it.messageHash) == allHashes
-        endResponse.status == 200
-        endResponse.data.messages.mapIt(it.messageHash) == allHashes
-        bothResponse.status == 200
-        bothResponse.data.messages.mapIt(it.messageHash) == allHashes
+        startResponse.status == 400
+        startResponse.data.statusDesc.contains("time parsing error")
+        endResponse.status == 400
+        endResponse.data.statusDesc.contains("time parsing error")
+        bothResponse.status == 400
 
     # The end time is exclusive, so only the message before ts 1 matches.
     let response = await t.client.getStoreMessagesV3(endTime = "1")
@@ -1179,8 +1175,7 @@ procSuite "Waku Rest API - Store v3":
       response.status == 200
       response.data.messages.mapIt(it.messageHash) == allHashes[0 ..< 1]
 
-    # TODO: logos-delivery#4437
-    # A start time of 0 also lifts the 24h limit on the range.
+    # A start time of 0 no longer lifts the 24h limit on the range.
     let rangeEnd = $(MaxQueryTimeRange + 2)
     let overRangeResponse =
       await t.client.getStoreMessagesV3(startTime = "1", endTime = rangeEnd)
@@ -1189,8 +1184,8 @@ procSuite "Waku Rest API - Store v3":
     check:
       overRangeResponse.status == 400
       overRangeResponse.data.statusDesc == "time range exceeds 24h"
-      zeroStartResponse.status == 200
-      zeroStartResponse.data.messages.mapIt(it.messageHash) == allHashes
+      zeroStartResponse.status == 400
+      zeroStartResponse.data.statusDesc.contains("time parsing error")
 
   asyncTest "ascending is case-insensitive and invalid values default to forward":
     let t = await RestStoreTest.init(
