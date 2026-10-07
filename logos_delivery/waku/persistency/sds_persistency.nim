@@ -46,16 +46,31 @@
 ## |---------------|--------------------------|----------------------------------------|
 ## | `sds.meta`    | `key(channelId)`         | `ChannelMeta` (snapshot_codec protobuf)|
 ## | `sds.log`     | `key(channelId, msgId)`  | `SdsMessage` (sds wire protobuf)       |
+## | `sds.migration` | `key(channelId, "wire-v0.4")` | marker row, the channel has no row of the format before `v0.4` |
 ##
 ## `messageHistory` is reconstructed in memory by sorting on
 ## `(lamportTimestamp, messageId)` — the same total order SDS uses for
 ## delivery (see sds/sds_utils.nim).
+##
+## ## Migration of old rows
+##
+## The nim-sds version `b12f5ee` wrote field 3 of an SDS message as nested
+## history entries. The current nim-sds reads such a row with no error, but
+## with wrong causal history ids. So, before a closure reads or writes the
+## rows of a channel, it deletes the `sds.log` and `sds.meta` rows of that
+## channel that have the old format, one time. nim-sds makes the first call
+## at the first load of the reliable channel. One transaction deletes the
+## rows and writes the marker row of the channel in `sds.migration`. When the
+## marker row of a channel exists, the rows of the channel are not read
+## again. A migration that fails runs again at the next call.
+##
+## The deletion loses the channel state of an old node. Reliable channels are
+## not released, so no deployed state is lost.
 
 {.push raises: [].}
 
-import std/algorithm
-import chronos, chronicles, results
-import libp2p/protobuf/minprotobuf
+import std/[algorithm, sequtils, sets, tables]
+import chronos, chronicles, results, stew/byteutils
 import ./persistency
 import ./keys
 import types/persistence
@@ -70,6 +85,182 @@ logScope:
 const
   CatMeta* = "sds.meta"
   CatLog* = "sds.log"
+  CatMigration* = "sds.migration"
+  MigrationMarkerTag = "wire-v0.4"
+    ## The last key component of the marker row of each channel in
+    ## `CatMigration`. `v0.4` is the nim-sds release that changed field 3 of
+    ## the SDS message. If the row of a channel exists, no row of the channel
+    ## in `CatLog` and `CatMeta` has the format before `v0.4`.
+  MigrationMarkerPayload = @[1'u8] ## The value of a marker row.
+  MigrationCommitTimeout = 30.seconds
+    ## The longest wait for the marker row after the migration batch.
+    ## `persist` puts the batch in a queue and does not wait for its commit.
+  MigrationPollInterval = 10.milliseconds
+    ## The time between two reads of the marker row during that wait.
+
+# ── Migration of old rows ───────────────────────────────────────────────
+
+proc isOldCausalId(id: SdsMessageID): bool =
+  ## True when `id` is a history entry with a message id. The old nim-sds
+  ## wrote a history entry in field 3 of an SDS message, where the current
+  ## nim-sds writes a message id. So the current decoder reads the bytes of
+  ## the entry as the id. A message id of logos-delivery is hex, so it has no
+  ## tag byte of the message id field, and it does not decode as an entry.
+  let entry = deserializeHistoryEntry(id.toBytes).valueOr:
+    return false
+  entry.messageId.len > 0
+
+proc hasOldFormat(msg: SdsMessage): bool =
+  msg.causalHistory.anyIt(it.messageId.isOldCausalId)
+
+proc logRowHasOldFormat*(payload: seq[byte]): bool =
+  ## True when an `sds.log` row has the format before `v0.4`. A row with no
+  ## causal history has the same bytes in both formats.
+  let msg = deserializeMessage(payload).valueOr:
+    return false
+  msg.hasOldFormat
+
+proc metaRowHasOldFormat*(payload: seq[byte]): bool =
+  ## True when an `sds.meta` row has the format before `v0.4`: a message in
+  ## one of its buffers has it.
+  let meta = ChannelMeta.decode(payload).valueOr:
+    return false
+  if meta.outgoingBuffer.anyIt(it.message.hasOldFormat):
+    return true
+  if meta.incomingBuffer.anyIt(it.message.hasOldFormat):
+    return true
+  for kv in meta.incomingRepairBuffer:
+    let cached = deserializeMessage(kv.entry.cachedMessage).valueOr:
+      continue
+    if cached.hasOldFormat:
+      return true
+  false
+
+proc migrationMarkerKey*(channelId: SdsChannelID): Key =
+  ## The key of the marker row of `channelId` in `CatMigration`.
+  key(channelId, MigrationMarkerTag)
+
+proc waitForMarker*(
+    job: Job, markerKey: Key
+): Future[Result[void, string]] {.async: (raises: []).} =
+  ## Waits until the marker row `markerKey` of `CatMigration` exists.
+  ## `persist` does not wait for the commit. The marker is in the same
+  ## transaction as the rows, so the rows are committed when it exists. The
+  ## wait ends with an error when a read of the marker fails or after
+  ## `MigrationCommitTimeout`. A read on a closed job fails at once.
+  let deadline = Moment.now() + MigrationCommitTimeout
+  try:
+    while true:
+      let present = (await job.exists(CatMigration, markerKey)).valueOr:
+        return err("read marker: " & $error)
+      if present:
+        return ok()
+      if Moment.now() > deadline:
+        return err("the migration did not commit in " & $MigrationCommitTimeout)
+      await sleepAsync(MigrationPollInterval)
+  except CatchableError as e:
+    return err(e.msg)
+
+proc runMigration(
+    job: Job, channelId: SdsChannelID
+): Future[Result[void, string]] {.async: (raises: []).} =
+  ## Deletes the rows of `channelId` that have the old nim-sds format, one
+  ## time. All deletes of the channel and its marker row go in one
+  ## transaction.
+  let markerKey = migrationMarkerKey(channelId)
+  let chanKey = toKey(channelId)
+  try:
+    let done = (await job.exists(CatMigration, markerKey)).valueOr:
+      return err("read marker: " & $error)
+    if done:
+      return ok()
+
+    var ops: seq[TxOp]
+    let rows = (await job.scanPrefix(CatLog, chanKey)).valueOr:
+      return err("scan " & CatLog & ": " & $error)
+    for row in rows:
+      if row.payload.logRowHasOldFormat():
+        ops.add TxOp(category: CatLog, key: row.key, kind: txDelete)
+    let meta = (await job.get(CatMeta, chanKey)).valueOr:
+      return err("read " & CatMeta & ": " & $error)
+    if meta.isSome() and meta.get().metaRowHasOldFormat():
+      ops.add TxOp(category: CatMeta, key: chanKey, kind: txDelete)
+    let deleted = ops.len
+    ops.add TxOp(
+      category: CatMigration,
+      key: markerKey,
+      kind: txPut,
+      payload: MigrationMarkerPayload,
+    )
+    await job.persist(ops)
+    ?(await waitForMarker(job, markerKey))
+    if deleted > 0:
+      info "Deleted the rows of the old nim-sds format", channelId, deleted
+    return ok()
+  except CatchableError as e:
+    return err(e.msg)
+
+proc runMigrationAndLog(
+    job: Job, channelId: SdsChannelID, firstRun: bool
+): Future[Result[void, string]] {.async: (raises: []).} =
+  ## Runs the migration of a channel. Only the failure of the first run is a
+  ## warning, so a store that stays broken does not log a warning at each
+  ## call.
+  let res = await runMigration(job, channelId)
+  if res.isErr():
+    if firstRun:
+      warn "The migration of old SDS rows failed, the next call tries again",
+        channelId, error = res.error
+    else:
+      debug "The migration of old SDS rows failed again", channelId, error = res.error
+  return res
+
+type ChannelMigration = object
+  job: Job ## Keeps the job alive, so that no other job gets its address.
+  migration: Future[Result[void, string]].Raising([])
+
+var channelMigrations {.threadvar.}: Table[(pointer, string), ChannelMigration]
+  ## One migration for each channel of a job. All adapters of the job share
+  ## it. A job runs only on the thread of its node, so each thread has a table.
+  ## An entry of a closed job stays until the next migration starts.
+
+proc migrationFailed(migration: Future[Result[void, string]].Raising([])): bool =
+  ## True when the migration finished with an error.
+  migration.finished() and not (migration.completed() and migration.value().isOk())
+
+proc removeClosedJobMigrations() =
+  ## Removes the entries of the jobs that closed.
+  var closed: seq[(pointer, string)]
+  for id, entry in channelMigrations:
+    if not entry.job.running:
+      closed.add(id)
+  for id in closed:
+    channelMigrations.del(id)
+
+proc migrationTableJobCount*(): int =
+  ## The number of jobs that have an entry in the migration table of this
+  ## thread. It is a diagnostic for the tests.
+  var jobs: HashSet[pointer]
+  for id in channelMigrations.keys:
+    jobs.incl(id[0])
+  jobs.len
+
+proc getOrStartMigration(
+    job: Job, channelId: SdsChannelID
+): Future[Result[void, string]].Raising([]) =
+  ## The migration of `channelId` on `job`. It starts one when the table has
+  ## none. A migration that failed is not reused, so the next call starts a
+  ## new one, which reads the marker first.
+  let id = (cast[pointer](job), channelId)
+  var firstRun = true
+  channelMigrations.withValue(id, entry):
+    if not entry.migration.migrationFailed():
+      return entry.migration
+    firstRun = false
+  removeClosedJobMigrations()
+  let migration = runMigrationAndLog(job, channelId, firstRun)
+  channelMigrations[id] = ChannelMigration(job: job, migration: migration)
+  return migration
 
 # ── Public factory ──────────────────────────────────────────────────────
 
@@ -77,9 +268,8 @@ proc newSdsPersistence*(job: Job): Persistence {.gcsafe, raises: [].} =
   ## Build an SDS `Persistence` value backed by ``job``. One Job services
   ## all channels — channelId is part of every key.
   ##
-  ## The closures capture ``job`` by ref. They must be invoked from a thread
-  ## that owns a running chronos loop (the SDS context's worker thread
-  ## satisfies this).
+  ## The closures capture ``job`` by ref. nim-sds calls them on the chronos
+  ## loop of the node, where the reliable channels run.
   doAssert not job.isNil, "newSdsPersistence: job is nil"
 
   # Built field-by-field via assignment rather than an object literal: every
@@ -88,9 +278,17 @@ proc newSdsPersistence*(job: Job): Persistence {.gcsafe, raises: [].} =
   # literal would require. Assignments have no separator, so bodies stay plain.
   var persistence = Persistence()
 
+  # Each call waits for the migration of its channel before it reads or
+  # writes a row. A cancelled call does not cancel the migration.
+  proc ensureMigrated(
+      channelId: SdsChannelID
+  ): Future[Result[void, string]] {.async: (raises: []).} =
+    return await noCancel(getOrStartMigration(job, channelId))
+
   persistence.saveChannelMeta = proc(
       channelId: SdsChannelID, meta: ChannelMeta
   ): Future[Result[void, string]] {.async: (raises: []), gcsafe.} =
+    ?(await ensureMigrated(channelId))
     try:
       await job.persistPut(CatMeta, toKey(channelId), encode(meta).buffer)
       return ok()
@@ -103,6 +301,7 @@ proc newSdsPersistence*(job: Job): Persistence {.gcsafe, raises: [].} =
   ): Future[Result[void, string]] {.async: (raises: []), gcsafe.} =
     if update.isEmpty:
       return ok()
+    ?(await ensureMigrated(channelId))
     # One transactional batch: append rows (txPut) and evictions (txDelete).
     var ops = newSeq[TxOp]()
     for m in update.append:
@@ -127,6 +326,8 @@ proc newSdsPersistence*(job: Job): Persistence {.gcsafe, raises: [].} =
   persistence.loadChannel = proc(
       channelId: SdsChannelID
   ): Future[Result[ChannelData, string]] {.async: (raises: []), gcsafe.} =
+    (await ensureMigrated(channelId)).isOkOr:
+      return err("loadChannel: migration of old rows: " & error)
     let chanKey = toKey(channelId)
     var data = ChannelData.init()
     try:
@@ -160,6 +361,7 @@ proc newSdsPersistence*(job: Job): Persistence {.gcsafe, raises: [].} =
   persistence.dropChannel = proc(
       channelId: SdsChannelID
   ): Future[Result[void, string]] {.async: (raises: []), gcsafe.} =
+    ?(await ensureMigrated(channelId))
     let chanKey = toKey(channelId)
     try:
       await job.persist(

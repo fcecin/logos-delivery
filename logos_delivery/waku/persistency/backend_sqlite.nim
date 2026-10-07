@@ -38,10 +38,33 @@ proc readBlob(s: ptr sqlite3_stmt, col: cint): seq[byte] =
   return buf
 
 proc bindBlob(s: ptr sqlite3_stmt, n: cint, val: seq[byte]): cint =
+  ## An empty value binds as a blob of length 0. `sqlite3_bind_blob` with a
+  ## nil pointer binds SQL NULL, which the `NOT NULL` columns refuse and which
+  ## `key >= ?` does not match.
   if val.len > 0:
     sqlite3_bind_blob(s, n, unsafeAddr val[0], val.len.cint, SQLITE_TRANSIENT)
   else:
-    sqlite3_bind_blob(s, n, nil, 0.cint, SQLITE_TRANSIENT)
+    sqlite3_bind_zeroblob(s, n, 0.cint)
+
+proc runWrite(stmt: RawStmtPtr, params: openArray[seq[byte]]): Result[void, string] =
+  ## Runs a prepared write with `bindBlob`. `SqliteStmt.exec` binds an empty
+  ## value as SQL NULL.
+  for i, p in params:
+    let bc = bindBlob(stmt, cint(i + 1), p)
+    if bc != SQLITE_OK:
+      discard sqlite3_clear_bindings(stmt)
+      return err($sqlite3_errstr(bc))
+  let v = sqlite3_step(stmt)
+  let res =
+    if v != SQLITE_DONE:
+      Result[void, string].err(
+        $sqlite3_errstr(v) & " " & $sqlite3_errmsg(sqlite3_db_handle(stmt))
+      )
+    else:
+      Result[void, string].ok()
+  discard sqlite3_reset(stmt)
+  discard sqlite3_clear_bindings(stmt)
+  res
 
 proc runRead(
     db: SqliteDatabase, sql: string, params: openArray[seq[byte]], onRow: RowHandler
@@ -154,11 +177,13 @@ proc deletePrefix(
 proc applyOne(b: KvBackend, op: TxOp): Result[void, PersistencyError] =
   case op.kind
   of txPut:
-    let r = b.putStmt.exec((catBytes(op.category), keyBytes(op.key), op.payload))
+    let r = RawStmtPtr(b.putStmt).runWrite(
+        [catBytes(op.category), keyBytes(op.key), op.payload]
+      )
     if r.isErr:
       return err(toErr("put failed: " & r.error))
   of txDelete:
-    let r = b.deleteStmt.exec((catBytes(op.category), keyBytes(op.key)))
+    let r = RawStmtPtr(b.deleteStmt).runWrite([catBytes(op.category), keyBytes(op.key)])
     if r.isErr:
       return err(toErr("delete failed: " & r.error))
   of txDeletePrefix:
@@ -224,7 +249,7 @@ proc deleteOne*(
   let existed = ?b.existsOne(category, key)
   if not existed:
     return ok(false)
-  let r = b.deleteStmt.exec((catBytes(category), keyBytes(key)))
+  let r = RawStmtPtr(b.deleteStmt).runWrite([catBytes(category), keyBytes(key)])
   if r.isErr:
     return err(toErr("delete: " & r.error))
   return ok(true)

@@ -191,3 +191,83 @@ suite "Persistency SQLite backend":
     defer:
       b.close()
     check b.countRange("msg", prefixRange(key("c1"))).get() == 0
+
+  test "scanRange from an empty prefix returns every row of the category":
+    let b = openBackendInMemory().get()
+    defer:
+      b.close()
+    for i in [1'i64, 2, 3]:
+      b
+        .applyOps(
+          [TxOp(category: "msg", key: key("c1", i), kind: txPut, payload: payload($i))]
+        )
+        .get()
+    b
+      .applyOps(
+        [
+          TxOp(
+            category: "other", key: key("c1", 1'i64), kind: txPut, payload: payload("x")
+          )
+        ]
+      )
+      .get()
+    let rows = b.scanRange("msg", prefixRange(key())).get()
+    check rows.len == 3
+    check b.countRange("msg", prefixRange(key())).get() == 3
+
+  test "txDeletePrefix with an empty prefix deletes every row of the category":
+    let b = openBackendInMemory().get()
+    defer:
+      b.close()
+    for i in [1'i64, 2]:
+      b
+        .applyOps(
+          [TxOp(category: "msg", key: key("c1", i), kind: txPut, payload: payload($i))]
+        )
+        .get()
+    b
+      .applyOps(
+        [
+          TxOp(
+            category: "other", key: key("c1", 1'i64), kind: txPut, payload: payload("x")
+          )
+        ]
+      )
+      .get()
+    b.applyOps([TxOp(category: "msg", key: key(), kind: txDeletePrefix)]).get()
+    check not b.existsOne("msg", key("c1", 1'i64)).get()
+    check not b.existsOne("msg", key("c1", 2'i64)).get()
+    check b.existsOne("other", key("c1", 1'i64)).get()
+
+  test "a put with an empty payload reads back as an empty payload":
+    let b = openBackendInMemory().get()
+    defer:
+      b.close()
+    let k = key("c1", 1'i64)
+    check b.applyOps([TxOp(category: "msg", key: k, kind: txPut, payload: @[])]).isOk
+    let got = b.getOne("msg", k).get()
+    check got.isSome
+    check got.get(@[byte 1]).len == 0
+
+  test "a put and a txDelete with an empty key leave no row":
+    let b = openBackendInMemory().get()
+    defer:
+      b.close()
+    b
+      .applyOps([TxOp(category: "msg", key: key(), kind: txPut, payload: payload("x"))])
+      .get()
+    check b.existsOne("msg", key()).get()
+    check b.getOne("msg", key()).get() == Opt.some(payload("x"))
+    b.applyOps([TxOp(category: "msg", key: key(), kind: txDelete)]).get()
+    check not b.existsOne("msg", key()).get()
+
+  test "deleteOne with an empty key removes the row":
+    let b = openBackendInMemory().get()
+    defer:
+      b.close()
+    b
+      .applyOps([TxOp(category: "msg", key: key(), kind: txPut, payload: payload("x"))])
+      .get()
+    check b.deleteOne("msg", key()).get()
+    check not b.existsOne("msg", key()).get()
+    check not b.deleteOne("msg", key()).get()
