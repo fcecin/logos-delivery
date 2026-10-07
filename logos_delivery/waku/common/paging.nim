@@ -1,4 +1,4 @@
-import results
+import std/strutils, results
 
 type PagingDirection* {.pure.} = enum
   ## PagingDirection determines the direction of pagination
@@ -25,4 +25,10 @@ proc into*(d: Opt[PagingDirection]): bool =
   d.get().into()
 
 proc into*(s: string): PagingDirection =
-  (s == "true").into()
+  ## Invalid values default to forward, as the store API spec says.
+  let parsed =
+    try:
+      parseBool(s)
+    except ValueError:
+      true
+  parsed.into()
