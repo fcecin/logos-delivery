@@ -236,7 +236,6 @@ suite "Messaging REST API":
       resp.data == "Invalid content body, could not decode: Unable to deserialize data: "
 
   asyncTest "a send whose meta exceeds the limit is accepted with a requestId":
-    # TODO: logos-delivery#4433
     var node: LogosDelivery
     lockNewGlobalBrokerContext:
       node = (await LogosDelivery.new(restNodeConf())).valueOr:

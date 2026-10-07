@@ -620,10 +620,9 @@ suite "Waku API - Send":
     (await node.stop()).isOkOr:
       raiseAssert "Failed to stop node: " & error
 
-  asyncTest "Edge send whose meta exceeds the limit is retried until the delivery window ends":
-    # TODO: logos-delivery#4433
-    ## The lightpush service rejects every attempt, and the send fails only when
-    ## its delivery window ends.
+  asyncTest "Edge send whose meta exceeds the limit fails at once with the service's reason":
+    ## The lightpush service rejects the request as BAD_REQUEST, which is not
+    ## retried, so the send fails after the first attempt.
     var node: LogosDelivery
     lockNewGlobalBrokerContext:
       node = (
@@ -671,8 +670,9 @@ suite "Waku API - Send":
 
     eventManager.validate({SendEventOutcome.Error}, requestId)
     check:
-      eventManager.errorDescs == @["Unable to send within retry time window"]
-      rejected > 1.0
+      eventManager.errorDescs ==
+        @["decode_rpc_failure: (kind: InvalidLengthField, field: \"meta\")"]
+      rejected == 1.0
 
   asyncTest "Store validation times out with an error event":
     ## The message propagates, but the only reachable store node is outside the

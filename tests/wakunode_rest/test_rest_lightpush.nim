@@ -473,7 +473,6 @@ suite "Waku v2 Rest API - lightpush":
         data["statusDesc"].getStr() == "Invalid message! Incorrect base64 string"
 
   asyncTest "A push whose meta is at the limit is relayed - POST /lightpush/v3/message":
-    # TODO: logos-delivery#4433
     # Given
     let restLightPushTest = await RestLightPushTest.init()
     defer:
@@ -515,8 +514,7 @@ suite "Waku v2 Rest API - lightpush":
       response.data.relayPeerCount == Opt.some(1.uint32)
       response.data.statusDesc == Opt.none(string)
 
-  asyncTest "A push whose meta exceeds the limit is answered 500 with a requestId mismatch - POST /lightpush/v3/message":
-    # TODO: logos-delivery#4433
+  asyncTest "A push whose meta exceeds the limit is answered 400 with the service's reason - POST /lightpush/v3/message":
     # Given
     let restLightPushTest = await RestLightPushTest.init()
     defer:
@@ -535,14 +533,14 @@ suite "Waku v2 Rest API - lightpush":
     )
 
     # Then
-    # The client rejects the service's answer, whose requestId is N/A.
+    # The client passes through the service's BAD_REQUEST, whose requestId is N/A.
     check:
-      response.status == 500
-      response.data.statusDesc == Opt.some("response failure, requestId mismatch")
+      response.status == 400
+      response.data.statusDesc ==
+        Opt.some("decode_rpc_failure: (kind: InvalidLengthField, field: \"meta\")")
       response.data.relayPeerCount == Opt.none(uint32)
 
   asyncTest "A push whose meta exceeds the limit is answered 400 by a node running the lightpush service - POST /lightpush/v3/message":
-    # TODO: logos-delivery#4433
     # Given
     let restLightPushTest = await RestLightPushTest.init(selfHostedLightPush = true)
     defer:
