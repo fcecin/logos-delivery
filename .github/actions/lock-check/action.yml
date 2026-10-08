@@ -1,0 +1,46 @@
+name: 'Lock check'
+description: >
+  Runs `nimble lock` in a checkout of logos-delivery, with its nimble.lock in
+  place, and compares the result with the committed lock. The checksums and
+  the order of the dependency lists do not count.
+
+inputs:
+  path:
+    description: 'The checkout of logos-delivery to check.'
+    default: '.'
+
+outputs:
+  succeeded:
+    description: '"true" when Nimble writes the committed lock again, else "false".'
+    value: ${{ steps.lock.outputs.succeeded }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Nimble
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: make install-nimble
+
+    - name: Run Nimble lock and compare with the committed lock
+      id: lock
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        nimble="$(make -s print-nimble-path)/nimble"
+        committed="$(mktemp)"
+        cp nimble.lock "${committed}"
+        relock() {
+          cp "${committed}" nimble.lock
+          rm -rf nimbledeps nimble.paths
+          "${nimble}" lock --localdeps -y
+        }
+        # Try a second time from an empty nimbledeps directory, so that a
+        # network error alone does not fail the check.
+        normalize='.packages | map_values(del(.checksums) | .dependencies |= sort)'
+        if (relock || relock) &&
+          diff -u <(jq -S "${normalize}" "${committed}") <(jq -S "${normalize}" nimble.lock); then
+          echo "succeeded=true" >> "${GITHUB_OUTPUT}"
+        else
+          echo "succeeded=false" >> "${GITHUB_OUTPUT}"
+        fi

@@ -35,6 +35,25 @@ jobs:
           nix shell --inputs-from . nixpkgs#nix-prefetch-git --command ./tools/gen-nix-deps.sh nimble.lock /tmp/deps.nix.fresh
           diff /tmp/deps.nix.fresh nix/deps.nix
 
+  # Fails when `nimble lock` cannot write the committed nimble.lock again from
+  # logos_delivery.nimble.
+  lock-freshness:
+    name: "nimble.lock freshness"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the lock
+        id: lock
+        uses: ./.github/actions/lock-check
+
+      - name: Fail if the lock check failed
+        if: ${{ steps.lock.outputs.succeeded != 'true' }}
+        run: |
+          echo "::error::Nimble cannot write the committed nimble.lock again"
+          exit 1
+
   # Runs Nimble setup in a new project that requires the checked-out commit of
   # logos-delivery, with no lockfile.
   consumer-deps:
