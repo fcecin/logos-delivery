@@ -227,6 +227,13 @@
     fetchSubmodules = true;
   };
 
+  sds = pkgs.fetchgit {
+    url = "https://github.com/logos-messaging/nim-sds.git";
+    rev = "4b08d508dbfa69c0e2e3883db67adf1fe5a0c994";
+    sha256 = "0d5d7m6njkab1sdznz5hqcy94z4pf9f7h679a5pfxckx7rhn798j";
+    fetchSubmodules = true;
+  };
+
   leopard = pkgs.fetchgit {
     url = "https://github.com/status-im/nim-leopard";
     rev = "2e8de41205ea44b6f33b5cad676bab215b36c987";
@@ -299,8 +306,8 @@
 
   secp256k1 = pkgs.fetchgit {
     url = "https://github.com/status-im/nim-secp256k1";
-    rev = "4e1ccd554777e4f9f790176bcffd8009a75fd2b7";
-    sha256 = "09q9gcnil4y7wcq9sgdnnrs8b25x1am84mrcljqjcwhm0apy8mb2";
+    rev = "d8f1288b7c72f00be5fc2c5ea72bf5cae1eafb15";
+    sha256 = "1qjrmwbngb73f6r1fznvig53nyal7wj41d1cmqfksrmivk2sgrn2";
     fetchSubmodules = true;
   };
 
@@ -311,17 +318,17 @@
     fetchSubmodules = true;
   };
 
-  sds = pkgs.fetchgit {
-    url = "https://github.com/logos-messaging/nim-sds.git";
-    rev = "4b08d508dbfa69c0e2e3883db67adf1fe5a0c994";
-    sha256 = "0d5d7m6njkab1sdznz5hqcy94z4pf9f7h679a5pfxckx7rhn798j";
-    fetchSubmodules = true;
-  };
-
   libp2p_mix = pkgs.fetchgit {
     url = "https://github.com/logos-co/nim-libp2p-mix";
     rev = "3f256aa03d2d36fea0b5206b41a6328da4f5c412";
     sha256 = "03vlvrf7cqhqjjnrg60wibbd7qmp16gsdpb3c9p0w4a4fd33w63y";
+    fetchSubmodules = true;
+  };
+
+  mix_rln_spam_protection = pkgs.fetchgit {
+    url = "https://github.com/logos-co/mix-rln-spam-protection-plugin";
+    rev = "86f1c02a6bf5d74008a7d11693e3488b85da636a";
+    sha256 = "151hzbx15vmqs3lqwd9x5p38rj8811zcvdg56szyq9m3sbf3n0si";
     fetchSubmodules = true;
   };
 
@@ -343,13 +350,6 @@
     url = "https://github.com/status-im/nim-dnsdisc";
     rev = "6cb1b7e3922645275043c68e476cac1501a45e55";
     sha256 = "02vxprjw4ixicdfczznns62izys9jgmsvy28rzlfd0wqg79gn9mc";
-    fetchSubmodules = true;
-  };
-
-  mix_rln_spam_protection = pkgs.fetchgit {
-    url = "https://github.com/logos-co/mix-rln-spam-protection-plugin";
-    rev = "86f1c02a6bf5d74008a7d11693e3488b85da636a";
-    sha256 = "151hzbx15vmqs3lqwd9x5p38rj8811zcvdg56szyq9m3sbf3n0si";
     fetchSubmodules = true;
   };
 
