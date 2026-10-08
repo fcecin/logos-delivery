@@ -67,6 +67,8 @@ jobs:
           - 'flake.nix'
           - 'flake.lock'
           - '!**/*.md'
+          consumer:
+          - 'logos_delivery.nimble'
 
     outputs:
       # A push to master runs everything so every master commit keeps a full CI record.
@@ -76,6 +78,7 @@ jobs:
       examples: ${{ steps.filter.outputs.examples }}
       docker: ${{ steps.filter.outputs.docker }}
       nix: ${{ steps.filter.outputs.nix }}
+      consumer: ${{ steps.filter.outputs.consumer }}
 
   # Also on nix changes: it is the only check that compares nix/deps.nix
   # against nimble.lock, and the Nix build itself never reads the lock.
@@ -388,6 +391,37 @@ jobs:
           "${NPH}" examples logos_delivery tests tools apps *.@(nim|nims|nimble)
           git diff --exit-code
 
+  # Fails when, with this PR, a project that requires logos-delivery cannot set
+  # up its dependencies. When the base branch fails too, this PR is not the
+  # cause. On master, the daily CI reports that failure.
+  consumer-deps:
+    needs: changes
+    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.consumer == 'true' }}
+    name: "Consumer dependency resolution"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up a consumer of this PR
+        id: pr
+        uses: ./.github/actions/consumer-setup
+        with:
+          revision: ${{ github.sha }}
+
+      - name: Set up a consumer of the base branch
+        id: base
+        if: ${{ steps.pr.outputs.succeeded != 'true' }}
+        uses: ./.github/actions/consumer-setup
+        with:
+          revision: ${{ github.event.pull_request.base.sha }}
+
+      - name: Fail if only this PR fails
+        if: ${{ steps.pr.outputs.succeeded != 'true' && steps.base.outputs.succeeded == 'true' }}
+        run: |
+          echo "::error::With this PR, a project that requires logos-delivery cannot set up its dependencies"
+          exit 1
+
   # The single required check for this workflow. A matrix or reusable-workflow
   # job skipped at job level reports under its raw name (e.g.
   # `build-${{ matrix.os }}`), so requiring the per-job names blocks forever.
@@ -408,6 +442,7 @@ jobs:
       - tests-e2e-rest
       - nix
       - lint
+      - consumer-deps
     runs-on: ubuntu-22.04
     steps:
       - name: Fail if a job failed or was cancelled
