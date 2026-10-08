@@ -566,7 +566,6 @@ suite "Waku v2 Rest API - lightpush":
       response.data.relayPeerCount == Opt.none(uint32)
 
   asyncTest "Push a message over the size limit - POST /lightpush/v3/message":
-    # TODO: logos-delivery#4431
     # Given
     let restLightPushTest = await RestLightPushTest.init()
     defer:
@@ -585,16 +584,14 @@ suite "Waku v2 Rest API - lightpush":
     )
 
     # Then
-    # The lightpush code INVALID_MESSAGE (420) has no HTTP status, so REST answers 500.
     check:
-      response.status == 500
+      response.status == 413
       response.data.statusDesc ==
         Opt.some(
-          fmt"Message size exceeded maximum of {DefaultMaxWakuMessageSize} bytes"
+          fmt"Message size exceeded maximum of: {DefaultMaxWakuMessageSize} bytes"
         )
 
-  asyncTest "A push over the size limit is answered 500 by a node running the lightpush service - POST /lightpush/v3/message":
-    # TODO: logos-delivery#4431
+  asyncTest "A push over the size limit is answered 413 by a node running the lightpush service - POST /lightpush/v3/message":
     # Given
     let restLightPushTest = await RestLightPushTest.init(selfHostedLightPush = true)
     defer:
@@ -613,14 +610,13 @@ suite "Waku v2 Rest API - lightpush":
 
     # Then
     check:
-      response.status == 500
+      response.status == 413
       response.data.statusDesc ==
         Opt.some(
-          fmt"Message size exceeded maximum of {DefaultMaxWakuMessageSize} bytes"
+          fmt"Message size exceeded maximum of: {DefaultMaxWakuMessageSize} bytes"
         )
 
   asyncTest "A push over the lightpush read cap is answered 413 - POST /lightpush/v3/message":
-    # TODO: logos-delivery#4431
     # Given
     let restLightPushTest = await RestLightPushTest.init()
     defer:
@@ -641,8 +637,7 @@ suite "Waku v2 Rest API - lightpush":
       response.status == 413
       response.data.statusDesc == Opt.some(fmt"request exceeds {maxRpcSize} bytes")
 
-  asyncTest "A push over the lightpush read cap is answered 500 by a node running the lightpush service - POST /lightpush/v3/message":
-    # TODO: logos-delivery#4431
+  asyncTest "A push over the lightpush read cap is answered 413 by a node running the lightpush service - POST /lightpush/v3/message":
     # Given
     let restLightPushTest = await RestLightPushTest.init(selfHostedLightPush = true)
     defer:
@@ -659,16 +654,15 @@ suite "Waku v2 Rest API - lightpush":
     )
 
     # Then
-    # A node pushing through itself never applies the lightpush read cap.
+    # A node pushing through itself has no read cap, so the relay size check answers.
     check:
-      response.status == 500
+      response.status == 413
       response.data.statusDesc ==
         Opt.some(
-          fmt"Message size exceeded maximum of {DefaultMaxWakuMessageSize} bytes"
+          fmt"Message size exceeded maximum of: {DefaultMaxWakuMessageSize} bytes"
         )
 
-  asyncTest "A push without pubsubTopic under static sharding is answered 500 - POST /lightpush/v3/message":
-    # TODO: logos-delivery#4431
+  asyncTest "A push without pubsubTopic under static sharding is answered 400 - POST /lightpush/v3/message":
     # Given
     let restLightPushTest = await RestLightPushTest.init()
     defer:
@@ -686,12 +680,11 @@ suite "Waku v2 Rest API - lightpush":
 
     # Then
     check:
-      response.status == 500
+      response.status == 400
       response.data.statusDesc ==
         Opt.some("Pubsub topic must be specified when static sharding is enabled")
 
-  asyncTest "A push without pubsubTopic under static sharding is answered 500 by a node running the lightpush service - POST /lightpush/v3/message":
-    # TODO: logos-delivery#4431
+  asyncTest "A push without pubsubTopic under static sharding is answered 400 by a node running the lightpush service - POST /lightpush/v3/message":
     # Given
     let restLightPushTest = await RestLightPushTest.init(selfHostedLightPush = true)
     defer:
@@ -709,12 +702,11 @@ suite "Waku v2 Rest API - lightpush":
 
     # Then
     check:
-      response.status == 500
+      response.status == 400
       response.data.statusDesc ==
         Opt.some("Pubsub topic must be specified when static sharding is enabled")
 
-  asyncTest "A push without pubsubTopic and with an invalid content topic under autosharding is answered 500 by a node running the lightpush service - POST /lightpush/v3/message":
-    # TODO: logos-delivery#4431
+  asyncTest "A push without pubsubTopic and with an invalid content topic under autosharding is answered 400 by a node running the lightpush service - POST /lightpush/v3/message":
     # Given
     let restLightPushTest = await RestLightPushTest.init(selfHostedLightPush = true)
     defer:
@@ -734,7 +726,7 @@ suite "Waku v2 Rest API - lightpush":
 
     # Then
     check:
-      response.status == 500
+      response.status == 400
       response.data.statusDesc ==
         Opt.some(
           "Invalid content-topic:invalid format: content-topic 'foo' must start with slash"
