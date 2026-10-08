@@ -1,3 +1,4 @@
+# Lock check test: a comment only.
 #!fmt: off
 
 import os
