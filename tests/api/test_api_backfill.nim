@@ -644,6 +644,72 @@ suite "Messaging API, Receive Service (backfill)":
       bytesBefore + float64(OutagePayload.len)
     discard await root.waitForRecord(topic, present = true, gap = Opt.some(false))
 
+  asyncTest "a restart fills the gap of the downtime, and off resets the state":
+    let root = createTempDir("recv-api-restart-", "")
+    defer:
+      removeDir(root)
+    let topic = ContentTopic("/waku/2/recv-restart-gap/proto")
+    let newTopic = ContentTopic("/waku/2/recv-restart-new/proto")
+    let net = await setupNetwork(topic, root)
+    defer:
+      await net.teardown()
+    # Phase 1: a live message, then a stop with no unsubscribe. Two messages of
+    # the topic and one of a new topic are archived while the process is down.
+    check await net.caughtUp()
+    await net.joinMesh()
+    await net.publishLive(topic, "before the stop")
+    check await net.events.waitForEvents(TestTimeout)
+    discard await root.waitForStoredLastReceivedAt()
+    # The record is live on disk before the stop, so the next start applies
+    # the restart outage to a live record.
+    discard await root.waitForRecord(
+      topic, present = true, gap = Opt.some(false), within = TestTimeout
+    )
+    (await net.subscriber.stop()).expect("stop")
+    net.subscriber = nil
+    await net.events.teardown()
+    net.events = nil
+    discard await net.archiveAt(topic, now(), "while down 1")
+    discard await net.archiveAt(topic, now(), "while down 2")
+    discard await net.archiveAt(newTopic, now() - Hour, "new topic while down")
+    # Phase 2: the next run. The subscribe of the topic that the app had
+    # fills the gap. A topic that the app never had gets nothing.
+    await net.restartSubscriber(root)
+    net.events.targetCount = 2
+    (await net.subscriber.messagingClient.subscribe(topic)).expect("subscribe")
+    (await net.subscriber.messagingClient.subscribe(newTopic)).expect("subscribe new")
+    check await net.events.waitForEvents(TestTimeout)
+    check await net.caughtUp()
+    check await net.events.nothingMore(2)
+    let got = net.events.payloads()
+    check "while down 1" in got and "while down 2" in got
+    check "new topic while down" notin got
+    check MissedPayload notin got
+    check net.events.receivedSources.allIt(it == MessageSource.History)
+    # Phase 3: a start with the flag off deletes the state. The disk check
+    # shows the reset. The downtime is not fetched. A later start with the
+    # flag on starts clean. The message is outside the variance of a
+    # subscribe, so no record has it in its gap.
+    (await net.subscriber.stop()).expect("stop")
+    net.subscriber = nil
+    discard await net.archiveAt(topic, now() - Hour, "while down 3")
+    await net.restartSubscriber(root, backfillOverrides(false))
+    (await net.subscriber.messagingClient.subscribe(topic)).expect("subscribe")
+    check await net.caughtUp()
+    check await net.events.nothingMore(0)
+    check (await root.storedRecords()).len == 0
+    check (await root.storedLastReceivedAt()).isNone()
+    (await net.subscriber.stop()).expect("stop")
+    net.subscriber = nil
+    await net.restartSubscriber(root)
+    let subscribedAt = now()
+    (await net.subscriber.messagingClient.subscribe(topic)).expect("subscribe")
+    check await net.caughtUp()
+    check await net.events.nothingMore(0)
+    # The record is new, from the subscribe and not from the downtime.
+    let fresh = (await root.waitForRecord(topic, present = true)).get()
+    check fresh.timestamp >= subscribedAt - net.variance
+
   asyncTest "an unsubscribe deletes the record, and a subscribe in an outage is a gap":
     let root = createTempDir("recv-api-unsub-", "")
     defer:
@@ -706,6 +772,31 @@ suite "Messaging API, Receive Service (backfill)":
     check "before its subscribe" notin got
     check events.receivedSources.allIt(it == MessageSource.History)
 
+  asyncTest "a messaging client restart keeps the subscriptions and fills their downtime":
+    ## The subscriptions are in place before the service starts again, so
+    ## the service seeds them at start, after it reads the records.
+    let root = createTempDir("recv-api-client-restart-", "")
+    defer:
+      removeDir(root)
+    let topic = ContentTopic("/waku/2/recv-client-restart/proto")
+    let net = await setupNetwork(topic, root)
+    defer:
+      await net.teardown()
+    check await net.caughtUp()
+    await net.joinMesh()
+    await net.waitLive()
+    discard await root.waitForRecord(
+      topic, present = true, gap = Opt.some(false), within = IdleTimeout
+    )
+    await net.subscriber.messagingClient.stop()
+    discard await net.archiveAt(topic, now(), "while the client was stopped")
+    check net.subscriber.messagingClient.start().isOk()
+    check await net.events.waitForEvents(TestTimeout)
+    check await net.caughtUp()
+    check await net.events.nothingMore(1)
+    check net.events.payloads() == @["while the client was stopped"]
+    check net.events.receivedSources == @[MessageSource.History]
+
   asyncTest "with the flag off, an outage is filled the same way":
     let root = createTempDir("recv-api-flag-off-", "")
     defer:
@@ -717,6 +808,22 @@ suite "Messaging API, Receive Service (backfill)":
     let got = await net.runOutage(topic)
     check got == @[LivePayload, OutagePayload]
     check (await root.storedRecords()).len == 0
+
+  asyncTest "a new process recovers what was archived while it was down":
+    ## The first session has the topic. The next process subscribes it again,
+    ## and recovers all messages archived while stopped, across two Store
+    ## pages. The message from before the first subscribe stays out.
+    let root = createTempDir("recv-api-process-", "")
+    defer:
+      removeDir(root)
+    let net = await setupNetwork(RestartTopic, root)
+    defer:
+      await net.teardown()
+    check await net.caughtUp()
+    (await net.subscriber.stop()).expect("stop previous session")
+    net.subscriber = nil
+    await net.archiveOffline()
+    await net.runRestartedProcess(root, OfflineCount)
 
   asyncTest "a Store peer that appears while live delivery is up wakes the worker":
     ## The node is live through a relay peer with no Store. The worker waits
@@ -822,3 +929,68 @@ suite "Messaging API, Receive Service (backfill)":
     check events.receivedSources == @[MessageSource.History]
     check await net.caughtUp()
     check await events.nothingMore(1)
+
+  asyncTest "messaging runs without durable storage":
+    ## Phase 1: a started node with `:memory:` keeps the records in memory.
+    block:
+      var node: LogosDelivery
+      lockNewGlobalBrokerContext:
+        node = (await LogosDelivery.new(testNodeConf(createApiNodeConf()))).expect(
+          "create node"
+        )
+        node.shortenIntervals()
+        (await node.start()).expect("start node")
+      check GetPersistency.request(node.waku.brokerCtx).isOk()
+      let topic = ContentTopic("/waku/2/recv-memory-only/proto")
+      (await node.messagingClient.subscribe(topic)).expect("subscribe")
+      check await node.caughtUp()
+      check node.isRunning()
+      (await node.stop()).expect("stop node")
+      check not node.isRunning()
+    ## Phase 2: no Persistency provider (transport not started). Messaging
+    ## starts, and the records stay in memory.
+    block:
+      var node: LogosDelivery
+      lockNewGlobalBrokerContext:
+        node = (await LogosDelivery.new(testNodeConf(createApiNodeConf()))).expect(
+          "create node"
+        )
+        node.shortenIntervals()
+      check GetPersistency.request(node.waku.brokerCtx).isErr()
+      check node.messagingClient.start().isOk()
+      (
+        await node.messagingClient.subscribe(
+          ContentTopic("/waku/2/recv-no-provider/proto")
+        )
+      ).expect("subscribe")
+      check await node.caughtUp()
+      check node.isRunning()
+      await node.messagingClient.stop()
+      check not node.isRunning()
+    ## Phase 3: an out-of-range backfill setting fails node creation. The
+    ## full range checks are in the unit test.
+    let bad = MessagingClientConf(backfillRequestTimeoutSeconds: Opt.some(0'i64))
+    lockNewGlobalBrokerContext:
+      check (await LogosDelivery.new(nodeConf(createApiNodeConf(), bad))).isErr()
+    ## Phase 4: a job whose file path is a directory keeps the records in
+    ## memory, with a warning. The node keeps running.
+    block:
+      let root = createTempDir("recv-api-badjob-", "")
+      defer:
+        removeDir(root)
+      createDir(root / "messaging.db")
+      var conf = createApiNodeConf()
+      conf.localStoragePath = root
+      var node: LogosDelivery
+      lockNewGlobalBrokerContext:
+        node = (await LogosDelivery.new(nodeConf(conf, backfillOverrides()))).expect(
+          "create node"
+        )
+        node.shortenIntervals()
+        (await node.start()).expect("start node")
+      (await node.messagingClient.subscribe(ContentTopic("/waku/2/recv-bad-job/proto"))).expect(
+        "subscribe"
+      )
+      check await node.caughtUp()
+      check node.isRunning()
+      (await node.stop()).expect("stop node")

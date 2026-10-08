@@ -6,7 +6,6 @@ import
   ./test_conf,
   ./test_api_send,
   ./test_api_subscription,
-  ./test_api_receive,
   ./test_api_backfill,
   ./test_api_health,
   ./test_messaging_rest,
