@@ -837,7 +837,6 @@ suite "Waku v2 Rest API - Filter V2":
         data["requestId"].getStr() == "unknown"
         data["statusDesc"].getStr().startsWith("BAD_REQUEST: Failed to decode request")
 
-    # TODO: logos-delivery#4432
     # When the subscribe body carries only a requestId
     let requestIdOnlyResponse = await issueRequest(
       restFilterTest.restServer.getAddress(ROUTE_FILTER_SUBSCRIPTIONS),
@@ -847,12 +846,17 @@ suite "Waku v2 Rest API - Filter V2":
     )
     let requestIdOnlyData = parseJson(requestIdOnlyResponse.data)
 
-    # Then the answer prints the response object that wraps an empty decode reason
+    # Then the answer carries the decoder's reason and not a printed response object
     check:
       requestIdOnlyResponse.status == 400
       requestIdOnlyData["requestId"].getStr() == "unknown"
-      requestIdOnlyData["statusDesc"].getStr() ==
-        "BAD_REQUEST: Failed to decode request: (status: 400 Bad Request, headers: , kind: Error, errobj: (status: 400 Bad Request, message: \"Invalid content body, could not decode. Unable to deserialize data: \", contentType: \"text/plain\"))"
+      requestIdOnlyData["statusDesc"].getStr().startsWith(
+        "BAD_REQUEST: Failed to decode request: Invalid content body, could not decode: Unable to deserialize data: body("
+      )
+      "errobj" notin requestIdOnlyData["statusDesc"].getStr()
+      requestIdOnlyData["statusDesc"].getStr().contains(
+        "Field `contentFilters` is missing"
+      )
 
   asyncTest "Unsubscribe after the service dropped the subscription clears the message cache - DELETE /filter/v2/subscriptions":
     # Given a subscription the service no longer holds, as after a timeout or restart

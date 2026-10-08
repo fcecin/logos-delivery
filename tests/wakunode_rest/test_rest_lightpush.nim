@@ -439,12 +439,26 @@ suite "Waku v2 Rest API - lightpush":
         restLightPushTest.restServer.getAddress(path), MethodPost, jsonHeader, body
       )
       let data = parseJson(response.data)
-      # TODO: logos-delivery#4432
-      # The answer prints the response object that wraps an empty decode reason.
+      # The answer carries the decoder's reason and not a printed response object.
       check:
         response.status == 400
-        data["statusDesc"].getStr() ==
-          "Invalid push request! (status: 400 Bad Request, headers: , kind: Error, errobj: (status: 400 Bad Request, message: \"Invalid content body, could not decode: Unable to deserialize data: \", contentType: \"text/plain\"))"
+        data["statusDesc"].getStr().startsWith(
+          "Invalid push request! Invalid content body, could not decode: Unable to deserialize data: body("
+        )
+        "errobj" notin data["statusDesc"].getStr()
+
+    # And the answer says which field is missing
+    let missingMessage = await issueRequest(
+      restLightPushTest.restServer.getAddress(path),
+      MethodPost,
+      jsonHeader,
+      invalidBodies[1],
+    )
+    check:
+      missingMessage.status == 400
+      parseJson(missingMessage.data)["statusDesc"].getStr().contains(
+        "Field `message` is missing"
+      )
 
     # When a field that must be base64 is not
     let notBase64Bodies = [
