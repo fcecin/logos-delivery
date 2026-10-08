@@ -44,7 +44,8 @@ requires "nim == 2.2.6",
   # v0.4.1: libp2p 2.4.0 requires websock >= 0.4.1 and locks this version.
   "https://github.com/status-im/nim-websock#0432dc445c500b20963ef4b76e585c1a3943c254",
   # Cryptography
-  "nimcrypto == 0.6.4", # 0.6.4 used in libp2p. Version 0.7.3 makes test to crash on Ubuntu.
+  "nimcrypto == 0.6.4",
+  "nimcrypto >= 0.7.0", # 0.6.4 used in libp2p. Version 0.7.3 makes test to crash on Ubuntu.
   # The mix RLN plugin requires this revision. secp256k1 0.8.0.8.0 also
   # requires nimcrypto >= 0.7.0, which conflicts with the pin above.
   "https://github.com/status-im/nim-secp256k1#d8f1288b7c72f00be5fc2c5ea72bf5cae1eafb15",
