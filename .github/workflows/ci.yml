@@ -69,6 +69,9 @@ jobs:
           - '!**/*.md'
           consumer:
           - 'logos_delivery.nimble'
+          lock:
+          - 'logos_delivery.nimble'
+          - 'nimble.lock'
 
     outputs:
       # A push to master runs everything so every master commit keeps a full CI record.
@@ -79,6 +82,7 @@ jobs:
       docker: ${{ steps.filter.outputs.docker }}
       nix: ${{ steps.filter.outputs.nix }}
       consumer: ${{ steps.filter.outputs.consumer }}
+      lock: ${{ steps.filter.outputs.lock }}
 
   # Also on nix changes: it is the only check that compares nix/deps.nix
   # against nimble.lock, and the Nix build itself never reads the lock.
@@ -121,6 +125,46 @@ jobs:
             exit 1
           fi
           echo "Nimble setup also fails on master, so this PR cannot be blamed."
+
+  # Fails when `nimble lock` fails for this PR. Don't fail CI for this PR if
+  # master was already broken.
+  lock-break-check:
+    needs: changes
+    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.lock == 'true' }}
+    name: "Lock break check"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check if this PR breaks the lock
+        id: pr
+        uses: ./.github/actions/lock-check
+
+      - name: Check out master
+        if: ${{ steps.pr.outputs.succeeded != 'true' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      - name: Check if master breaks the lock
+        id: base
+        if: ${{ steps.pr.outputs.succeeded != 'true' }}
+        uses: ./.github/actions/lock-check
+        with:
+          path: base
+
+      - name: Compare PR with master
+        if: ${{ steps.pr.outputs.succeeded != 'true' }}
+        env:
+          BASE_SUCCEEDED: ${{ steps.base.outputs.succeeded }}
+        run: |
+          if [ "${BASE_SUCCEEDED}" = true ]; then
+            echo "::error::With this PR, Nimble lock fails. Master passes."
+            exit 1
+          fi
+          echo "Nimble lock also fails on master, so this PR cannot be blamed."
 
   # Also feeds the e2e jobs with liblogosdelivery.so.
   build:
@@ -436,6 +480,7 @@ jobs:
       - changes
       - build-health
       - consumer-break-check
+      - lock-break-check
       - build
       - liblogosdelivery-default
       - build-windows
