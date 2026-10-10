@@ -12,7 +12,7 @@ type DeliveryState* {.pure.} = enum
   SuccessfullyValidated
     # message is known to be stored at least on one store node, thus validated
   FallbackRetry # retry sending with fallback processor if available
-  NextRoundRetry # try sending in next loop
+  NextRoundRetry # waits for a retry
   FailedToDeliver # final state of failed delivery
 
 type DeliveryTask* = ref object
@@ -22,8 +22,8 @@ type DeliveryTask* = ref object
   msgHash*: WakuMessageHash
   tryCount*: int
   heldRounds*: int
-    ## Rounds a processor left this task for the next round without attempting
-    ## it; reset when an attempt starts.
+    ## The retries for which a processor left this task with no attempt. An
+    ## attempt resets it.
   state*: DeliveryState
   deliveryTime*: Moment
   firstPropagatedTime*: Opt[Moment]
@@ -50,6 +50,13 @@ type DeliveryTask* = ref object
     ## it: the query would name the message from this node's own address.
   lastStoreQueryTime*: Opt[Moment]
     ## When a Store peer was last asked about this task, none before the first query.
+  running*: bool
+    ## Set by the send service when an attempt starts, with its admission or with
+    ## its send. The round that handles the end of the attempt clears it. The
+    ## cleanup and the Store loop do not touch a running task.
+  nextAttemptTime*: Opt[Moment]
+    ## When a task in `NextRoundRetry` is due again. A task with no time is due
+    ## at once.
   errorDesc*: string
 
 proc new*(

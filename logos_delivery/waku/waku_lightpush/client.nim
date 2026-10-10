@@ -44,8 +44,10 @@ proc sendPushRequest(
         dialFailure & ": " & $peer & " is not accessible",
       )
 
+  # Close in the background. A stop of the send service cancels this request,
+  # and it must not wait for the EOF of a peer that does not answer.
   defer:
-    await connection.closeWithEOF()
+    asyncSpawn connection.close()
 
   await connection.writeLP(req.encode().buffer)
 

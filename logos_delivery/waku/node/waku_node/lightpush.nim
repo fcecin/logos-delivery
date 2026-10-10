@@ -40,8 +40,8 @@ const MountWithoutRelayError* = "cannot mount lightpush because relay is not mou
 
 const MixReplyTimeout* = chronos.seconds(5)
   ## Time limit for one mix-routed lightpush, so a broken path costs one
-  ## attempt. It is short because one unanswered reply holds the send service's
-  ## whole batch for this long.
+  ## attempt. It is short because a send waits this long for a reply that does
+  ## not come. A retry also uses one retry slot of the send service for that time.
 
 proc publishOverMix*(
     node: WakuNode,
@@ -55,7 +55,15 @@ proc publishOverMix*(
   let publishFut =
     node.wakuLightpushClient.publish(Opt.some(pubsubTopic), message, conn)
   let deadline = sleepAsync(replyTimeout)
-  discard await race(FutureBase(publishFut), FutureBase(deadline))
+  try:
+    discard await race(FutureBase(publishFut), FutureBase(deadline))
+  except CancelledError as exc:
+    # A stop of the send service cancels this send, and `race` does not cancel
+    # its futures. End the publish and the timer too, so that no attempt goes
+    # on after the stop.
+    publishFut.cancelSoon()
+    deadline.cancelSoon()
+    raise exc
 
   if not publishFut.finished():
     await conn.reset()

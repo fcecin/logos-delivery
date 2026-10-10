@@ -7,7 +7,7 @@ The liblogosdelivery library emits four types of message delivery events and one
 ## Event Types
 
 ### 1. message_sent
-Emitted when a message is successfully accepted by the send service and queued for delivery.
+Emitted when the delivery of a message that is not ephemeral is confirmed, with store reliability on. A store node confirms a plain send, and the reply of the mix exit confirms a mixed send. In the other cases, a send ends at `message_propagated`.
 
 **JSON Structure:**
 ```json
@@ -41,7 +41,7 @@ Emitted when a message has been successfully propagated to neighboring nodes on 
 - `messageHash`: Hash of the message that was propagated
 
 ### 3. message_error
-Emitted when a send fails: rejected, retry window elapsed, parked too long, send queue full, ephemeral dropped near the rate limit, or store validation timed out.
+Emitted when a send fails: rejected, retry window elapsed, parked too long, ephemeral dropped near the rate limit, or store validation timed out.
 
 **JSON Structure:**
 ```json
@@ -164,14 +164,15 @@ logosdelivery_ctx_start_node(ctx, on_reply, userData);
 For a typical successful message send:
 
 1. **send** → Returns request ID
-2. **message_sent** → Message accepted and queued
-3. **message_propagated** → Message delivered to peers
+2. **message_propagated** → Message delivered to peers
+3. **message_sent** → Delivery confirmed
 
 For a failed message send:
 
 1. **send** → Returns request ID
-2. **message_sent** → Message accepted and queued
-3. **message_error** → Delivery failed with error description
+2. **message_error** → Delivery failed with error description
+
+The callback of `logosdelivery_send` gets the request ID before the event thread gets an event of that request. When the node refuses a send, for example when the send queue is full, `logosdelivery_send` returns an error and no request ID.
 
 ## Important Notes
 
