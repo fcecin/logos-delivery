@@ -10,9 +10,11 @@ import logos_delivery/waku/rln/rln_api
 
 export rln_api
 
-type QuotaProvider* = proc(): Future[Opt[EpochQuota]] {.async: (raises: []), gcsafe.}
+type QuotaProvider* =
+  proc(): Future[Opt[EpochQuota]] {.async: (raises: [CancelledError]), gcsafe.}
   ## `none` when RLN is not mounted — the signal to fall back to local
-  ## counting over the wall clock.
+  ## counting over the wall clock. A provider raises a cancel again, so that a
+  ## stop of the send service cancels the admission that waits for it.
 
 proc wallClockEpochIndex*(epochPeriodSec: uint64): uint64 =
   ## Absolute epoch (`unixTime div epochPeriodSec`), the same derivation RLN

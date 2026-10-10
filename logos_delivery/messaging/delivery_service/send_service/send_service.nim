@@ -25,11 +25,6 @@ template applyItIf*(varSeq, pred, op: untyped) =
       op
       varSeq[i] = it
 
-template forEach*(varSeq, op: untyped) =
-  for i in low(varSeq) .. high(varSeq):
-    let it {.inject.} = varSeq[i]
-    op
-
 const MaxTimeInCache* = chronos.minutes(1)
   ## Messages older than this time will get completely forgotten on publication and a
   ## feedback will be given when that happens
@@ -49,8 +44,9 @@ const DefaultMaxTaskCacheSize* = 1000
   ## Hard cap on tasks tracked by the send service; further sends are rejected.
 
 const ServiceLoopInterval* = chronos.seconds(1)
-  ## Interval at which we retry sends, report results and remove finished tasks.
-  ## It is also the pause between two Store validation rounds.
+  ## The time from the end of an attempt to the next retry of its task. It is
+  ## also the longest time between two cleanups of the task cache, and the pause
+  ## between two Store validation rounds.
 
 const ArchiveTime = chronos.seconds(3)
   ## Estimation of the time we wait until we start confirming that a message has been properly
@@ -60,10 +56,23 @@ const StoreValidationQueryTimeout = chronos.seconds(15)
   ## Bounds one Store validation query with its dials. It exceeds one
   ## `DefaultDialTimeout`, so a dead Store peer leaves time for another.
 
-const MaxSendsInFlight* = 4
-  ## The number of sends a service pass starts before it waits for them. One
-  ## unanswered mix reply (`MixReplyTimeout`) then holds only its batch, and the
-  ## batch size also caps the burst that one pass sends.
+const MaxConcurrentRetries* = 4
+  ## The maximum number of retries that run at the same time, in admission or
+  ## in a send. A slow retry uses only its own slot, and the next due retry
+  ## starts when a slot is free.
+  ## The limit also stops a backlog of retries from going out all at once. First
+  ## attempts have no limit.
+
+type
+  RunningAdmission = object
+    task: DeliveryTask
+    fut: Future[bool] ## The `admitAndProve` of the task.
+    retry: bool ## False for the first attempt of the task.
+
+  RunningSend = object
+    task: DeliveryTask
+    fut: Future[void] ## The `process` of the send processor chain.
+    retry: bool ## Only a retry counts toward `MaxConcurrentRetries`.
 
 type SendService* = ref object of RootObj
   brokerCtx: BrokerContext
@@ -71,10 +80,19 @@ type SendService* = ref object of RootObj
     ## Cache that contains the delivery task per message hash.
     ## This is needed to make sure the published messages are properly published
 
-  serviceLoopHandle: Future[void] ## handle that allows to stop the async task
+  schedulerHandle: Future[void] ## The scheduler loop, nil while stopped.
   stopping: bool
-    ## Set by `stopSendService`. It ends a pass that a caller drives directly,
-    ## which resumes from `drainInFlight` after the stop cancels its batch.
+    ## Set by `stopSendService` and cleared by `startSendService`. While it is
+    ## set, `enqueue` refuses tasks and a round starts no admission and no send.
+  wakeUp: AsyncEvent
+    ## Fired by `enqueue`, by `startSendService`, and by the end of each
+    ## admission and send. The scheduler runs a round after each wake-up.
+  admission: Opt[RunningAdmission]
+    ## The admission that runs, if any. Tasks pass admission one at a time, so
+    ## the epoch budget and the RLN message ids go in the order of admission. A
+    ## task that needs no admission does not wait for it.
+  sends: seq[RunningSend] ## The sends that run. `stopSendService` cancels them.
+  rounds: int ## The number of rounds that ran.
   sendProcessor: BaseSendProcessor
   rateLimitManager: RateLimitManager
     ## Charges first transmissions against the per-epoch budget; re-publishes
@@ -97,13 +115,6 @@ type SendService* = ref object of RootObj
     ## Also the pause of the Store validation loop while no Store peer is available.
   maxTaskCacheSize*: int
   serviceLoopInterval: timer.Duration
-  inFlightSends: int
-    ## Sends accepted but not yet in `taskCache`; counted against the cap so
-    ## concurrent sends cannot overshoot it.
-  inFlight: seq[tuple[task: DeliveryTask, fut: Future[void]]]
-    ## Sends started by the current pass and not yet waited for, kept so
-    ## `stopSendService` can cancel them: `allFutures` does not cancel its
-    ## children when it is cancelled itself.
 
 proc setupSendProcessorChain*(
     waku: Waku, anonymityLevel: AnonymityLevel
@@ -159,13 +170,19 @@ proc new*(
     maxValidationAge: timer.Duration = MaxTimeInCache,
     serviceLoopInterval: timer.Duration = ServiceLoopInterval,
 ): Result[T, string] =
+  # The scheduler waits at most this time between two rounds. A wait of zero
+  # never returns to the event loop.
+  if serviceLoopInterval <= ZeroDuration:
+    return err("serviceLoopInterval must be positive")
+
   let checkStoreForMessages = preferP2PReliability and waku.isStoreMounted()
 
   let sendService = SendService(
     brokerCtx: waku.brokerCtx,
     taskCache: newSeq[DeliveryTask](),
-    serviceLoopHandle: nil,
+    schedulerHandle: nil,
     stopping: false,
+    wakeUp: newAsyncEvent(),
     sendProcessor: sendProcessor,
     rateLimitManager: rateLimitManager,
     waku: waku,
@@ -180,11 +197,16 @@ proc new*(
 
   return ok(sendService)
 
-proc addTask(self: SendService, task: DeliveryTask) =
-  self.taskCache.addUnique(task)
+func isFull*(self: SendService): bool =
+  return self.taskCache.len >= self.maxTaskCacheSize
 
-proc isFull*(self: SendService): bool =
-  return self.taskCache.len + self.inFlightSends >= self.maxTaskCacheSize
+func checkAccepting*(self: SendService): Result[void, string] =
+  ## Refuses a new task while the service is stopped or the cache is full.
+  if self.stopping:
+    return err("Send service is stopped")
+  if self.isFull():
+    return err("Send queue full, retry later")
+  return ok()
 
 proc isStorePeerAvailable*(sendService: SendService): bool =
   return sendService.waku.hasStorePeer()
@@ -199,9 +221,12 @@ proc awaitsStoreValidation*(self: SendService, task: DeliveryTask): bool =
   ## True while a propagated task still needs a store node to confirm it. A task
   ## that went out over mix never does: the store query would carry its hash in
   ## clear from this node's own address. Every store confirmation passes here.
+  ## It is false for a running task. So the Store loop cannot confirm a task
+  ## before the round that takes its send reports the propagation.
   return
     self.storeConfirmationExpected(task) and
-    task.state == DeliveryState.SuccessfullyPropagated and not task.propagatedAnonymously
+    task.state == DeliveryState.SuccessfullyPropagated and not task.propagatedAnonymously and
+    not task.running
 
 func storeValidationKey(task: DeliveryTask): Moment =
   ## The last Store query time, or the first propagation for a task never asked.
@@ -271,7 +296,7 @@ proc checkMsgsInStore(self: SendService, batch: seq[DeliveryTask]) {.async.} =
 
 proc storeValidationLoop(self: SendService) {.async.} =
   ## Confirms propagated tasks against Store, one batch per round, apart from the
-  ## send loop, so that a slow Store peer does not delay sends.
+  ## scheduler, so that a slow Store peer does not delay sends.
   while true:
     var delay = self.serviceLoopInterval
     try:
@@ -342,7 +367,7 @@ proc reportTaskResult(self: SendService, task: DeliveryTask) =
   # Fail a task that passed admission and did not propagate in its window.
   # evaluateAndCleanUp fails propagated tasks that no store node confirms.
   if task.isDeliveryTimedOut(self.maxDeliveryTime):
-    # A processor that leaves a task for the next round can write why in
+    # A processor that leaves a task for a retry can write why in
     # `errorDesc`, as the mix processor does for a `Required` task it holds.
     # Report that reason if set.
     if task.errorDesc.len == 0:
@@ -371,24 +396,36 @@ proc reportTaskResult(self: SendService, task: DeliveryTask) =
     )
 
 proc evaluateAndCleanUp*(self: SendService) =
-  self.taskCache.forEach(self.reportTaskResult(it))
+  ## Reports each task that does not run, then removes the finished tasks and
+  ## fails the expired ones. A running task keeps its state and its place until
+  ## the round that handles the end of its attempt. A task in `Entry` waits for its first
+  ## admission, so no reaper fails it before that. The loops that emit go over a
+  ## snapshot, because a listener can call `enqueue` inside `emit`.
+  for task in self.taskCache.filterIt(
+    not it.running and it.state != DeliveryState.Entry
+  ):
+    self.reportTaskResult(task)
   self.taskCache.keepItIf(
-    it.state != DeliveryState.SuccessfullyValidated and
+    it.running or (
+      it.state != DeliveryState.SuccessfullyValidated and
       it.state != DeliveryState.FailedToDeliver
+    )
   )
 
   # remove propagated messages when no store confirmation will follow
   self.taskCache.keepItIf(
-    not (
-      it.state == DeliveryState.SuccessfullyPropagated and
-      not self.awaitsStoreValidation(it)
-    )
+    it.running or
+      not (
+        it.state == DeliveryState.SuccessfullyPropagated and
+        not self.awaitsStoreValidation(it)
+      )
   )
 
   # Fail propagated tasks that no store node confirmed within maxValidationAge.
   # Eviction keys on the state set here, so every failed task is reported.
   let expired = self.taskCache.filterIt(
-    it.firstPropagatedTime.isSome() and it.state != DeliveryState.SuccessfullyValidated and
+    not it.running and it.firstPropagatedTime.isSome() and
+      it.state != DeliveryState.SuccessfullyValidated and
       it.propagationAge() > self.maxValidationAge
   )
   for task in expired:
@@ -404,11 +441,11 @@ proc evaluateAndCleanUp*(self: SendService) =
       self.brokerCtx, task.requestId, task.msgHash.to0xHex(), task.errorDesc
     )
 
-  self.taskCache.keepItIf(it.state != DeliveryState.FailedToDeliver)
+  self.taskCache.keepItIf(it.running or it.state != DeliveryState.FailedToDeliver)
 
 proc reportTaskQueued(self: SendService, task: DeliveryTask) =
-  ## Announces a task parked for epoch budget, once per task. Retry rounds
-  ## re-enter the same branch, so the flag is what keeps the event one-shot.
+  ## Announces a task parked for epoch budget, once per task. Each retry enters
+  ## the same branch again, so the flag keeps the event to one.
   if task.queuedEventEmitted:
     return
 
@@ -418,13 +455,13 @@ proc reportTaskQueued(self: SendService, task: DeliveryTask) =
   task.queuedEventEmitted = true
 
 proc admitAndProve(self: SendService, task: DeliveryTask): Future[bool] {.async.} =
-  ## Gates a task's first transmission: charges one epoch slot, then attaches
-  ## an RLN proof — strictly in that order, so an over-budget message never
-  ## draws a nonce. The slot is charged at most once per task lifetime
-  ## (`firstAdmittedTime`); the proof attach is retried each round until it
-  ## sticks, then short-circuits, so a task charged but not yet proven never
-  ## ships bare. Returns false while the task must stay parked for a later round,
-  ## or once it is dropped (`FailedToDeliver`).
+  ## Charges one slot of the epoch budget, then attaches an RLN proof, in that
+  ## order, so a message over the budget never draws a nonce. A task is charged
+  ## at most once (`firstAdmittedTime`). The proof attach runs again at each
+  ## retry until it succeeds, and then it does nothing. So a task that is
+  ## charged but has no proof never goes out without one. Returns false while
+  ## the task must wait for a retry, or when the task is dropped
+  ## (`FailedToDeliver`).
   if task.firstAdmittedTime.isNone():
     # Ephemeral traffic is shed rather than queued so it cannot eat into the
     # budget left for durable messages.
@@ -446,180 +483,297 @@ proc admitAndProve(self: SendService, task: DeliveryTask): Future[bool] {.async.
       return false
     task.firstAdmittedTime = Opt.some(Moment.now())
 
-  ## A no-op when RLN is not mounted, or when a prior round already attached a
-  ## proof; otherwise draws the nonce and attaches. The message's epoch is fixed
-  ## by its timestamp, so a backend that has moved past that epoch, or spent its
-  ## budget, fails the task: no later round can prove it. Every other kind
-  ## retries next round.
+  ## This does nothing when RLN is not mounted, or when an earlier attempt
+  ## attached a proof. Else it draws the nonce and attaches the proof. The
+  ## timestamp of the message sets its epoch. So a backend that moved past that
+  ## epoch, or spent its budget, fails the task, because no retry can prove it.
+  ## Each other kind of error waits for a retry.
   task.msg = (await self.waku.attachRlnProof(task.msg)).valueOr:
     case error.kind
     of RlnErrorKind.Permanent, RlnErrorKind.BudgetExhausted:
       task.state = DeliveryState.FailedToDeliver
       task.errorDesc = "Failed to attach RLN proof: " & $error
     of RlnErrorKind.NotReady, RlnErrorKind.Transient:
-      debug "Failed to attach RLN proof, retrying next round",
+      debug "Failed to attach RLN proof, the task waits for a retry",
         requestId = task.requestId, error = $error
     return false
 
   return true
 
-proc drainInFlight(self: SendService) {.async.} =
-  ## Waits for the sends of the current batch. A send whose processor raised is
-  ## logged, and its task stays in the cache for the next round.
-  await allFutures(self.inFlight.mapIt(it.fut))
-  for send in self.inFlight:
-    if send.fut.cancelled():
-      continue
-    if send.fut.failed():
-      # The send path turns every remote error into a result, so a raise here is
-      # a local fault.
-      error "Send attempt raised, the task waits for the next round",
-        requestId = send.task.requestId,
-        msgHash = send.task.loggedHash(),
-        error = send.fut.error.msg
-      # A raise skips the tail of `process` that moves a hand-off to
-      # `NextRoundRetry`, and no pass selects `FallbackRetry`, so move it here.
-      if send.task.state == DeliveryState.FallbackRetry or
-          send.task.state == DeliveryState.Entry:
-        send.task.state = DeliveryState.NextRoundRetry
-  self.inFlight.setLen(0)
+func runningRetries(self: SendService): int =
+  ## The retries that send or pass admission now.
+  let retryInAdmission = self.admission.isSome() and self.admission.get().retry
+  return self.sends.countIt(it.retry) + int(retryInAdmission)
 
-proc trySendMessages*(self: SendService) {.async.} =
-  ## One service pass, driven by the loop. When a caller drives a pass directly,
-  ## `stopSendService` cancels its batch and `stopping` ends it.
-  let tasksToSend = self.taskCache.filterIt(it.state == DeliveryState.NextRoundRetry)
+func needsAdmission(self: SendService, task: DeliveryTask): bool =
+  ## True when the task needs a charge of the epoch budget or an RLN proof.
+  ## `admitAndProve` does both. A task that needs neither draws no budget and no
+  ## RLN message id, so it can send while another task passes admission.
+  return task.firstAdmittedTime.isNone() or self.waku.needsRlnProof(task.msg)
 
-  for task in tasksToSend:
+proc wakeUpOnEnd(self: SendService, fut: FutureBase) =
+  ## Wakes the scheduler when `fut` ends. Chronos runs the callback in a later
+  ## turn of the event loop, never inside the call that started `fut`.
+  let wakeUp = self.wakeUp
+  fut.addCallback(
+    proc(udata: pointer) {.gcsafe, raises: [].} =
+      wakeUp.fire()
+  )
+
+proc handleSendEnd(self: SendService, send: RunningSend, now: Moment) =
+  ## Clears `running` on the task of a finished or cancelled send. A task left
+  ## for a retry is due again after `serviceLoopInterval`.
+  let task = send.task
+  if send.fut.failed():
+    # The send path turns every remote error into a result, so a raise here is
+    # a local fault.
+    error "Send attempt raised, the task waits for its next retry",
+      requestId = task.requestId,
+      msgHash = task.loggedHash(),
+      error = send.fut.error.msg
+  # A raise or a cancel skips the tail of `process` that moves a hand-off or an
+  # untried task to `NextRoundRetry`. No round selects `FallbackRetry`, and a
+  # round selects an `Entry` task at once, so move both here.
+  if task.state == DeliveryState.FallbackRetry or task.state == DeliveryState.Entry:
+    task.state = DeliveryState.NextRoundRetry
+  task.running = false
+  if task.state == DeliveryState.NextRoundRetry:
+    task.nextAttemptTime = Opt.some(now + self.serviceLoopInterval)
+
+proc startSend(self: SendService, task: DeliveryTask, retry: bool) =
+  let fut = self.sendProcessor.process(task)
+  self.sends.add(RunningSend(task: task, fut: fut, retry: retry))
+  self.wakeUpOnEnd(fut)
+
+proc handleAdmissionEnd(self: SendService, admission: RunningAdmission, now: Moment) =
+  ## Starts the send of an admitted task. Else it clears `running` on the task,
+  ## and a task that did not fail waits for a retry.
+  let task = admission.task
+  if admission.fut.failed():
+    # The reapers fail the task with an event if admission keeps raising.
+    error "Admission raised, the task waits for its next retry",
+      requestId = task.requestId,
+      msgHash = task.loggedHash(),
+      error = admission.fut.error.msg
+  let admitted = admission.fut.completed() and admission.fut.read()
+  if admitted and not self.stopping:
+    self.startSend(task, admission.retry)
+    return
+  task.running = false
+  if task.state != DeliveryState.FailedToDeliver:
+    task.state = DeliveryState.NextRoundRetry
+    task.nextAttemptTime = Opt.some(now + self.serviceLoopInterval)
+
+func dueTime(task: DeliveryTask): Moment =
+  ## When a retry is due. A task with no time is due first.
+  return task.nextAttemptTime.get(Moment.low())
+
+func isDueRetry(task: DeliveryTask, now: Moment): bool =
+  return
+    task.state == DeliveryState.NextRoundRetry and not task.running and
+    task.dueTime() <= now
+
+proc startOrder(self: SendService, now: Moment): seq[DeliveryTask] =
+  ## The order in which a round tries to start tasks. The new tasks come first,
+  ## in cache order, so a new task never waits for a retry slot. Then the due
+  ## retries come, by due time. The sort is stable, so a tie keeps cache order,
+  ## and each due retry starts once before a retry starts twice.
+  var retries = self.taskCache.filterIt(it.isDueRetry(now))
+  retries.sort(
+    proc(a, b: DeliveryTask): int =
+      cmp(a.dueTime(), b.dueTime())
+  )
+  return
+    self.taskCache.filterIt(not it.running and it.state == DeliveryState.Entry) & retries
+
+proc startTask(self: SendService, task: DeliveryTask) =
+  ## Starts the admission of the task, or its send when it needs no admission.
+  ## Each task that left `Entry` had an attempt, so this one is a retry.
+  let retry = task.state != DeliveryState.Entry
+  task.running = true
+  task.nextAttemptTime = Opt.none(Moment)
+  if not retry:
+    self.waku.subscribe(task.msg.contentTopic).isOkOr:
+      debug "SendService: failed to subscribe to content topic",
+        contentTopic = task.msg.contentTopic, error = error
+  if not self.needsAdmission(task):
+    self.startSend(task, retry)
+    return
+  let fut = self.admitAndProve(task)
+  self.admission = Opt.some(RunningAdmission(task: task, fut: fut, retry: retry))
+  self.wakeUpOnEnd(fut)
+
+proc takeEndedAdmission(self: SendService, now: Moment) =
+  ## Takes the admission if it ended.
+  if self.admission.isSome() and self.admission.get().fut.finished():
+    let admission = self.admission.get()
+    self.admission = Opt.none(RunningAdmission)
+    self.handleAdmissionEnd(admission, now)
+
+proc runRound*(self: SendService, now = Moment.now()) =
+  ## One round of the scheduler, with no suspension. The scheduler loop runs it
+  ## after each wake-up. Tests also call it.
+  inc self.rounds
+  # A wake-up from now on gets a new round.
+  self.wakeUp.clear()
+
+  let ended = self.sends.filterIt(it.fut.finished())
+  self.sends.keepItIf(not it.fut.finished())
+  for send in ended:
+    self.handleSendEnd(send, now)
+
+  # `handleAdmissionEnd` and the walk over the start order read `stopping`. Chronos can deliver the
+  # cancel of a stop one turn late, so a round can run during a stop.
+  self.takeEndedAdmission(now)
+
+  # Report the sends that ended, in the round that takes them. So each event
+  # goes out when its send ends.
+  self.evaluateAndCleanUp()
+
+  # Go once over the start order. While an admission runs, only a task that
+  # needs no admission can start. A task that a listener adds during this walk
+  # starts in the next round, which its `enqueue` wakes.
+  for task in self.startOrder(now):
     if self.stopping:
-      # Break to the tail, which waits for the sends that this pass started.
       break
-    # Admit in order, so the epoch budget and the RLN nonce are charged in
-    # order. Only the network round trips overlap, `MaxSendsInFlight` at most.
-    let admitted =
-      try:
-        await self.admitAndProve(task)
-      except CancelledError as exc:
-        raise exc
-      except CatchableError as exc:
-        # The task is not sent and stays at `NextRoundRetry`; the reapers fail it
-        # with an event if admission keeps raising.
-        error "Admission raised, the task waits for the next round",
-          requestId = task.requestId, msgHash = task.loggedHash(), error = exc.msg
-        false
-    if not admitted:
+    if self.admission.isSome() and self.needsAdmission(task):
       continue
-    if self.stopping:
-      # Read `stopping` again: `admitAndProve` suspends when it makes an RLN
-      # proof, and a stop that ran meanwhile cannot cancel a send started now.
+    # No retry slot becomes free inside a round, so no later retry can start.
+    if task.state != DeliveryState.Entry and
+        self.runningRetries() >= MaxConcurrentRetries:
       break
-    self.inFlight.add((task: task, fut: self.sendProcessor.process(task)))
-    if self.inFlight.len >= MaxSendsInFlight:
-      await self.drainInFlight()
-  if self.inFlight.len > 0:
-    await self.drainInFlight()
+    self.startTask(task)
+    # An admission with no suspension ends inside `startTask`. Take it now, so
+    # that the next task can pass admission in this round. A task that failed
+    # its admission is reported in the next round, which the end of the
+    # admission wakes.
+    self.takeEndedAdmission(now)
 
-proc serviceLoop(self: SendService) {.async.} =
-  ## Retries sends, reports results, and removes finished or expired tasks.
+func roundCount*(self: SendService): int =
+  ## The number of rounds that ran. Tests read it to show that the scheduler
+  ## returns to the event loop between events.
+  return self.rounds
+
+func runningFutures(self: SendService): seq[FutureBase] =
+  ## The futures of the admission and of each send that runs.
+  var running: seq[FutureBase]
+  if self.admission.isSome():
+    running.add(self.admission.get().fut)
+  for send in self.sends:
+    running.add(send.fut)
+  return running
+
+proc runUntilIdle*(self: SendService) {.async.} =
+  ## Runs rounds until a round leaves no admission and no send that runs, and
+  ## no wake-up comes after it. It waits for them between the rounds. A test
+  ## drives a service that never started with it. A send that never ends keeps
+  ## it waiting.
   while true:
+    self.runRound()
+    let running = self.runningFutures()
+    await allFutures(running)
+    # Return to the event loop once in each round, also when each future had
+    # ended already. So the end of an admission that a round took can wake the
+    # next round, and a time limit around this proc can fire.
+    await sleepAsync(ZeroDuration)
+    if running.len == 0 and not self.wakeUp.isSet():
+      return
+
+func waitLimit(self: SendService, now: Moment): timer.Duration =
+  ## How long the scheduler waits when no event wakes it. It wakes for the next
+  ## cleanup, and for the next retry that can start. With no task, only an
+  ## event wakes it.
+  if self.taskCache.len == 0:
+    return InfiniteDuration
+  var delay = self.serviceLoopInterval
+  # A due retry that waits for a slot or for the admission needs no timer. The
+  # end of a send or of the admission wakes the scheduler.
+  if self.runningRetries() < MaxConcurrentRetries:
+    for task in self.taskCache:
+      if task.state == DeliveryState.NextRoundRetry and not task.running and
+          task.nextAttemptTime.isSome():
+        let left = task.nextAttemptTime.get() - now
+        if left > ZeroDuration and left < delay:
+          delay = left
+  return delay
+
+proc schedulerLoop(self: SendService) {.async.} =
+  ## Waits for a wake-up or a time limit, then runs a round.
+  var roundAt = Moment.now()
+  while true:
+    # Count the wait from the start of the last round, so that a retry that
+    # comes due during that round gets its timer.
+    discard await self.wakeUp.wait().withTimeout(self.waitLimit(roundAt))
+    roundAt = Moment.now()
     # A raise must not end the loop: nothing watches it until stop, and queued
     # tasks would never get a terminal event.
     try:
-      await self.trySendMessages()
-      self.evaluateAndCleanUp()
-    except CancelledError as exc:
-      raise exc
+      self.runRound(roundAt)
     except CatchableError as exc:
-      error "Send service pass raised, the loop continues", error = exc.msg
+      error "Send service round raised, the loop continues", error = exc.msg
+    # A listener can call `enqueue` inside a round, and so set the wake-up. Then
+    # the next `wait` does not suspend. Return to the event loop first, so that
+    # timers and other callbacks run between two rounds.
+    if self.wakeUp.isSet():
+      await sleepAsync(ZeroDuration)
     ## TODO: add circuit breaker to avoid infinite looping in case of persistent failures
     ## Use OnlineStateChange observers to pause/resume the loop
-    await sleepAsync(self.serviceLoopInterval)
+
+proc enqueue*(self: SendService, task: DeliveryTask): Result[void, string] =
+  ## Puts `task` in the cache and wakes the scheduler. It makes no send attempt
+  ## and emits no event, so the caller gets the result before any event of the
+  ## task. The scheduler starts the task in a later round. When a listener calls
+  ## `enqueue` inside a round, that round can start the task after the listener
+  ## returns.
+  assert(not task.isNil(), "task for enqueue must not be nil")
+  ?self.checkAccepting()
+  # The network keeps one copy of a message, and the cache keys tasks by hash.
+  if self.taskCache.anyIt(it.msgHash == task.msgHash):
+    return err("Send queue already has a message with the same hash")
+
+  debug "SendService.enqueue: task added to the send queue",
+    requestId = task.requestId, msgHash = task.msgHash.to0xHex()
+  self.taskCache.add(task)
+  self.wakeUp.fire()
+  return ok()
 
 proc startSendService*(self: SendService) =
   self.stopping = false
-  self.serviceLoopHandle = self.serviceLoop()
+  # Clear the event, so that the loop suspends at its first wait. The fire then
+  # runs the first round in a later turn of the event loop, after the caller
+  # continues. That round starts the tasks that `enqueue` added before the start.
+  self.wakeUp.clear()
+  self.schedulerHandle = self.schedulerLoop()
+  self.wakeUp.fire()
   if self.checkStoreForMessages:
     self.storeValidationHandle = self.storeValidationLoop()
 
 proc stopSendService*(self: SendService) {.async.} =
   self.stopping = true
   var loops: seq[Future[void]]
-  for handle in [self.serviceLoopHandle, self.storeValidationHandle]:
+  for handle in [self.schedulerHandle, self.storeValidationHandle]:
     if not handle.isNil():
       loops.add(handle)
   await cancelAndWait(loops)
-  self.serviceLoopHandle = nil
+  self.schedulerHandle = nil
   self.storeValidationHandle = nil
-  # `cancelAndWait` on the loop leaves the batch running, so cancel the sends
-  # here. Take the batch first: a pass in `drainInFlight` empties `inFlight` when
-  # its last send finishes, which happens inside one of these cancels.
-  let sends = self.inFlight
-  self.inFlight.setLen(0)
+
+  # The cancel of the scheduler leaves its admission and its sends running, so
+  # cancel them here. Take them first, so that no round takes them again.
+  let running = self.runningFutures()
+  let admission = self.admission
+  self.admission = Opt.none(RunningAdmission)
+  var sends: seq[RunningSend]
+  swap(sends, self.sends)
+  await cancelAndWait(running)
+
+  # A cancelled send gets no event. A send that ended before the stop keeps its
+  # state, and the first round after a restart reports it. Each task taken here
+  # is due at once after a restart.
+  let now = Moment.now()
+  if admission.isSome():
+    self.handleAdmissionEnd(admission.get(), now)
+    admission.get().task.nextAttemptTime = Opt.none(Moment)
   for send in sends:
-    if not send.fut.finished():
-      await send.fut.cancelAndWait()
-    # No pass selects `Entry` or `FallbackRetry`, and the drain of the owning
-    # pass sees an empty batch, so move a cancelled task to `NextRoundRetry` here.
-    if send.task.state == DeliveryState.FallbackRetry or
-        send.task.state == DeliveryState.Entry:
-      send.task.state = DeliveryState.NextRoundRetry
-
-proc send*(self: SendService, task: DeliveryTask) {.async.} =
-  assert(not task.isNil(), "task for send must not be nil")
-
-  debug "SendService.send: processing delivery task",
-    requestId = task.requestId, msgHash = task.msgHash.to0xHex()
-
-  if self.isFull():
-    error "Failed to send message",
-      requestId = task.requestId, msgHash = task.loggedHash(), error = "Send queue full"
-    MessageErrorEvent.emit(
-      self.brokerCtx, task.requestId, task.msgHash.to0xHex(), "Send queue full"
-    )
-    return
-
-  inc self.inFlightSends
-  defer:
-    dec self.inFlightSends
-
-  try:
-    # Yield once, so no event reaches the caller before its request id: the
-    # messaging API returns the id when `send` suspends, and chronos runs this
-    # expired timer after the queued callbacks that carry the id back. Counted
-    # before the yield, so the API's `isFull()` sees every send of a burst.
-    await sleepAsync(ZeroDuration)
-
-    self.waku.subscribe(task.msg.contentTopic).isOkOr:
-      debug "SendService.send: failed to subscribe to content topic",
-        contentTopic = task.msg.contentTopic, error = error
-
-    if not (await self.admitAndProve(task)):
-      if task.state == DeliveryState.FailedToDeliver:
-        self.reportTaskResult(task)
-        return
-      debug "SendService.send: parking task for a later round",
-        requestId = task.requestId, msgHash = task.msgHash.to0xHex()
-      task.state = DeliveryState.NextRoundRetry
-      self.addTask(task)
-      return
-
-    await self.sendProcessor.process(task)
-  except CancelledError:
-    # Do not re-raise: the messaging API `asyncSpawn`s `send`, and chronos turns
-    # a cancelled spawned future into a `FutureDefect`. Put the task back in the
-    # cache, also during a stop, so its request id still gets a terminal event.
-    task.state = DeliveryState.NextRoundRetry
-    self.addTask(task)
-    debug "Send cancelled", requestId = task.requestId
-    return
-  except CatchableError as exc:
-    # A raise must not leave `send`: chronos turns a failed spawned future into
-    # a `FutureDefect` that ends the process. Keep the task for the next round.
-    error "Send attempt raised, the task waits for the next round",
-      requestId = task.requestId, msgHash = task.loggedHash(), error = exc.msg
-    if task.state == DeliveryState.FallbackRetry or task.state == DeliveryState.Entry:
-      task.state = DeliveryState.NextRoundRetry
-    # Fall through to the tail, so a task that reached a terminal state before
-    # the raise still reports it.
-  reportTaskResult(self, task)
-  if task.state != DeliveryState.FailedToDeliver:
-    self.addTask(task)
+    self.handleSendEnd(send, now)
+    send.task.nextAttemptTime = Opt.none(Moment)

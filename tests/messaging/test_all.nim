@@ -8,4 +8,5 @@ import
   ./test_send_service_scheduler,
   ./test_send_service_mix,
   ./test_send_service_store_validation,
+  ./test_send_service_lightpush_stop,
   ./test_send_service_send_loop

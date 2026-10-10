@@ -1,6 +1,6 @@
 {.used.}
 
-import std/[options, osproc, times]
+import std/[options, osproc, sequtils, times]
 import chronos, testutils/unittests, results, stew/byteutils
 import
   logos_delivery/waku/[waku, waku_core, rln],
@@ -13,11 +13,12 @@ import
   logos_delivery/waku/rln/rln_lez/[rln_lez, transport],
   logos_delivery/waku/persistency/persistency,
   logos_delivery/api/events/messaging_client_events,
+  logos_delivery/messaging/messaging_client {.all.},
   logos_delivery/messaging/rate_limit_manager/rate_limit_manager,
   logos_delivery/messaging/delivery_service/send_service/
     [send_service, send_processor, delivery_task]
 import
-  ../testlib/[testasync, wakunodeconf],
+  ../testlib/[futures, sendservice, testasync, wakunodeconf],
   ../waku_rln_relay/utils_onchain,
   ../waku_rln_relay/rln/waku_rln_relay_utils
 
@@ -149,64 +150,178 @@ suite "SendService RLN proof attach - failing backend":
     await MessageErrorEvent.dropListener(waku.brokerCtx, listener)
     discard await waku.stop()
 
-  proc newService(processor: BaseSendProcessor): SendService =
+  proc newService(
+      processor: BaseSendProcessor, interval = ServiceLoopInterval
+  ): SendService =
     let manager =
       RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
-    return SendService.new(false, waku, manager, processor).expect("SendService.new")
+    return SendService
+      .new(false, waku, manager, processor, serviceLoopInterval = interval)
+      .expect("SendService.new")
 
-  asyncTest "send() fails the task at once":
+  asyncTest "a first attempt fails the task at once, with one event":
     let backend = waku.mountFailingRln(RlnErrorKind.Permanent)
     let processor = CountingProcessor()
     let service = newService(processor)
-    let task = buildTask("permanent-in-send")
+    let task = buildTask("permanent-in-first-attempt")
 
-    await service.send(task)
-    await sleepAsync(chronos.milliseconds(10))
+    check service.enqueue(task).isOk()
+    check await service.runUntilIdleInTime()
     check:
       task.state == DeliveryState.FailedToDeliver
       processor.calls == 0
-      errors.len == 1
-      errors[0].requestId == task.requestId
-      errors[0].error == PermanentReason
+      errors.mapIt(it.requestId) == @[task.requestId]
+      errors.mapIt(it.error) == @[PermanentReason]
 
-    # Not cached, so a later pass neither retries nor reports it again.
-    await service.trySendMessages()
-    service.evaluateAndCleanUp()
-    await sleepAsync(chronos.milliseconds(10))
+    # Removed, so a later round neither retries nor reports it again.
+    for _ in 0 ..< 3:
+      service.runRound()
+    check await service.runUntilIdleInTime()
     check:
       backend.attempts == 1
       errors.len == 1
 
-  asyncTest "a service pass fails a parked task whose attach turns Permanent":
-    ## The task parks while the backend is not ready. By the next round its
+  asyncTest "a retry fails a parked task whose attach turns Permanent":
+    ## The task parks while the backend is not ready. By the retry its
     ## message epoch can be out of reach, which the backend reports as Permanent.
     let backend = waku.mountFailingRln(RlnErrorKind.NotReady)
     let processor = CountingProcessor()
     let service = newService(processor)
-    let task = buildTask("permanent-in-pass")
+    let task = buildTask("permanent-in-retry")
 
-    await service.send(task)
-    await sleepAsync(chronos.milliseconds(10))
+    check service.enqueue(task).isOk()
+    check await service.runUntilIdleInTime()
     check:
       task.state == DeliveryState.NextRoundRetry
       errors.len == 0
 
     backend.failWith = RlnErrorKind.Permanent
-    await service.trySendMessages()
+    task.nextAttemptTime = Opt.none(Moment)
+    check await service.runUntilIdleInTime()
     check:
       task.state == DeliveryState.FailedToDeliver
       processor.calls == 0
+      errors.mapIt(it.requestId) == @[task.requestId]
+      errors.mapIt(it.error) == @[PermanentReason]
 
-    service.evaluateAndCleanUp()
-    await sleepAsync(chronos.milliseconds(10))
+    # Removed, so the next round does not draw for it again.
+    for _ in 0 ..< 3:
+      service.runRound()
+    check await service.runUntilIdleInTime()
     check:
+      backend.attempts == 2
       errors.len == 1
-      errors[0].requestId == task.requestId
-      errors[0].error == PermanentReason
 
-    # Evicted, so the next pass does not draw for it again.
-    await service.trySendMessages()
-    check backend.attempts == 2
+  asyncTest "a stop during the proof leaves the task for the restart":
+    ## The first proof waits for a reply. The stop cancels the admission, so the
+    ## task gets no event and is due at once after the restart. The second proof
+    ## succeeds at once.
+    let reply = newFuture[void]("proof-reply")
+    let proofStarted = newFuture[void]("proof-started")
+    let proofCalls = new int
+    proc generate(message: WakuMessage): Future[Result[seq[byte], RlnError]] {.async.} =
+      inc proofCalls[]
+      if proofCalls[] == 1:
+        proofStarted.complete()
+        await reply
+      return ok(@[1'u8, 2, 3])
+
+    waku.node.rlnPlugin = Opt.some(RlnPlugin(name: "fake", generateProof: generate))
+    let processor = CountingProcessor()
+    # A retry after the interval would come too late for the test.
+    let service = newService(processor, interval = chronos.minutes(1))
+    let task = buildTask("stop-in-proof")
+    let propagated = EventCounter()
+    let propagatedListener = MessagePropagatedEvent
+      .listen(
+        waku.brokerCtx,
+        proc(e: MessagePropagatedEvent) {.async: (raises: []).} =
+          propagated.inc(),
+      )
+      .expect("listen")
+    defer:
+      await MessagePropagatedEvent.dropListener(waku.brokerCtx, propagatedListener)
+
+    check service.enqueue(task).isOk()
+    service.startSendService()
+    check await proofStarted.withTimeout(FUTURE_TIMEOUT_MEDIUM)
+    check task.running
+
+    await service.stopSendService()
+    check:
+      reply.cancelled()
+      not task.running
+      task.state == DeliveryState.NextRoundRetry
+      task.nextAttemptTime.isNone()
+      task.msg.proof.len == 0
+      processor.calls == 0
+      errors.len == 0
+      propagated.value == 0
+
+    # Due at once, well before `serviceLoopInterval`.
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+    check await propagated.waitCount(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
+    check not await propagated.waitCount(2).withTimeout(FUTURE_TIMEOUT_SHORT)
+    check:
+      proofCalls[] == 2
+      processor.calls == 1
+      task.msg.proof == @[1'u8, 2, 3]
+      propagated.value == 1
+      errors.len == 0
+
+  asyncTest "a stop during the RLN quota read ends the admission before the proof":
+    ## The RLN quota provider raises the cancel of the stop again. So the
+    ## admission ends with no charge and no proof, and the stop does not wait
+    ## for a proof.
+    let quotaStarted = newFuture[void]("quota-started")
+    let quotaReply = newFuture[void]("quota-reply")
+    let proofReply = newFuture[void]("proof-reply")
+    let proofCalls = new int
+    proc getQuota(timestamp: uint64): Future[Result[EpochQuota, RlnError]] {.async.} =
+      if not quotaStarted.finished():
+        quotaStarted.complete()
+      await quotaReply
+      return ok(EpochQuota(epochIndex: 1, rateLimit: 100, remaining: 100))
+
+    proc generate(message: WakuMessage): Future[Result[seq[byte], RlnError]] {.async.} =
+      inc proofCalls[]
+      await proofReply
+      return ok(@[1'u8, 2, 3])
+
+    waku.node.rlnPlugin = Opt.some(
+      RlnPlugin(name: "fake", getEpochQuota: getQuota, generateProof: generate)
+    )
+    let manager = RateLimitManager
+      .new(
+        RateLimitConfig(enabled: true, epochPeriodSec: 600, messagesPerEpoch: 100),
+        rlnQuotaProvider(waku),
+      )
+      .expect("RateLimitManager.new")
+    let processor = CountingProcessor()
+    let service =
+      SendService.new(false, waku, manager, processor).expect("SendService.new")
+    let task = buildTask("stop-in-quota-read")
+
+    check service.enqueue(task).isOk()
+    service.startSendService()
+    check await quotaStarted.withTimeout(FUTURE_TIMEOUT_MEDIUM)
+
+    let stopping = service.stopSendService()
+    let stoppedInTime = await stopping.join().withTimeout(FUTURE_TIMEOUT)
+    proofReply.complete() # lets a stop that waits for the proof end
+    await stopping
+    check:
+      stoppedInTime
+      quotaReply.cancelled()
+      proofCalls[] == 0
+      task.firstAdmittedTime.isNone() # no charge
+      task.msg.proof.len == 0
+      not task.running
+      task.state == DeliveryState.NextRoundRetry
+      processor.calls == 0
+      errors.len == 0
 
 suite "SendService RLN proof attach - RLN mounted":
   var

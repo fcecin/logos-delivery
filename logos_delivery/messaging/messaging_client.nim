@@ -31,10 +31,14 @@ proc rlnQuotaProvider(waku: Waku): QuotaProvider =
   ## Sources the rate limit manager's epoch budget from RLN. The closure
   ## queries `waku` on each admission, so a node whose RLN mounts after
   ## construction upgrades from the local fallback automatically.
-  return proc(): Future[Opt[EpochQuota]] {.async: (raises: []), gcsafe.} =
+  return proc(): Future[Opt[EpochQuota]] {.async: (raises: [CancelledError]), gcsafe.} =
     let res =
       try:
         await waku.rlnEpochQuota(uint64(getTime().toUnix()))
+      except CancelledError as exc:
+        # A stop cancels the admission. Without this, the admission goes on
+        # into the proof, and the stop waits for it.
+        raise exc
       except CatchableError:
         return Opt.none(EpochQuota)
     let quota = res.valueOr:

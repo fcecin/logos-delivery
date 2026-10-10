@@ -231,6 +231,7 @@ jobs:
           retention-days: 1
 
   # Runs `make liblogosdelivery` with the default flags to test compile and link.
+  # On Linux it also runs the FFI send order test against that library.
   liblogosdelivery-default:
     needs: changes
     if: ${{ needs.changes.outputs.all == 'true' }}
@@ -256,6 +257,15 @@ jobs:
 
       - name: Check liblogosdelivery exports no OpenSSL symbols
         run: scripts/check_lib_exports.sh build/liblogosdelivery.${{ runner.os == 'macOS' && 'dylib' || 'so' }}
+
+      # The test skips when it does not find the library. The grep makes a skip
+      # fail the step.
+      - name: Run the FFI send order test
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          make V=1 -j1 test tests/ffi/test_ffi_send_order.nim 2>&1 | tee ffi_send_order.log
+          grep -q "1 OK, 0 FAILED, 0 SKIPPED" ffi_send_order.log
 
   build-windows:
     needs: changes
