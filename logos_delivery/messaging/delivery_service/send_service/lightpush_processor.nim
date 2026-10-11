@@ -60,7 +60,7 @@ method sendImpl*(
     # TODO: with a simple retry processor it might be more accurate to say `Sent`
   else:
     # Controversial state, publish says ok but no peer. It should not happen.
-    debug "Lightpush publish returned zero peers, request pushed back for next round",
+    debug "Lightpush publish returned zero peers, the task waits for a retry",
       requestId = task.requestId
     task.state = DeliveryState.NextRoundRetry
 

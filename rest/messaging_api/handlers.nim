@@ -42,7 +42,7 @@ const AutoshardingRequiredMsg =
 const SendQueueFullMsg = "Send queue full, retry later"
 
 const SendQueueFullRetryAfterSec = "1"
-  ## The send service removes finished tasks from its queue once per second.
+  ## The send service cleans its queue at least once per second.
 
 proc validateContentTopics(topics: openArray[ContentTopic]): Result[void, string] =
   ## Rejects a content topic that autosharding cannot resolve.
