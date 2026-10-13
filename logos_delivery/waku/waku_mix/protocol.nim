@@ -13,6 +13,7 @@ import
   libp2p_mix/multiaddr as mix_multiaddr,
   libp2p_mix/delay_strategy,
   libp2p_mix/spam_protection,
+  libp2p_mix/pool,
   libp2p/[multiaddress, peerid],
   eth/common/keys
 
@@ -20,7 +21,10 @@ import
   logos_delivery/waku/node/peer_manager,
   logos_delivery/waku/waku_core,
   logos_delivery/waku/waku_enr,
-  logos_delivery/waku/node/peer_manager/waku_peer_store
+  logos_delivery/waku/node/peer_manager/waku_peer_store,
+  ./peer_metadata
+
+export pool, peer_metadata
 
 logScope:
   topics = "waku mix"
@@ -34,6 +38,7 @@ type
     peerManager*: PeerManager
     clusterId: uint16
     pubKey*: Curve25519Key
+    peerMetadata*: MixPeerMetadataStore
     hopMissing: bool
       ## `true` when the last hop derivation found no address the encoder accepts.
       ## The hop that mix still holds is then a leftover, unusable even if it
@@ -100,14 +105,11 @@ proc parseMixNode*(entry: string): Result[MixNodePubInfo, string] =
   )
 
 proc poolSize*(mix: WakuMix): int =
-  ## The number of pool members a path can use. `nodePool.get` needs an IPv4 TCP
-  ## or QUIC-v1 address and a secp256k1 key; `MixNodePool.len` checks neither.
-  ## Walks the pool; `mixReady` calls it once per send attempt.
-  var routable = 0
-  for peerId in mix.nodePool.peerIds():
-    if mix.nodePool.get(peerId).isSome():
-      routable.inc()
-  return routable
+  ## The number of eligible library pool members.
+  return mix.nodePool.len
+
+func mixAddressPolicy*(allowAllAddresses: bool): PeerAddressPolicy =
+  if allowAllAddresses: defaultAddressPolicy else: publicDirectAddressPolicy
 
 proc updatePoolSize*(size: int) =
   ## Sets `mix_pool_size`; this is its only writer. The mount, `addBootNodes`
@@ -175,6 +177,7 @@ proc new*(
     mixPrivKey: Curve25519Key,
     bootnodes: seq[MixNodePubInfo],
     spamProtection: Opt[SpamProtection] = Opt.none(SpamProtection),
+    addressPolicy: PeerAddressPolicy = publicDirectAddressPolicy,
 ): WakuMixResult[T] =
   let mixPubKey = public(mixPrivKey)
   info "mixPubKey", mixPubKey = mixPubKey
@@ -190,6 +193,7 @@ proc new*(
     localMixNodeInfo,
     peermgr.switch,
     spamProtection = spamProtection,
+    poolConfig = MixPoolConfig(addressPolicy: addressPolicy),
     delayStrategy = Opt.some(
       if spamProtection.isSome():
         DelayStrategy(SpamProtectionDelayStrategy.new(rng = crypto.newRng()))
@@ -200,6 +204,7 @@ proc new*(
     ),
   )
 
+  m.peerMetadata = MixPeerMetadataStore.new(m.nodePool, peermgr.switch)
   processBootNodes(bootnodes, peermgr, m)
 
   let usable = m.poolSize()

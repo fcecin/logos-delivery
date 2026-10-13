@@ -39,9 +39,7 @@ logScope:
 const MountWithoutRelayError* = "cannot mount lightpush because relay is not mounted"
 
 const MixReplyTimeout* = chronos.seconds(5)
-  ## Time limit for one mix-routed lightpush, so a broken path costs one
-  ## attempt. It is short because one unanswered reply holds the send service's
-  ## whole batch for this long.
+  ## The reply wait after the library prepares the return path.
 
 proc publishOverMix*(
     node: WakuNode,
@@ -268,7 +266,11 @@ proc lightpushPublishHandler(
         let conn = node.wakuMix.toConnection(
           MixDestination.exitNode(peer.peerId),
           WakuLightPushCodec,
-          MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(1))),
+          MixParameters(
+            expectReply: Opt.some(true),
+            numSurbs: Opt.some(byte(1)),
+            replyTimeout: Opt.some(MixReplyTimeout),
+          ),
             # indicating we only want a single path to be used for reply hence numSurbs = 1
         ).valueOr:
           debug "Could not create mix connection"
@@ -277,7 +279,14 @@ proc lightpushPublishHandler(
             "Waku lightpush with mix not available",
           )
 
-        return await node.publishOverMix(conn, pubsubTopic, message)
+        defer:
+          await conn.close()
+        return await node.publishOverMix(
+          conn,
+          pubsubTopic,
+          message,
+          replyTimeout = node.wakuMix.replyHopTimeout + MixReplyTimeout,
+        )
       else:
         # Fail the build here, not every mixed send at runtime
         {.error: "mix sends need -d:libp2p_mix_experimental_exit_is_dest".}
