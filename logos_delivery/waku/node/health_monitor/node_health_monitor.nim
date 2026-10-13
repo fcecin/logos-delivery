@@ -51,6 +51,7 @@ type NodeHealthMonitor* = ref object
   healthLoopFut: Future[void]
   eventLoopMonitorFut: Future[void]
   healthUpdateEvent: AsyncEvent
+  mixPoolHandler: uint64
   connectionStatus: ConnectionStatus
   onConnectionStatusChange*: ConnectionStatusChangeHandler
   cachedProtocols: seq[ProtocolHealth]
@@ -307,9 +308,8 @@ proc hasMixExit(hm: NodeHealthMonitor): bool =
   let slotted = hm.node.peerManager.serviceSlots.getOrDefault(WakuLightPushCodec)
   if not slotted.isNil() and pool.get(slotted.peerId).isSome():
     return true
-  let peerStore = hm.node.switch.peerStore
   return pool.peerIds().anyIt(
-      peerStore[ProtoBook][it].contains(WakuLightPushCodec) and pool.get(it).isSome()
+      hm.node.wakuMix.peerMetadata.hasProtocol(it, WakuLightPushCodec)
     )
 
 proc getMixHealth(hm: NodeHealthMonitor): ProtocolHealth =
@@ -782,6 +782,12 @@ proc startHealthMonitor*(hm: NodeHealthMonitor): Result[void, string] =
   hm.healthUpdateEvent = newAsyncEvent()
   hm.healthUpdateEvent.fire()
 
+  if not hm.node.wakuMix.isNil():
+    hm.mixPoolHandler = hm.node.wakuMix.nodePool.addChangeHandler(
+      proc(event: MixPoolEvent) {.gcsafe, raises: [].} =
+        hm.onMixPoolChange()
+    )
+
   hm.healthLoopFut = hm.healthLoop()
   hm.eventLoopMonitorFut = eventLoopMonitorLoop(
     proc(lagTooHigh: bool) {.gcsafe, raises: [].} =
@@ -795,6 +801,9 @@ proc startHealthMonitor*(hm: NodeHealthMonitor): Result[void, string] =
   return ok()
 
 proc stopHealthMonitor*(hm: NodeHealthMonitor) {.async.} =
+  if hm.mixPoolHandler != 0 and not hm.node.wakuMix.isNil():
+    hm.node.wakuMix.nodePool.removeChangeHandler(hm.mixPoolHandler)
+    hm.mixPoolHandler = 0
   if not isNil(hm.onlineMonitor):
     await hm.onlineMonitor.stopOnlineMonitor()
 
@@ -830,17 +839,11 @@ proc new*(
     connectionStatus: ConnectionStatus.Disconnected,
     strength: initTable[WakuProtocol, int](),
   )
-  # Mix peers are learnt from discovery without any peer event, so without this
-  # a filled (or drained) pool would wait for an unrelated trigger to show up.
-  node.switch.peerStore[MixPubKeyBook].addHandler(
-    proc(peerId: PeerId) {.gcsafe, raises: [].} =
-      hm.onMixPoolChange()
-  )
   # ENR discovery and identify learn a pool peer's lightpush (its exit role)
   # through ProtoBook alone, without writing its mix key.
   node.switch.peerStore[ProtoBook].addHandler(
     proc(peerId: PeerId) {.gcsafe, raises: [].} =
-      if peerId in node.switch.peerStore[MixPubKeyBook]:
+      if not node.wakuMix.isNil() and node.wakuMix.nodePool.contains(peerId):
         hm.onMixPoolChange()
   )
   return hm

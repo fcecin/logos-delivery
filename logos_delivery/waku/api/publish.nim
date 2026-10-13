@@ -92,8 +92,11 @@ proc selectMixLightpushPeer*(self: Waku, shard: PubsubTopic): Opt[RemotePeerInfo
   ## `exit_is_dest` the server is the last node of the sphinx path, so the mix
   ## pool must hold a `MixPubInfo` for it. The selection reads the service slot
   ## first, then draws one usable pool member uniformly.
+  if self.node.wakuMix.isNil():
+    return Opt.none(RemotePeerInfo)
   let peerStore = self.node.peerManager.switch.peerStore
-  let pool = MixNodePool.new(peerStore)
+  let pool = self.node.wakuMix.nodePool
+  let metadata = self.node.wakuMix.peerMetadata
 
   let slotted = self.node.peerManager.serviceSlots.getOrDefault(WakuLightPushCodec)
   if not slotted.isNil() and pool.get(slotted.peerId).isSome():
@@ -104,9 +107,9 @@ proc selectMixLightpushPeer*(self: Waku, shard: PubsubTopic): Opt[RemotePeerInfo
 
   var exits: seq[PeerId]
   for peerId in pool.peerIds():
-    if not peerStore[ProtoBook][peerId].contains(WakuLightPushCodec):
+    if not metadata.hasProtocol(peerId, WakuLightPushCodec):
       continue
-    if not peerStore.hasShard(peerId, shardInfo.clusterId, shardInfo.shardId):
+    if not metadata.hasShard(peerId, shardInfo.clusterId, shardInfo.shardId):
       continue
     if pool.get(peerId).isSome():
       exits.add(peerId)

@@ -1,3 +1,5 @@
+from logos_delivery/waku/waku_mix import mixAddressPolicy
+
 ## chat2 is an example of usage of Waku v2. For suggested usage options, please
 ## see dingpu tutorial in docs folder.
 
@@ -462,7 +464,14 @@ proc processInput(rfd: AsyncFD, rng: crypto.Rng) {.async.} =
     error "failed to generate mix key pair", error = error
     return
 
-  (await node.mountMix(conf.clusterId, mixPrivKey, conf.mixnodes)).isOkOr:
+  (
+    await node.mountMix(
+      conf.clusterId,
+      mixPrivKey,
+      conf.mixnodes,
+      addressPolicy = mixAddressPolicy(conf.mixAllowAllAddresses),
+    )
+  ).isOkOr:
     error "failed to mount waku mix protocol: ", error = $error
     quit(QuitFailure)
 

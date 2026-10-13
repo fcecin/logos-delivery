@@ -638,7 +638,11 @@ proc addMixPeer(node: WakuNode, port: int, lightpush = false) =
 
 proc mountTestMix(node: WakuNode) {.async.} =
   let (mixPrivKey, _) = generateKeyPair().expect("mix key pair")
-  (await node.mountMix(DefaultClusterId, mixPrivKey, @[])).expect("failed to mount mix")
+  (
+    await node.mountMix(
+      DefaultClusterId, mixPrivKey, @[], addressPolicy = defaultAddressPolicy
+    )
+  ).expect("failed to mount mix")
 
 suite "Health Monitor - mix readiness":
   asyncTest "Mix health follows the pool size":
@@ -802,8 +806,8 @@ suite "Health Monitor - mix readiness":
       nodeA.addMixPeer(62000 + i, lightpush = true)
     check await waitForStatus(ConnectionStatus.PartiallyConnected)
 
-    # Pruning a single mix peer takes the pool below the minimum again.
-    nodeA.peerManager.switch.peerStore.delete(nodeA.wakuMix.nodePool.peerIds()[0])
+    # Removing a mix node takes the pool below the minimum again.
+    discard nodeA.wakuMix.nodePool.remove(nodeA.wakuMix.nodePool.peerIds()[0])
     check await waitForStatus(ConnectionStatus.Disconnected)
 
     await monitorA.stopHealthMonitor()
