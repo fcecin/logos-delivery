@@ -451,7 +451,11 @@ suite "SendService - anonymity level with a mounted mix":
   asyncSetup:
     waku = (await Waku.new(testConf())).expect("Waku.new")
     let mixKeys = generateKeyPair().expect("mix key pair")
-    (await waku.node.mountMix(3'u16, mixKeys.privateKey, @[])).isOkOr:
+    (
+      await waku.node.mountMix(
+        3'u16, mixKeys.privateKey, @[], addressPolicy = defaultAddressPolicy
+      )
+    ).isOkOr:
       raiseAssert "Failed to mount mix: " & $error
 
   asyncTeardown:
@@ -894,6 +898,12 @@ suite "Mix send path - exit peer selection":
 
   asyncSetup:
     waku = (await Waku.new(testConf())).expect("Waku.new")
+    let keys = generateKeyPair().expect("mix keys")
+    (
+      await waku.node.mountMix(
+        3'u16, keys.privateKey, @[], addressPolicy = defaultAddressPolicy
+      )
+    ).expect("mount mix")
 
   asyncTeardown:
     discard await waku.stop()
@@ -1163,6 +1173,7 @@ suite "Mix send path - the node's own hop":
         3'u16,
         mixKeys.privateKey,
         @[],
+        addressPolicy = defaultAddressPolicy,
       )
       .expect("WakuMix.new")
     for i in 0 ..< MinMixPoolSize:
