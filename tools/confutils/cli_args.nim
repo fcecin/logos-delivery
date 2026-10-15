@@ -711,9 +711,16 @@ hence would have reachability issues.""",
 
   mixnodes* {.
     desc:
-      "A mix node to seed the pool with, as multiaddr:mixPubKey. The multiaddress carries a /p2p/<peer id> on TCP or QUIC-v1 over IPv4 (directly or through a circuit relay), or names its host (dns4), which is resolved after the mount. Argument may be repeated. (requires --mix)",
+      "A mix node to seed the pool with, as multiaddr:mixPubKey. The multiaddress carries a /p2p/<peer id> on TCP or QUIC-v1 over IPv4, or names its host (dns4), which is resolved after the mount. An address that is not public, or a circuit relay route, needs --mix-allow-all-addresses=true. Argument may be repeated. (requires --mix)",
     name: "mixnode"
   .}: seq[MixNodePubInfo]
+
+  mixAllowAllAddresses* {.
+    desc:
+      "Turn off the mix hop address filter. Use it for a local simulation, a test or a private network. (requires --mix)",
+    defaultValue: false,
+    name: "mix-allow-all-addresses"
+  .}: bool
 
   mixRlnRegistryId* {.
     desc:
@@ -1237,6 +1244,7 @@ func ignoredFlagWarnings*(
     ("quic-port", "quic-support", quic, changed(quicPort)),
     ("mixkey", "mix", mix, changed(mixkey)),
     ("mixnode", "mix", mix, n.mixnodes.len > 0),
+    ("mix-allow-all-addresses", "mix", mix, changed(mixAllowAllAddresses)),
     ("kad-bootstrap-node", kadParent, kad, changed(kadBootstrapNodes)),
     ("kad-random-lookup-interval", kadParent, kad, changed(kadRandomLookupIntervalSec)),
     (
@@ -1446,6 +1454,7 @@ proc toWakuConf*(n: WakuNodeConf): ConfResult[WakuConf] =
       )
     )
   b.mixConf.withMixNodes(n.mixnodes)
+  b.mixConf.withAllowAllAddresses(n.mixAllowAllAddresses)
   if n.mixkey.isSome():
     b.mixConf.withMixKey(n.mixkey.get())
 

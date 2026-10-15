@@ -91,6 +91,13 @@ type
       name: "mixnode"
     .}: seq[MixNodePubInfo]
 
+    mixAllowAllAddresses* {.
+      desc:
+        "Turn off the mix hop address filter. Use it for a local simulation, a test or a private network.",
+      defaultValue: false,
+      name: "mix-allow-all-addresses"
+    .}: bool
+
     keepAlive* {.
       desc: "Enable keep-alive for idle connections: true|false",
       defaultValue: false,

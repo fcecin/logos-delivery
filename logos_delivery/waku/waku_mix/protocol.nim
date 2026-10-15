@@ -13,6 +13,7 @@ import
   libp2p_mix/multiaddr as mix_multiaddr,
   libp2p_mix/delay_strategy,
   libp2p_mix/spam_protection,
+  libp2p_mix/pool,
   libp2p/[multiaddress, peerid],
   eth/common/keys
 
@@ -21,6 +22,8 @@ import
   logos_delivery/waku/waku_core,
   logos_delivery/waku/waku_enr,
   logos_delivery/waku/node/peer_manager/waku_peer_store
+
+export pool
 
 logScope:
   topics = "waku mix"
@@ -109,6 +112,13 @@ proc poolSize*(mix: WakuMix): int =
       routable.inc()
   return routable
 
+func mixAddressPolicy*(allowAllAddresses: bool): PeerAddressPolicy =
+  ## The hop address policy of the mount. `publicDirectAddressPolicy` accepts
+  ## only public addresses that are not relay routes. `allowAllAddresses` picks
+  ## `defaultAddressPolicy`, which accepts all addresses, for a local simulation,
+  ## a test or a private network.
+  if allowAllAddresses: defaultAddressPolicy else: publicDirectAddressPolicy
+
 proc updatePoolSize*(size: int) =
   ## Sets `mix_pool_size`; this is its only writer. The mount, `addBootNodes`
   ## and each health pass publish the count they just read: routability can
@@ -120,6 +130,7 @@ proc processBootNodes(
     bootnodes: seq[MixNodePubInfo], peermgr: PeerManager, mix: WakuMix
 ) =
   var count = 0
+  var refused: seq[string]
   for node in bootnodes:
     let pInfo = parsePeerInfo(node.multiAddr).valueOr:
       error "Failed to get peer id from multiaddress: ",
@@ -152,15 +163,21 @@ proc processBootNodes(
     let mixPubInfo = MixPubInfo.init(peerId, multiAddr, node.pubKey, peerPubKey.skkey)
     mix.nodePool.add(mixPubInfo)
     count.inc()
+    if not mix.nodePool.accepts(multiAddr):
+      refused.add(node.multiAddr)
 
     peermgr.addPeer(
       RemotePeerInfo.init(
         peerId, @[multiAddr], publicKey = peerPubKey, mixPubKey = Opt.some(node.pubKey)
       )
     )
-  # `count` is the accepted entries; the addresses of one peer make one member.
+  # `count` is the number of entries added to the pool, also the entries that
+  # the address policy refuses. The addresses of one peer make one member.
   let routable = mix.poolSize()
   info "Using mix bootstrap nodes", entries = count, poolSize = routable
+  if refused.len > 0:
+    warn "Configured mix nodes that the address policy refuses stay off mix paths",
+      refused = refused
 
 proc addBootNodes*(mix: WakuMix, bootnodes: seq[MixNodePubInfo]) =
   ## Adds bootstrap nodes resolved after the mount, and publishes the pool size.
@@ -175,6 +192,7 @@ proc new*(
     mixPrivKey: Curve25519Key,
     bootnodes: seq[MixNodePubInfo],
     spamProtection: Opt[SpamProtection] = Opt.none(SpamProtection),
+    addressPolicy: PeerAddressPolicy = publicDirectAddressPolicy,
 ): WakuMixResult[T] =
   let mixPubKey = public(mixPrivKey)
   info "mixPubKey", mixPubKey = mixPubKey
@@ -190,6 +208,7 @@ proc new*(
     localMixNodeInfo,
     peermgr.switch,
     spamProtection = spamProtection,
+    addressPolicy = addressPolicy,
     delayStrategy = Opt.some(
       if spamProtection.isSome():
         DelayStrategy(SpamProtectionDelayStrategy.new(rng = crypto.newRng()))

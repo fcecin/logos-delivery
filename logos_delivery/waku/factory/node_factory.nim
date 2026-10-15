@@ -38,6 +38,7 @@ import
   ../waku_store,
   ../waku_store/common as store_common,
   ../waku_filter_v2,
+  ../waku_mix,
   ../waku_peer_exchange,
   ../discovery/waku_kademlia,
   ../discovery/service_discovery,
@@ -179,7 +180,15 @@ proc setupProtocols(
       node.wakuMixRln = ModuleRlnProtection.new(mixConf.mixRlnConfig.get(), rlnMixCall).valueOr:
         return err("failed to create Mix RLN adapter: " & error)
       protection = Opt.some(SpamProtection(node.wakuMixRln))
-    (await node.mountMix(conf.clusterId, mixConf.mixKey, mixConf.mixnodes, protection)).isOkOr:
+    (
+      await node.mountMix(
+        conf.clusterId,
+        mixConf.mixKey,
+        mixConf.mixnodes,
+        protection,
+        addressPolicy = mixAddressPolicy(mixConf.allowAllAddresses),
+      )
+    ).isOkOr:
       return err("failed to mount waku mix protocol: " & $error)
 
   # Setup service discovery
