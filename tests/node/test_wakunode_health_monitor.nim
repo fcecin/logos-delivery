@@ -853,8 +853,8 @@ suite "Health Monitor - mix readiness":
       nodeA.addMixPeer(62000 + i, lightpush = true)
     check await waitForStatus(ConnectionStatus.PartiallyConnected)
 
-    # Pruning a single mix peer takes the pool below the minimum again.
-    nodeA.peerManager.switch.peerStore.delete(nodeA.wakuMix.nodePool.peerIds()[0])
+    # The removal of one pool member takes the pool below the minimum again.
+    discard nodeA.wakuMix.nodePool.remove(nodeA.wakuMix.nodePool.peerIds()[0])
     check await waitForStatus(ConnectionStatus.Disconnected)
 
     await monitorA.stopHealthMonitor()
