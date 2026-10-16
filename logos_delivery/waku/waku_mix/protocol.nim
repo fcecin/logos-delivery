@@ -63,6 +63,12 @@ declarePublicCounter logos_delivery_mix_dial_failures,
   "Failed dials of mix hops that took the hop off mix paths"
 
 type
+  SelfHopSource* {.pure.} = enum
+    ## The source of the self hop address.
+    Observed ## Other peers observed the host, as discv5 and autonat do.
+    Local ## An address of this machine, or a port mapping of its gateway.
+    Configured ## The operator stated the address.
+
   WakuMix* = ref object of ConnectedReplyMixProtocol
     peerManager*: PeerManager
     clusterId: uint16
@@ -73,6 +79,8 @@ type
       ## `true` when the last hop derivation found no address the encoder accepts.
       ## The hop that mix still holds is then a leftover, unusable even if it
       ## encodes.
+    advertised*: bool ## True while this node advertises itself as a mix node.
+    notAdvertisingReason*: string ## The last logged reason not to advertise.
 
   WakuMixResult*[T] = Result[T, string]
 
@@ -432,6 +440,10 @@ proc selfHopUsable*(mix: WakuMix): bool =
     return false
   let info = mix.localMixPubInfo()
   return mix_multiaddr.multiAddrToBytes(info.peerId, info.multiAddr).isOk()
+
+proc selfHopAllowed*(mix: WakuMix): bool =
+  ## True when the encoder and the address policy accept the self hop.
+  return mix.selfHopUsable() and mix.pool.accepts(mix.localMixPubInfo().multiAddr)
 
 proc updateSelfHop*(
     mix: WakuMix, preferred: seq[MultiAddress], fallback: seq[MultiAddress]
