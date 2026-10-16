@@ -1,6 +1,6 @@
 {.push raises: [].}
 
-import std/strutils
+import std/[sequtils, strutils]
 import chronicles, chronos, results, metrics
 
 import
@@ -15,11 +15,12 @@ import
   libp2p_mix/spam_protection,
   libp2p_mix/pool,
   libp2p_mix/managed_pool,
-  libp2p/[multiaddress, peerid],
+  libp2p/[multiaddress, peerid, connmanager],
   eth/common/keys
 
 import
   logos_delivery/waku/node/peer_manager,
+  logos_delivery/waku/node/delivery_dialer,
   logos_delivery/waku/waku_core,
   logos_delivery/waku/waku_enr,
   logos_delivery/waku/node/peer_manager/waku_peer_store,
@@ -40,6 +41,12 @@ const DiscoveredMixNodeTtl* = chronos.hours(1)
 
 const MaxDiscoveredMixNodes* = 1000
   ## The maximum number of discovered mix nodes in the pool.
+
+const MixFailureBackoff* = chronos.minutes(30)
+  ## How long a discovered mix node stays off mix paths after a failed dial.
+
+declarePublicCounter logos_delivery_mix_dial_failures,
+  "Failed dials of mix hops that took the hop off mix paths"
 
 type
   WakuMix* = ref object of MixProtocol
@@ -116,6 +123,56 @@ proc parseMixNode*(entry: string): Result[MixNodePubInfo, string] =
 proc poolSize*(mix: WakuMix): int =
   ## The number of pool members a path can use now.
   return mix.nodePool.len
+
+proc connectionLimitReached(error: ref CatchableError): bool =
+  ## True when `error` comes from the connection limit of this node. libp2p puts
+  ## that error in the `parent` chain of the dial error.
+  var cause: ref Exception = error
+  while not cause.isNil:
+    if cause of TooManyConnectionsError:
+      return true
+    cause = cause.parent
+  false
+
+proc recordHopDial(
+    mix: WakuMix,
+    peerId: PeerId,
+    addresses: seq[MultiAddress],
+    outcome: MixHopDialOutcome,
+    hadConnection: bool,
+    error: ref CatchableError,
+) =
+  ## Takes a discovered mix node off mix paths for `MixFailureBackoff` after a
+  ## failed or cancelled dial to its hop address. A failed dial tells nothing
+  ## about the node when the hop already had a connection, or when the connection
+  ## limit of this node refused it. The same is true while this node has no other
+  ## connection or stops. When this node forwards a packet, it dials the address
+  ## that the sender wrote, so a dial at another address tells nothing either. A
+  ## successful dial refreshes the node.
+  if outcome == MixHopDialOutcome.Succeeded:
+    mix.pool.refresh(peerId)
+    return
+  if hadConnection or (not error.isNil and error.connectionLimitReached()):
+    return
+  let stopping = mix.peerManager.switch.dialsAborted()
+  if stopping:
+    return
+  # `get` gives none for a suspended node, so a failure does not suspend it twice.
+  let hop = mix.pool.get(peerId).valueOr:
+    return
+  if addresses != @[hop.multiAddr]:
+    return
+  if not mix.peerManager.switch.connectedPeers().anyIt(it != peerId):
+    trace "Mix hop dial failure not counted, this node has no other connection",
+      peerId = peerId
+    return
+  if mix.pool.source(peerId) != Opt.some(MixNodeSource.Discovered):
+    return
+  let cause = if error.isNil: "" else: error.msg
+  debug "Mix hop dial failed, the node leaves mix paths",
+    peerId = peerId, outcome = outcome, error = cause, backoff = MixFailureBackoff
+  mix.pool.suspend(peerId, Moment.now() + MixFailureBackoff)
+  logos_delivery_mix_dial_failures.inc()
 
 func mixAddressPolicy*(allowAllAddresses: bool): PeerAddressPolicy =
   ## The hop address policy of the mount. `publicDirectAddressPolicy` accepts
@@ -244,6 +301,14 @@ proc new*(
 
   # `init` sets `nodePool` to the peer store view. The library must read the managed pool.
   m.nodePool = pool
+  m.onHopDial = proc(
+      peerId: PeerId,
+      addresses: seq[MultiAddress],
+      outcome: MixHopDialOutcome,
+      hadConnection: bool,
+      error: ref CatchableError,
+  ) {.gcsafe, raises: [].} =
+    m.recordHopDial(peerId, addresses, outcome, hadConnection, error)
   m.peerMetadata = MixPeerMetadataStore.new(pool, switch)
   processBootNodes(bootnodes, peermgr, m)
 
