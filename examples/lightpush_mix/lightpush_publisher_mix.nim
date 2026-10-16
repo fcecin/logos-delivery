@@ -1,5 +1,5 @@
 from logos_delivery/waku/node/waku_node/lightpush import MixLightpushSurbs
-from logos_delivery/waku/waku_mix import mixAddressPolicy
+from logos_delivery/waku/waku_mix import mixAddressPolicy, exitConnection
 
 import
   std/[tables, times, sequtils, strutils],
@@ -153,12 +153,16 @@ proc setupAndPublish(rng: crypto.Rng, conf: LightPushMixConf) {.async.} =
         return
       conn = connOpt.get()
     else:
-      conn = node.wakuMix.toConnection(
-        MixDestination.exitNode(dPeerId), # destination lightpush peer
-        WakuLightPushCodec, # protocol codec which will be used over the mix connection
-        MixParameters(
-          expectReply: Opt.some(true), numSurbs: Opt.some(MixLightpushSurbs)
-        ), # mix parameters indicating we expect a single reply
+      # `exitConnection` connects this node to a reply hop before the send, so
+      # the reply reaches this node also when it is behind NAT.
+      conn = (
+        await node.wakuMix.exitConnection(
+          dPeerId,
+          WakuLightPushCodec,
+          MixParameters(
+            expectReply: Opt.some(true), numSurbs: Opt.some(MixLightpushSurbs)
+          ),
+        )
       ).valueOr:
         error "failed to create mix connection", error = error
         return
