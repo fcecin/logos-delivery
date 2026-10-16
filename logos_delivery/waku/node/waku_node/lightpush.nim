@@ -23,6 +23,7 @@ import
 import
   ../waku_node,
   ../../waku_core,
+  ../../waku_mix,
   ../../waku_core/topics/sharding,
   ../../waku_lightpush_legacy/client as legacy_lightpush_client,
   ../../waku_lightpush_legacy as legacy_lightpush_protocol,
@@ -74,7 +75,8 @@ proc publishOverMix*(
     replyTimeout: Duration = MixReplyTimeout,
 ): Future[lightpush_protocol.WakuLightPushResult] {.async.} =
   ## Publishes on a mix connection and returns within `replyTimeout`. The mix
-  ## connection limits its wait for the reply, but not the first-hop dial.
+  ## connection limits its wait for the reply, but not the first-hop dial. The
+  ## reply hop dials of `exitConnection` come before this call.
   let publishFut =
     node.wakuLightpushClient.publish(Opt.some(pubsubTopic), message, conn)
   let deadline = sleepAsync(replyTimeout)
@@ -288,18 +290,19 @@ proc lightpushPublishHandler(
     if mixify:
       when defined(libp2p_mix_experimental_exit_is_dest):
         #TODO: How to handle multiple addresses?
-        let conn = node.wakuMix.toConnection(
-          MixDestination.exitNode(peer.peerId),
-          WakuLightPushCodec,
-          MixParameters(
-            expectReply: Opt.some(true), numSurbs: Opt.some(MixLightpushSurbs)
-          ),
-            # indicating we only want a single path to be used for reply hence numSurbs = 1
+        let conn = (
+          await node.wakuMix.exitConnection(
+            peer.peerId,
+            WakuLightPushCodec,
+            MixParameters(
+              expectReply: Opt.some(true), numSurbs: Opt.some(MixLightpushSurbs)
+            ),
+          )
         ).valueOr:
-          debug "Could not create mix connection"
+          debug "Could not create mix connection", error = error
           return lighpushErrorResult(
             LightPushErrorCode.SERVICE_NOT_AVAILABLE,
-            "Waku lightpush with mix not available",
+            "Waku lightpush with mix not available: " & error,
           )
 
         return await node.publishOverMix(conn, pubsubTopic, message)
