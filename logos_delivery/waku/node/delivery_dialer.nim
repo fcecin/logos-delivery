@@ -103,6 +103,10 @@ proc abortDials*(switch: Switch) =
     dialer.aborted = true
     dialer.abortEvent.fire()
 
+proc dialsAborted*(switch: Switch): bool =
+  ## True between `abortDials` and `resumeDials`, while the node stops.
+  switch.dialer of DeliveryDialer and DeliveryDialer(switch.dialer).aborted
+
 proc resumeDials*(switch: Switch) =
   if switch.dialer of DeliveryDialer:
     let dialer = DeliveryDialer(switch.dialer)
