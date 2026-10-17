@@ -1,4 +1,5 @@
 from logos_delivery/waku/node/waku_node/lightpush import MixLightpushSurbs
+from logos_delivery/waku/waku_mix import mixAddressPolicy
 
 import
   std/[tables, times, sequtils, strutils],
@@ -108,7 +109,14 @@ proc setupAndPublish(rng: crypto.Rng, conf: LightPushMixConf) {.async.} =
     let (mixPrivKey, mixPubKey) = generateKeyPair().valueOr:
       error "failed to generate mix key pair", error = error
       return
-    (await node.mountMix(clusterId, mixPrivKey, conf.mixnodes)).isOkOr:
+    (
+      await node.mountMix(
+        clusterId,
+        mixPrivKey,
+        conf.mixnodes,
+        addressPolicy = mixAddressPolicy(conf.mixAllowAllAddresses),
+      )
+    ).isOkOr:
       error "failed to mount waku mix protocol: ", error = $error
       return
 

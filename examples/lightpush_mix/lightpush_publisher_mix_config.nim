@@ -40,6 +40,13 @@ type LightPushMixConf* = object
     name: "mixnode"
   .}: seq[MixNodePubInfo]
 
+  mixAllowAllAddresses* {.
+    desc:
+      "Turn off the mix hop address filter. Use it for a local simulation, a test or a private network.",
+    defaultValue: false,
+    name: "mix-allow-all-addresses"
+  .}: bool
+
 proc parseCmdArg*(T: typedesc[MixNodePubInfo], p: string): T =
   let elements = p.split(":")
   if elements.len != 2:
