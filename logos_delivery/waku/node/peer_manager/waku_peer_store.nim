@@ -141,6 +141,10 @@ proc addPeer*(peerStore: PeerStore, peer: RemotePeerInfo, origin = UnknownOrigin
       return
 
   peerStore[AddressBook][peer.peerId] = peer.addrs
+  # The mix pool learns a node from its mix key and its addresses together, so
+  # this proc writes the mix key again after the addresses.
+  if peer.mixPubKey.isSome():
+    peerStore[MixPubKeyBook][peer.peerId] = peer.mixPubKey.get()
 
   var protos = peerStore[ProtoBook][peer.peerId]
   for new_proto in peer.protocols:

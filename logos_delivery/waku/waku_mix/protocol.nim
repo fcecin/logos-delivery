@@ -14,6 +14,7 @@ import
   libp2p_mix/delay_strategy,
   libp2p_mix/spam_protection,
   libp2p_mix/pool,
+  libp2p_mix/managed_pool,
   libp2p/[multiaddress, peerid],
   eth/common/keys
 
@@ -21,9 +22,10 @@ import
   logos_delivery/waku/node/peer_manager,
   logos_delivery/waku/waku_core,
   logos_delivery/waku/waku_enr,
-  logos_delivery/waku/node/peer_manager/waku_peer_store
+  logos_delivery/waku/node/peer_manager/waku_peer_store,
+  ./peer_metadata
 
-export pool
+export pool, managed_pool, peer_metadata
 
 logScope:
   topics = "waku mix"
@@ -32,11 +34,20 @@ const MinMixPoolSize* = 4
   ## The smallest pool that mix can build a path from. `PathLength` is 3, and
   ## with `exit_is_dest` the exit node is a pool member and not one of the hops.
 
+const DiscoveredMixNodeTtl* = chronos.hours(1)
+  ## How long a discovered mix node stays in the pool without a new record or
+  ## a connection.
+
+const MaxDiscoveredMixNodes* = 1000
+  ## The maximum number of discovered mix nodes in the pool.
+
 type
   WakuMix* = ref object of MixProtocol
     peerManager*: PeerManager
     clusterId: uint16
     pubKey*: Curve25519Key
+    pool*: ManagedMixNodePool ## The mix pool. `nodePool` of `MixProtocol` is this pool.
+    peerMetadata*: MixPeerMetadataStore
     hopMissing: bool
       ## `true` when the last hop derivation found no address the encoder accepts.
       ## The hop that mix still holds is then a leftover, unusable even if it
@@ -103,14 +114,39 @@ proc parseMixNode*(entry: string): Result[MixNodePubInfo, string] =
   )
 
 proc poolSize*(mix: WakuMix): int =
-  ## The number of pool members a path can use. `nodePool.get` needs an IPv4 TCP
-  ## or QUIC-v1 address and a secp256k1 key; `MixNodePool.len` checks neither.
-  ## Walks the pool; `mixReady` calls it once per send attempt.
-  var routable = 0
-  for peerId in mix.nodePool.peerIds():
-    if mix.nodePool.get(peerId).isSome():
-      routable.inc()
-  return routable
+  ## The number of pool members a path can use now.
+  return mix.nodePool.len
+
+proc acceptedHopAddress(mix: WakuMix, peerId: PeerId): Opt[MultiAddress] =
+  ## The last outbound address of a peer when the pool accepts it, as
+  ## `MixNodePool` does. If not, the first address of its record that the
+  ## pool accepts.
+  let store = mix.peerManager.switch.peerStore
+  let lastSeen = store[LastSeenOutboundBook][peerId]
+  if lastSeen.isSome() and mix.pool.accepts(lastSeen.get()):
+    return lastSeen
+  for candidate in store[AddressBook][peerId]:
+    if mix.pool.accepts(candidate):
+      return Opt.some(candidate)
+  Opt.none(MultiAddress)
+
+proc learnDiscoveredNode(mix: WakuMix, peerId: PeerId) =
+  ## Adds or refreshes a discovered mix node from the peer store books.
+  let store = mix.peerManager.switch.peerStore
+  let mixPubKey = store[MixPubKeyBook][peerId]
+  if mixPubKey == default(Curve25519Key):
+    return
+  let address = mix.acceptedHopAddress(peerId).valueOr:
+    return
+  var libp2pPubKey = store[KeyBook][peerId]
+  if libp2pPubKey.scheme != PKScheme.Secp256k1:
+    if not peerId.extractPublicKey(libp2pPubKey) or
+        libp2pPubKey.scheme != PKScheme.Secp256k1:
+      return
+  mix.pool.add(
+    MixPubInfo.init(peerId, address, mixPubKey, libp2pPubKey.skkey),
+    MixNodeSource.Discovered,
+  )
 
 func mixAddressPolicy*(allowAllAddresses: bool): PeerAddressPolicy =
   ## The hop address policy of the mount. `publicDirectAddressPolicy` accepts
@@ -158,17 +194,22 @@ proc processBootNodes(
     # addresses with its transport patterns, and the suffix stops the match.
     let multiAddr = pInfo.addrs[0]
 
-    # The pool entry comes first: `nodePool.add` writes `Infinite` confidence,
-    # and libp2p does not lower a confidence that it holds.
+    # The pool entry comes first, so the peer store handlers find a configured
+    # node and do not add it as a discovered one.
     let mixPubInfo = MixPubInfo.init(peerId, multiAddr, node.pubKey, peerPubKey.skkey)
     mix.nodePool.add(mixPubInfo)
     count.inc()
-    if not mix.nodePool.accepts(multiAddr):
+    if not mix.pool.accepts(multiAddr):
       refused.add(node.multiAddr)
 
+    # A name that resolves to two addresses makes two entries. The peer store
+    # keeps both, as the pool does.
+    var addrs = peermgr.switch.peerStore[AddressBook][peerId]
+    if multiAddr notin addrs:
+      addrs.add(multiAddr)
     peermgr.addPeer(
       RemotePeerInfo.init(
-        peerId, @[multiAddr], publicKey = peerPubKey, mixPubKey = Opt.some(node.pubKey)
+        peerId, addrs, publicKey = peerPubKey, mixPubKey = Opt.some(node.pubKey)
       )
     )
   # `count` is the number of entries added to the pool, also the entries that
@@ -203,7 +244,19 @@ proc new*(
     peermgr.switch.peerInfo.publicKey.skkey, peermgr.switch.peerInfo.privateKey.skkey,
   )
 
-  var m = WakuMix(peerManager: peermgr, clusterId: clusterId, pubKey: mixPubKey)
+  let switch = peermgr.switch
+  let pool = ManagedMixNodePool.new(
+    ManagedPoolConfig(
+      addressPolicy: addressPolicy,
+      discoveredTtl: DiscoveredMixNodeTtl,
+      maxDiscovered: MaxDiscoveredMixNodes,
+      isConnected: proc(peerId: PeerId): bool {.gcsafe, raises: [].} =
+        switch.isConnected(peerId),
+    ),
+    selfId = switch.peerInfo.peerId,
+  )
+  var m =
+    WakuMix(peerManager: peermgr, clusterId: clusterId, pubKey: mixPubKey, pool: pool)
   procCall MixProtocol(m).init(
     localMixNodeInfo,
     peermgr.switch,
@@ -219,6 +272,33 @@ proc new*(
     ),
   )
 
+  # `init` sets `nodePool` to the peer store view. The library must read the managed pool.
+  m.nodePool = pool
+  m.peerMetadata = MixPeerMetadataStore.new(pool, switch)
+  let store = switch.peerStore
+  store[MixPubKeyBook].addHandler(
+    proc(peerId: PeerId) {.gcsafe, raises: [].} =
+      m.learnDiscoveredNode(peerId)
+  )
+  # Identify and dials also write the address book, and a dial writes the last
+  # outbound address. The handler skips a configured node and a suspended node.
+  # For another node in the pool, it acts only when the hop address changes,
+  # so an address that expires in the book does not renew the node.
+  let onHopAddress = proc(peerId: PeerId) {.gcsafe, raises: [].} =
+    if pool.source(peerId) == Opt.some(MixNodeSource.Configured) or
+        pool.suspendedUntil(peerId).isSome():
+      return
+    if peerId notin pool or
+        m.acceptedHopAddress(peerId) !=
+        pool.get(peerId).map(
+          proc(info: MixPubInfo): MultiAddress =
+            info.multiAddr
+        ):
+      m.learnDiscoveredNode(peerId)
+  store[AddressBook].addHandler(onHopAddress)
+  store[LastSeenOutboundBook].addHandler(onHopAddress)
+  for peerId in store[MixPubKeyBook].book.keys:
+    m.learnDiscoveredNode(peerId)
   processBootNodes(bootnodes, peermgr, m)
 
   let usable = m.poolSize()
@@ -228,6 +308,14 @@ proc new*(
     info "Mix cannot publish yet, waiting for more mix nodes",
       poolSize = usable, required = MinMixPoolSize
   return ok(m)
+
+method start*(mix: WakuMix) {.async: (raises: [CancelledError]).} =
+  await procCall MixProtocol(mix).start()
+  mix.pool.start()
+
+method stop*(mix: WakuMix) {.async: (raises: []).} =
+  await mix.pool.stop()
+  await procCall MixProtocol(mix).stop()
 
 proc selfHopMissing*(mix: WakuMix): bool =
   ## True when the last derivation of this node's own hop found nothing to set.

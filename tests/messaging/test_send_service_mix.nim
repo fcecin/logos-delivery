@@ -939,10 +939,17 @@ suite "Mix send path - exit peer selection":
       waku.lightpushPeerAvailable(shard) # usable for a plain send
       waku.selectMixLightpushPeer(shard).isNone() # but not as a mix exit
 
+  asyncTest "a mix exit stays selectable after the peer store deletes it":
+    let exit = addLightpushPeer(mixCapable = true)
+    check waku.selectMixLightpushPeer(shard).isSome()
+
+    waku.node.peerManager.switch.peerStore.delete(exit)
+
+    check waku.selectMixLightpushPeer(shard).get().peerId == exit
+
   asyncTest "a mix key alone does not make a peer a usable exit":
     ## Mix routes IPv4 TCP and QUIC-v1 addresses only. A peer with another
-    ## address is not in the pool, whatever its mix key is. Mix evicts such a
-    ## peer at the first path construction.
+    ## address does not join the pool, whatever its mix key is.
     discard addLightpushPeer(mixCapable = true, address = "/dns4/node.test/tcp/60000")
 
     check:

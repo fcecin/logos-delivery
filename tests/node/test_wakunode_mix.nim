@@ -346,7 +346,7 @@ suite "Waku Mix - pool size":
 
   proc addMixPeer(address: string): PeerId =
     ## Stores a mix key and its address in the peer store, as discovery does.
-    ## The pool reads the peer store.
+    ## The pool learns the node from the peer store.
     let peerId = PeerId.init(generateSecp256k1Key()).tryGet()
     let mixKeys = generateKeyPair().expect("mix key pair")
     node.peerManager.addPeer(
