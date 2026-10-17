@@ -15,7 +15,9 @@ import
   libp2p_mix/spam_protection,
   libp2p_mix/pool,
   libp2p_mix/managed_pool,
+  libp2p_mix/connected_reply,
   libp2p/[multiaddress, peerid, connmanager],
+  libp2p/stream/connection,
   eth/common/keys
 
 import
@@ -45,6 +47,18 @@ const MaxDiscoveredMixNodes* = 1000
 const MixFailureBackoff* = chronos.minutes(30)
   ## How long a discovered mix node stays off mix paths after a failed dial.
 
+const MixReplyHopMaxDials* = 2
+  ## The maximum number of reply hop dials for one send. A send wants this many
+  ## connected pool members, and it dials the missing ones at the same time.
+  ## When the exit of a later send is one of them, the other one can still end
+  ## its reply path.
+
+const MixReplyHopTimeout* = chronos.seconds(5)
+  ## How long a send waits for a reply hop to connect.
+
+declarePublicCounter logos_delivery_mix_reply_hop_failures,
+  "Mix sends that failed because no reply hop had a connection or the pool was too small"
+
 declarePublicCounter logos_delivery_mix_dial_failures,
   "Failed dials of mix hops that took the hop off mix paths"
 
@@ -53,6 +67,7 @@ type
     peerManager*: PeerManager
     clusterId: uint16
     pubKey*: Curve25519Key
+    replyHopTimeout: Duration ## How long a send waits for its reply hops to connect.
     pool*: ManagedMixNodePool ## The mix pool. `nodePool` of `MixProtocol` is this pool.
     peerMetadata*: MixPeerMetadataStore
     hopMissing: bool
@@ -260,7 +275,10 @@ proc new*(
     bootnodes: seq[MixNodePubInfo],
     spamProtection: Opt[SpamProtection] = Opt.none(SpamProtection),
     addressPolicy: PeerAddressPolicy = publicDirectAddressPolicy,
+    replyHopTimeout: Duration = MixReplyHopTimeout,
 ): WakuMixResult[T] =
+  if replyHopTimeout <= ZeroDuration:
+    return err("the mix reply hop timeout must be positive")
   let mixPubKey = public(mixPrivKey)
   info "mixPubKey", mixPubKey = mixPubKey
   let nodeMultiAddr = MultiAddress.init(nodeAddr).valueOr:
@@ -282,8 +300,13 @@ proc new*(
     ),
     addressPolicy,
   )
-  var m =
-    WakuMix(peerManager: peermgr, clusterId: clusterId, pubKey: mixPubKey, pool: pool)
+  var m = WakuMix(
+    peerManager: peermgr,
+    clusterId: clusterId,
+    pubKey: mixPubKey,
+    pool: pool,
+    replyHopTimeout: replyHopTimeout,
+  )
   procCall MixProtocol(m).init(
     localMixNodeInfo,
     peermgr.switch,
@@ -301,6 +324,8 @@ proc new*(
 
   # `init` sets `nodePool` to the peer store view. The library must read the managed pool.
   m.nodePool = pool
+  # Each reply path ends on a pool member with a connection to this node.
+  m.replyHopPicker = connectedReplyHops(switch)
   m.onHopDial = proc(
       peerId: PeerId,
       addresses: seq[MultiAddress],
@@ -319,6 +344,19 @@ proc new*(
     info "Mix cannot publish yet, waiting for more mix nodes",
       poolSize = usable, required = MinMixPoolSize
   return ok(m)
+
+when defined(libp2p_mix_experimental_exit_is_dest):
+  proc exitConnection*(
+      mix: WakuMix, exitPeerId: PeerId, codec: string, params: MixParameters
+  ): Future[Result[Connection, string]] {.async: (raises: [CancelledError]).} =
+    ## Returns a mix connection to the exit `exitPeerId`. When `params` expects a
+    ## reply, it first connects this node to pool members that can be the last
+    ## reply hop, so the reply reaches this node also when it is behind NAT.
+    if params.expectReply.get(false):
+      (await mix.connectReplyHop(exitPeerId, MixReplyHopMaxDials, mix.replyHopTimeout)).isOkOr:
+        logos_delivery_mix_reply_hop_failures.inc()
+        return err(error)
+    return mix.toConnection(MixDestination.exitNode(exitPeerId), codec, params)
 
 method start*(mix: WakuMix) {.async: (raises: [CancelledError]).} =
   await procCall MixProtocol(mix).start()

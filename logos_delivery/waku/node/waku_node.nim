@@ -603,6 +603,7 @@ proc mountMix*(
     mixnodes: seq[MixNodePubInfo],
     spamProtection: Opt[SpamProtection] = Opt.none(SpamProtection),
     addressPolicy: PeerAddressPolicy = publicDirectAddressPolicy,
+    replyHopTimeout: Duration = MixReplyHopTimeout,
 ): Future[Result[void, string]] {.async.} =
   info "Mounting mix protocol", nodeId = node.info #TODO log the config used
 
@@ -617,7 +618,7 @@ proc mountMix*(
 
   node.wakuMix = WakuMix.new(
     localaddrStr, node.peerManager, clusterId, mixPrivKey, literals, spamProtection,
-    addressPolicy,
+    addressPolicy, replyHopTimeout,
   ).valueOr:
     return err("Waku Mix protocol initialization failed: " & error)
   #TODO: should we do the below only for exit node? Also, what if multiple protocols use mix?

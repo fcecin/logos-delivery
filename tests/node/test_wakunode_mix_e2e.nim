@@ -305,6 +305,49 @@ suite "Waku Mix - end to end transport":
       after.forwarded - before.forwarded >= 2.0
       after.exited - before.exited >= 1.0
 
+  asyncTest "a sender behind NAT with no connection gets the reply through a hop it dials":
+    ## The sender closes every connection, and its stopped peer manager opens no
+    ## new one. The last reply hop cannot dial the announced address, so the
+    ## reply arrives only over a connection that the sender opens for the send.
+    ## Without the connected reply hop, the first forward hop and the random last
+    ## reply hop match about one time in three. The tests in
+    ## `test_wakunode_mix_reply_path.nim` find that fault each time.
+    let mixnet = await setupMixNet(23920, senderAnnounce = "/ip4/127.0.0.1/tcp/23939")
+    defer:
+      await teardownMixNet(mixnet)
+
+    let shard = DefaultPubsubTopic
+    mixnet.subscribeCores(shard)
+    checkUntilTimeout:
+      (0 ..< NumCore).toSeq().allIt(
+        mixnet.nodes[it].hasMeshPeer(
+          shard, mixnet.nodes[(it + 1) mod NumCore].peerInfo.peerId
+        )
+      )
+    let sender = mixnet.sender()
+    sender.peerManager.stop()
+    for peerId in sender.switch.connectedPeers():
+      await sender.switch.disconnect(peerId)
+    checkUntilTimeout:
+      sender.switch.connectedPeers().len == 0
+
+    let msg = WakuMessage(
+      payload: toBytes("mix-e2e-nat no connection over mix"),
+      contentTopic: "/mix-e2e/1/probe/proto",
+      version: 2,
+      timestamp: getNowInNanosecondTime(),
+    )
+    let dest = mixnet.nodes[1].peerInfo.toRemotePeerInfo()
+    let before = hopCounts()
+    let res =
+      await sender.lightpushPublish(Opt.some(shard), msg, Opt.some(dest), mixify = true)
+    check res.isOk()
+    let after = hopCounts()
+    check:
+      after.exited - before.exited >= 1.0
+      after.timeouts == before.timeouts
+      sender.switch.connectedPeers().len >= 1
+
   asyncTest "a sender announcing only a name is answered at the host the name resolved to":
     ## The fleet's shape: `--dns4-domain-name` makes the sender announce a name,
     ## which mix cannot encode. The self hop is the resolved ENR endpoint, so the
