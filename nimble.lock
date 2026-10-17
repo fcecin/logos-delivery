@@ -676,9 +676,9 @@
       }
     },
     "libp2p_mix": {
-      "version": "#3f256aa03d2d36fea0b5206b41a6328da4f5c412",
-      "vcsRevision": "3f256aa03d2d36fea0b5206b41a6328da4f5c412",
-      "url": "https://github.com/logos-co/nim-libp2p-mix",
+      "version": "#a56993a26634fd3d0e7ef4e4c17fb729cc556980",
+      "vcsRevision": "a56993a26634fd3d0e7ef4e4c17fb729cc556980",
+      "url": "https://github.com/fcecin/nim-libp2p-mix",
       "downloadMethod": "git",
       "dependencies": [
         "nim",
@@ -692,7 +692,7 @@
         "unittest2"
       ],
       "checksums": {
-        "sha1": "a084ffe241acf33ad918525ad7de568e4f6d488a"
+        "sha1": "35a6e1f4063c144356e82015c91e88c2822f706e"
       }
     },
     "eth": {
