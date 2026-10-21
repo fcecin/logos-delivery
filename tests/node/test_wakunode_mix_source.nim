@@ -395,6 +395,83 @@ suite "Delivery provides the mix peers":
       node.peerManager.addPeer(candidate(address))
       check node.wakuMix.poolSize() == 1
 
+  asyncTest "an inbound connection preserves outbound failure history":
+    let node = await newTestNode()
+    let remote = await newTestNode()
+    await node.start()
+    await remote.start()
+    defer:
+      await node.stop()
+      await remote.stop()
+    let peer = remote.peerInfo.toRemotePeerInfo()
+    peer.mixPubKey = Opt.some(generateKeyPair().get().publicKey)
+    node.peerManager.addPeer(peer)
+    let store = node.switch.peerStore
+    node.peerManager.configureMix(true).get()
+    let pool = node.peerManager.mixPool
+    store[NumberFailedConnBook][peer.peerId] = node.peerManager.maxFailedAttempts
+    await remote.switch.connect(node.peerInfo.peerId, node.peerInfo.addrs)
+    check await waitUntil(
+      proc(): bool =
+        pool.countUsable([]).get() == 1
+    )
+    check:
+      node.switch.isConnected(peer.peerId)
+      store[NumberFailedConnBook][peer.peerId] == node.peerManager.maxFailedAttempts
+    await remote.switch.disconnect(node.peerInfo.peerId)
+    check await waitUntil(
+      proc(): bool =
+        pool.countUsable([]).get() == 0
+    )
+
+  asyncTest "a switch connection is observed by Delivery and clears failed-attempt state":
+    let node = await newTestNode()
+    defer:
+      node.peerManager.stop()
+    let remote = await newTestNode()
+    await node.start()
+    await remote.start()
+    defer:
+      await node.stop()
+      await remote.stop()
+    let peer = remote.peerInfo.toRemotePeerInfo()
+    peer.mixPubKey = Opt.some(generateKeyPair().get().publicKey)
+    node.peerManager.addPeer(peer)
+    let store = node.switch.peerStore
+    node.peerManager.configureMix(true).get()
+    let pool = node.peerManager.mixPool
+    store[NumberFailedConnBook][peer.peerId] = node.peerManager.maxFailedAttempts
+    check pool.countUsable([]).get() == 0
+    # Same switch path that mix uses, bypassing PeerManager.connectPeer.
+    await node.switch.connect(peer.peerId, peer.addrs)
+    check await waitUntil(
+      proc(): bool =
+        store[NumberFailedConnBook][peer.peerId] == 0
+    )
+    check pool.countUsable([]).get() == 1
+
+  asyncTest "a failed reply preparation dial counts as a failed dial":
+    let node = await newTestNode()
+    let keys = generateKeyPair().get()
+    (
+      await node.mountMix(
+        DefaultClusterId, keys.privateKey, @[], allowAllAddresses = true
+      )
+    ).expect("mount mix")
+    await node.start()
+    defer:
+      await node.stop()
+    # Port 1 on the loopback interface refuses the connection at once.
+    let peer = candidate("/ip4/127.0.0.1/tcp/1")
+    node.peerManager.addPeer(peer)
+    let pool = node.wakuMix.pool
+    check pool.countUsable([]).get() == 1
+    let selected = await node.wakuMix.selectReplyPeer(@[node.peerInfo.peerId])
+    check:
+      selected.isErr()
+      node.switch.peerStore[NumberFailedConnBook][peer.peerId] == 1
+      pool.countUsable([]).get() == 0
+
 proc interruptedReplyPreparation(action: string) {.async.} =
   var accepted: seq[StreamTransport]
   let ready = newAsyncEvent()
@@ -458,6 +535,15 @@ proc interruptedReplyPreparation(action: string) {.async.} =
   else:
     await writing.cancelAndWait()
   check node.wakuMix.surbCredsLen == 0
+  var failures = 0
+  for count in node.switch.peerStore[NumberFailedConnBook].book.values:
+    failures += count
+  if action == "timeout":
+    check failures == 1
+    check node.wakuMix.pool.countUsable([]).get() == 3
+  else:
+    check failures == 0
+    check node.wakuMix.pool.countUsable([]).get() == 4
 
 suite "Delivery selection of the final reply peer":
   asyncTest "a connected exit is excluded and Delivery connects one eligible peer and reuses it":
