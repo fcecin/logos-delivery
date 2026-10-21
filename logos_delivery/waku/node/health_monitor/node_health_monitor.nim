@@ -8,7 +8,7 @@ import
   libp2p/protocols/rendezvous,
   libp2p/protocols/pubsub,
   libp2p/protocols/pubsub/rpc/messages,
-  libp2p_mix/pool,
+  libp2p_mix/[pool, peer_selection],
   logos_delivery/api/types,
   logos_delivery/api/events/kernel_events,
   # EventConnectionStatusChange
@@ -302,15 +302,28 @@ proc getRendezvousHealth(hm: NodeHealthMonitor): ProtocolHealth =
 
 proc hasMixExit(hm: NodeHealthMonitor): bool =
   ## Mirrors `selectMixLightpushPeer`, minus its per-message shard filter.
-  ## Returns true if one node in the mix pool is capable of serving lightpush to exit through.
-  let pool = hm.node.wakuMix.nodePool
+  ## Returns true if one eligible mix peer can serve lightpush as the exit.
+  let ctx = hm.node.wakuMix.brokerCtx
   let slotted = hm.node.peerManager.serviceSlots.getOrDefault(WakuLightPushCodec)
-  if not slotted.isNil() and pool.get(slotted.peerId).isSome():
-    return true
+  if not slotted.isNil():
+    let info = ctx.get(slotted.peerId).valueOr:
+      error "Could not read mix peer", error = error
+      return false
+    if info.isSome():
+      return true
   let peerStore = hm.node.switch.peerStore
-  return pool.peerIds().anyIt(
-      peerStore[ProtoBook][it].contains(WakuLightPushCodec) and pool.get(it).isSome()
-    )
+  let peers = ctx.peerIds().valueOr:
+    error "Could not list mix peers", error = error
+    return false
+  for peerId in peers:
+    if not peerStore[ProtoBook][peerId].contains(WakuLightPushCodec):
+      continue
+    let info = ctx.get(peerId).valueOr:
+      error "Could not read mix peer", error = error
+      return false
+    if info.isSome():
+      return true
+  false
 
 proc getMixHealth(hm: NodeHealthMonitor): ProtocolHealth =
   var p = ProtocolHealth.init(WakuProtocol.MixProtocol)
