@@ -348,6 +348,12 @@ proc addServicePeer*(pm: PeerManager, remotePeerInfo: RemotePeerInfo, proto: str
 # require pre-connection
 proc pruneInRelayConns(pm: PeerManager, amount: int) {.async.}
 
+proc recordFailedDial(pm: PeerManager, peerId: PeerId) =
+  let store = pm.switch.peerStore
+  store[NumberFailedConnBook][peerId] = store[NumberFailedConnBook][peerId] + 1
+  store[LastFailedConnBook][peerId] = Moment.init(getTime().toUnix, Second)
+  store[ConnectionBook][peerId] = CannotConnect
+
 # Connects to a given node. Note that this function uses `connect` and
 # does not provide a protocol. Streams for relay (gossipsub) are created
 # automatically without the needing to dial.
@@ -414,9 +420,7 @@ proc connectPeer*(
     peerStore[ConnectionBook][peerId] = Connected
     return true
 
-  peerStore[NumberFailedConnBook][peerId] = peerStore[NumberFailedConnBook][peerId] + 1
-  peerStore[LastFailedConnBook][peerId] = Moment.init(getTime().toUnix, Second)
-  peerStore[ConnectionBook][peerId] = CannotConnect
+  pm.recordFailedDial(peerId)
 
   trace "Connecting peer failed",
     peerId = peerId,
@@ -646,8 +650,12 @@ proc selectReplyPeer(
   try:
     await pending.wait(pm.mixReplyPeerTimeout)
   except DialFailedError as exc:
+    if not pm.switch.isConnected(candidate.peerId):
+      pm.recordFailedDial(candidate.peerId)
     return err("could not connect a peer for replies: " & exc.msg)
   except AsyncTimeoutError:
+    if not pm.switch.isConnected(candidate.peerId):
+      pm.recordFailedDial(candidate.peerId)
     return err("timed out connecting a peer for replies")
   finally:
     await noCancel pending.cancelAndWait()
@@ -1045,6 +1053,9 @@ proc onPeerEvent(pm: PeerManager, peerId: PeerId, event: PeerEvent) {.async.} =
   of PeerEventKind.Joined:
     direction = if event.initiator: Outbound else: Inbound
     connectedness = Connected
+    if event.initiator:
+      # This also observes outbound connections opened directly by mix.
+      peerStore[NumberFailedConnBook][peerId] = 0
 
     ## Check max allowed in-relay peers
     let inRelayPeers = pm.connectedPeers(WakuRelayCodec)[0]
