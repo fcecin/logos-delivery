@@ -12,6 +12,7 @@ import
     common/waku_protocol,
     node/waku_node,
     node/peer_manager,
+    node/peer_manager/waku_peer_store,
     node/health_monitor/health_status,
     node/health_monitor/connection_status,
     node/health_monitor/protocol_health,
@@ -1059,3 +1060,54 @@ suite "Health Monitor - mix readiness":
 
     await monitorA.stopHealthMonitor()
     await nodeA.stop()
+
+  asyncTest "mix health follows expiry without peer events and applies host vetoes":
+    var node: WakuNode
+    lockNewGlobalBrokerContext:
+      node =
+        newTestWakuNode(generateSecp256k1Key(), parseIpAddress("127.0.0.1"), Port(0))
+      await node.mountTestMix()
+    await node.start()
+    let monitor = NodeHealthMonitor.new(node)
+    monitor.setOverallHealth(HealthStatus.READY)
+    var peers: seq[PeerId]
+    for i in 0 ..< MinMixPoolSize:
+      let peer = mixPeerInfo(64000 + i)
+      peer.protocols = @[WakuLightPushCodec]
+      node.peerManager.addPeer(peer, Kademlia)
+      peers.add(peer.peerId)
+    updatePoolSize(-1)
+    monitor.startHealthMonitor().get()
+    defer:
+      await monitor.stopHealthMonitor()
+      await node.stop()
+    proc cachedMixHealth(): HealthStatus =
+      for protocol in monitor.getSyncNodeHealthReport().protocolsHealth:
+        if protocol.protocol == $WakuProtocol.MixProtocol:
+          return protocol.health
+      HealthStatus.NOT_MOUNTED
+
+    proc waitForCount(count: int): Future[bool] {.async.} =
+      # Three refresh intervals of margin for a loaded runner.
+      let deadline = Moment.now() + chronos.seconds(15)
+      while mix_pool_size.value() != count.float64 and Moment.now() < deadline:
+        await sleepAsync(chronos.milliseconds(25))
+      return mix_pool_size.value() == count.float64
+
+    check await waitForCount(MinMixPoolSize)
+    check cachedMixHealth() == HealthStatus.READY
+    for peerId in peers:
+      node.switch.peerStore[MixAliveBook][peerId] =
+        Moment.now() - DiscoveredEnrTtl - chronos.seconds(1)
+    check await waitForCount(0)
+    check cachedMixHealth() == HealthStatus.NOT_READY
+    for peerId in peers:
+      node.switch.peerStore[MixAliveBook][peerId] = Moment.now()
+    check await waitForCount(MinMixPoolSize)
+    # The refresh above was timer-driven, so the next tick is about 5 s away.
+    # Only the exclusion handler can move the gauge within one second.
+    node.switch.peerStore.excludeFromMix(peers[0])
+    let deadline = Moment.now() + chronos.seconds(1)
+    while mix_pool_size.value() == MinMixPoolSize.float64 and Moment.now() < deadline:
+      await sleepAsync(chronos.milliseconds(10))
+    check mix_pool_size.value() == (MinMixPoolSize - 1).float64
