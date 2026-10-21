@@ -6,10 +6,16 @@ import
   chronos,
   chronicles,
   metrics,
-  libp2p/[multistream, muxers/muxer, nameresolving/nameresolver, peerstore],
+  libp2p/[multistream, muxers/muxer, nameresolving/nameresolver, peerstore, dial],
   libp2p/protocols/service_discovery/types,
-  libp2p_mix/mix_protocol,
+  libp2p/crypto/crypto,
+  libp2p_mix/mix_pool,
+  brokers/request_broker,
   brokers/broker_context
+
+from libp2p_mix/mix_protocol import MixProtocolID
+from libp2p_mix/pool import MixPubKeyBook
+import libp2p_mix/external_pool
 
 import
   logos_delivery/waku/[
@@ -32,6 +38,8 @@ import
   ./waku_peer_store
 
 export waku_peer_store, peer_storage, peers
+
+const DefaultMixReplyPeerTimeout* = chronos.seconds(5)
 
 const KnownAgents = [
   "nwaku", "logos-delivery", "go-waku", "js-waku", "nim-libp2p", "go-libp2p",
@@ -110,6 +118,11 @@ type ConnectionChangeHandler* = proc(
 
 type PeerManager* = ref object
   brokerCtx: BrokerContext
+  mixPool*: ExternalMixPool
+    ## The pool `WakuMix` routes through. It asks the mix requests of the
+    ## library's external pool, which `provideMixPeers` answers.
+  mixAllowAllAddresses: bool
+  mixReplyPeerTimeout: chronos.Duration
   switch*: Switch
   wakuMetadata*: WakuMetadata
   initialBackoffInSec*: int
@@ -554,6 +567,127 @@ proc canBeConnected*(pm: PeerManager, peerId: PeerId): bool =
     calculateBackoff(pm.initialBackoffInSec, pm.backoffFactor, failedAttempts)
 
   return now >= (lastFailed + backoff)
+
+proc isMixCandidate*(pm: PeerManager, peerId: PeerId): bool =
+  peerId != pm.switch.peerInfo.peerId and pm.switch.peerStore.isMixCandidate(peerId) and
+    (pm.switch.isConnected(peerId) or pm.canBeConnected(peerId))
+
+proc mixPeerRecord(pm: PeerManager, peerId: PeerId): MixPeerRecord =
+  if not pm.isMixCandidate(peerId):
+    return
+  let store = pm.switch.peerStore
+  result.mixPubKey = store[MixPubKeyBook][peerId]
+  result.publicKey = store[KeyBook][peerId]
+  for address in store[AddressBook][peerId]:
+    if address.acceptsMixAddress(pm.mixAllowAllAddresses):
+      result.addresses.add(address)
+  store[LastSeenOutboundBook][peerId].withValue(address):
+    if address.acceptsMixAddress(pm.mixAllowAllAddresses):
+      result.addresses = @[address] & result.addresses.filterIt(it != address)
+
+proc mixCandidateIds(pm: PeerManager): seq[PeerId] =
+  for peerId in pm.switch.peerStore[MixPubKeyBook].book.keys:
+    if pm.isMixCandidate(peerId):
+      result.add(peerId)
+
+proc storeMixPeer*(pm: PeerManager, info: MixPubInfo, origin = UnknownOrigin) =
+  ## Store a mix peer from the configuration or the application. The peer is
+  ## durable and the addresses known at this write do not expire.
+  let store = pm.switch.peerStore
+  store[AddressBook].set(
+    info.peerId,
+    store[AddressBook][info.peerId] & @[info.multiAddr],
+    AddressConfidence.Infinite,
+  )
+  pm.addPeer(
+    RemotePeerInfo.init(
+      info.peerId,
+      @[info.multiAddr],
+      publicKey = crypto.PublicKey(scheme: Secp256k1, skkey: info.libp2pPubKey),
+      mixPubKey = Opt.some(info.mixPubKey),
+    ),
+    origin,
+  )
+  discard store[MixAliveBook].del(info.peerId)
+
+proc removeMixPeer*(pm: PeerManager, peerId: PeerId): bool =
+  ## Remove a peer from mix. Keeps its other peer-store books.
+  let removed = pm.switch.peerStore[MixPubKeyBook].del(peerId)
+  discard pm.switch.peerStore[MixAliveBook].del(peerId)
+  removed
+
+proc connectedReplyPeer(
+    pm: PeerManager, excluded: seq[PeerId]
+): Result[Opt[PeerId], string] =
+  var selected: Opt[PeerId]
+  var count = 0
+  for peerId in pm.switch.connectedPeers():
+    if peerId in excluded:
+      continue
+    if pm.mixPeerRecord(peerId).usablePeer(peerId).isSome:
+      count.inc()
+      if pm.switch.rng.rand(1, count) == 1:
+        selected = Opt.some(peerId)
+  ok(selected)
+
+proc selectReplyPeer(
+    pm: PeerManager, excluded: seq[PeerId]
+): Future[Result[PeerId, string]] {.async: (raises: [CancelledError]).} =
+  ## Delivery requires the final reply peer to reuse a connection to this node.
+  ## This lets the reply reach us even when our advertised address is undialable.
+  ## Without a connected candidate, Delivery connects one usable peer at random.
+  (?pm.connectedReplyPeer(excluded)).withValue(peer):
+    return ok(peer)
+  let candidate = (?pm.mixPool.selectRandomNodes(1, excluded))[0]
+  # Dial every approved address, as connectPeer does. The record can hold more
+  # than the one address that a Mix hop uses.
+  let addresses = pm.mixPeerRecord(candidate.peerId).addresses
+  let pending = pm.switch.connect(candidate.peerId, addresses)
+  try:
+    await pending.wait(pm.mixReplyPeerTimeout)
+  except DialFailedError as exc:
+    return err("could not connect a peer for replies: " & exc.msg)
+  except AsyncTimeoutError:
+    return err("timed out connecting a peer for replies")
+  finally:
+    await noCancel pending.cancelAndWait()
+  let peer = (?pm.connectedReplyPeer(excluded)).valueOr:
+    return err("no eligible connected mix peer for the reply")
+  return ok(peer)
+
+proc provideMixPeers*(pm: PeerManager) =
+  ## Answer the mix requests from this node's peer store and connections.
+  ## `WakuMix.new` and `WakuNode.start` call it, and `stop` clears them.
+  ## reprovideIt: replace-or-insert, idempotent across restarts.
+  discard ReadMixPeer.reprovideIt(pm.brokerCtx):
+    ok(pm.mixPeerRecord(peerId))
+  discard ListMixPeerIds.reprovideIt(pm.brokerCtx):
+    ok(pm.mixCandidateIds())
+  discard SelectMixReplyPeer.reprovideIt(pm.brokerCtx):
+    return await pm.selectReplyPeer(excluded)
+
+proc clearMixPeers*(pm: PeerManager) =
+  ReadMixPeer.clearProvider(pm.brokerCtx)
+  ListMixPeerIds.clearProvider(pm.brokerCtx)
+  SelectMixReplyPeer.clearProvider(pm.brokerCtx)
+
+proc mixPeersProvided*(pm: PeerManager): bool =
+  ## True between `provideMixPeers` and `clearMixPeers`.
+  ListMixPeerIds.isProvided(pm.brokerCtx)
+
+proc configureMix*(
+    pm: PeerManager,
+    allowAllAddresses = false,
+    replyPeerTimeout: chronos.Duration = DefaultMixReplyPeerTimeout,
+): Result[void, string] =
+  ## Set this node's mix address policy and reply connection timeout, and
+  ## answer the mix requests.
+  if replyPeerTimeout <= ZeroDuration:
+    return err("reply peer timeout must be positive")
+  pm.mixAllowAllAddresses = allowAllAddresses
+  pm.mixReplyPeerTimeout = replyPeerTimeout
+  pm.provideMixPeers()
+  ok()
 
 proc connectedPeers*(
     pm: PeerManager, protocol: string = ""
@@ -1281,6 +1415,7 @@ proc start*(pm: PeerManager) =
 
 proc stop*(pm: PeerManager) =
   pm.started = false
+  pm.clearMixPeers()
 
 proc new*(
     T: type PeerManager,
@@ -1338,6 +1473,8 @@ proc new*(
   let pm = PeerManager(
     switch: switch,
     brokerCtx: brokerCtx,
+    mixPool: ExternalMixPool.new(brokerCtx, switch.rng),
+    mixReplyPeerTimeout: DefaultMixReplyPeerTimeout,
     wakuMetadata: wakuMetadata,
     storage: storage,
     initialBackoffInSec: initialBackoffInSec,
