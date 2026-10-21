@@ -113,12 +113,20 @@ proc peers*(peerStore: PeerStore): seq[RemotePeerInfo] =
   return allKeys.mapIt(peerStore.getPeer(it))
 
 proc addPeer*(peerStore: PeerStore, peer: RemotePeerInfo, origin = UnknownOrigin) =
+  let effectiveOrigin = if origin != UnknownOrigin: origin else: peer.origin
   ## Storing MixPubKey even if peer is already present as this info might be new
   ## or updated.
   if peer.mixPubKey.isSome():
     trace "adding mix pub key to peer store",
       peer_id = $peer.peerId, mix_pub_key = $peer.mixPubKey.get()
+    let hadKey = peerStore[MixPubKeyBook][peer.peerId] != default(Curve25519Key)
+    let durable = hadKey and peerStore[MixAliveBook][peer.peerId] == Moment()
     peerStore[MixPubKeyBook][peer.peerId] = peer.mixPubKey.get()
+    if origin.isDiscoveryOrigin():
+      if not durable:
+        peerStore[MixAliveBook][peer.peerId] = Moment.now()
+    elif origin == Static or not hadKey:
+      discard peerStore[MixAliveBook].del(peer.peerId)
 
     # The mix pool needs the libp2p key, and discovery learns the mix key
     # before identify fills the key book. The peer id holds the key.
@@ -127,7 +135,6 @@ proc addPeer*(peerStore: PeerStore, peer: RemotePeerInfo, origin = UnknownOrigin
       if peer.peerId.extractPublicKey(libp2pPubKey) and libp2pPubKey.scheme == Secp256k1:
         peerStore[KeyBook][peer.peerId] = libp2pPubKey
 
-  let effectiveOrigin = if origin != UnknownOrigin: origin else: peer.origin
   if peer.enr.isSome() and effectiveOrigin.isDiscoveryOrigin():
     peerStore[ENRAliveBook][peer.peerId] = Moment.now()
 
