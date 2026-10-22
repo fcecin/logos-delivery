@@ -602,6 +602,8 @@ proc mountMix*(
     mixPrivKey: Curve25519Key,
     mixnodes: seq[MixNodePubInfo],
     spamProtection: Opt[SpamProtection] = Opt.none(SpamProtection),
+    allowAllAddresses = false,
+    replyPeerTimeout = DefaultMixReplyPeerTimeout,
 ): Future[Result[void, string]] {.async.} =
   info "Mounting mix protocol", nodeId = node.info #TODO log the config used
 
@@ -615,7 +617,8 @@ proc mountMix*(
   let (literals, names, dropped) = node.splitMixNodes(mixnodes)
 
   node.wakuMix = WakuMix.new(
-    localaddrStr, node.peerManager, clusterId, mixPrivKey, literals, spamProtection
+    localaddrStr, node.peerManager, clusterId, mixPrivKey, literals, spamProtection,
+    allowAllAddresses, replyPeerTimeout,
   ).valueOr:
     return err("Waku Mix protocol initialization failed: " & error)
   #TODO: should we do the below only for exit node? Also, what if multiple protocols use mix?
@@ -869,6 +872,10 @@ proc start*(node: WakuNode) {.async.} =
 
   if not node.wakuRendezvousClient.isNil():
     await node.wakuRendezvousClient.start()
+
+  if not node.wakuMix.isNil():
+    node.peerManager.startMixPeerProviders().isOkOr:
+      raise newException(ValueError, "Could not start Mix peer providers: " & error)
 
   node.switch.resumeDials()
 

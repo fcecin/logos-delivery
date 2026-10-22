@@ -126,7 +126,9 @@ suite "SendService - mix size before admission":
   asyncSetup:
     waku = (await Waku.new(testConf())).expect("Waku.new")
     let keys = generateKeyPair().expect("mix key pair")
-    (await waku.node.mountMix(3'u16, keys.privateKey, @[])).expect("mountMix")
+    (await waku.node.mountMix(3'u16, keys.privateKey, @[], allowAllAddresses = true)).expect(
+      "mountMix"
+    )
   asyncTeardown:
     discard await waku.stop()
 
@@ -451,7 +453,7 @@ suite "SendService - anonymity level with a mounted mix":
   asyncSetup:
     waku = (await Waku.new(testConf())).expect("Waku.new")
     let mixKeys = generateKeyPair().expect("mix key pair")
-    (await waku.node.mountMix(3'u16, mixKeys.privateKey, @[])).isOkOr:
+    (await waku.node.mountMix(3'u16, mixKeys.privateKey, @[], allowAllAddresses = true)).isOkOr:
       raiseAssert "Failed to mount mix: " & $error
 
   asyncTeardown:
@@ -894,6 +896,8 @@ suite "Mix send path - exit peer selection":
 
   asyncSetup:
     waku = (await Waku.new(testConf())).expect("Waku.new")
+    let keys = generateKeyPair().get()
+    (await waku.node.mountMix(3'u16, keys.privateKey, @[], allowAllAddresses = true)).get()
 
   asyncTeardown:
     discard await waku.stop()
@@ -921,6 +925,38 @@ suite "Mix send path - exit peer selection":
     )
     waku.node.peerManager.switch.peerStore.setShardInfo(peerId, @[0'u16])
     return peerId
+
+  asyncTest "an excluded service slot falls back to an eligible mix exit":
+    let blocked = addLightpushPeer(mixCapable = true)
+    let allowed = addLightpushPeer(mixCapable = true)
+    waku.node.peerManager.addServicePeer(
+      RemotePeerInfo.init(
+        blocked, @[MultiAddress.init("/ip4/127.0.0.1/tcp/60000").get()]
+      ),
+      WakuLightPushCodec,
+    )
+    waku.node.switch.peerStore.excludeFromMix(blocked)
+    check waku.selectMixLightpushPeer(shard).get().peerId == allowed
+
+  asyncTest "a service slot in backoff falls back to an eligible mix exit":
+    let blocked = addLightpushPeer(mixCapable = true)
+    let allowed = addLightpushPeer(mixCapable = true)
+    waku.node.peerManager.addServicePeer(
+      RemotePeerInfo.init(
+        blocked, @[MultiAddress.init("/ip4/127.0.0.1/tcp/60000").get()]
+      ),
+      WakuLightPushCodec,
+    )
+    waku.node.switch.peerStore[NumberFailedConnBook][blocked] =
+      waku.node.peerManager.maxFailedAttempts
+    check waku.selectMixLightpushPeer(shard).get().peerId == allowed
+
+  asyncTest "strict address filtering applies to mix exit selection":
+    discard addLightpushPeer(mixCapable = true)
+    let allowed =
+      addLightpushPeer(mixCapable = true, address = "/ip4/8.8.8.8/tcp/60000")
+    discard waku.node.peerManager.configureMix(false).get()
+    check waku.selectMixLightpushPeer(shard).get().peerId == allowed
 
   asyncTest "a plain lightpush peer is never offered as a mix exit":
     discard addLightpushPeer(mixCapable = false)
@@ -1163,6 +1199,7 @@ suite "Mix send path - the node's own hop":
         3'u16,
         mixKeys.privateKey,
         @[],
+        allowAllAddresses = true,
       )
       .expect("WakuMix.new")
     for i in 0 ..< MinMixPoolSize:
