@@ -60,6 +60,10 @@ type
       ## boundary. The answer must count message ids spent before a restart:
       ## the backend that draws the ids owns that state and must persist it.
       ## Nil for backends that keep no budget.
+    epochIndexOf*: proc(timestamp: uint64): uint64 {.gcsafe, raises: [].}
+      ## The epoch index of `timestamp` (Unix seconds), from the backend's epoch
+      ## size. Pure, so the send service can tell when the epoch of a stamped
+      ## message is no longer the current one. Nil for backends with no epochs.
 
   RlnCommonConf* = object
     ## Node-side RLN relay settings, independent of the mounted backend. A

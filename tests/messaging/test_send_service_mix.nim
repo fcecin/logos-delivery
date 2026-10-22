@@ -80,6 +80,7 @@ proc buildTask(
     msgHash: computeMessageHash(pubsubTopic, msg),
     state: DeliveryState.Entry,
     firstAdmittedTime: Opt.some(Moment.now() - admittedAgo),
+    admitted: true,
   )
 
 proc sizedTask(id: string, size: int): DeliveryTask =
@@ -99,6 +100,7 @@ proc mixLimit(): int =
 proc sizedProofTask(id: string, size, proofBytes: int): DeliveryTask =
   let task = buildTask(id, ZeroDuration)
   task.firstAdmittedTime = Opt.none(Moment)
+  task.admitted = false
   task.msg.timestamp = getNowInNanosecondTime()
   task.msg.proof = newSeq[byte](proofBytes)
   for n in 0 .. size:

@@ -84,6 +84,21 @@ method sendImpl(self: CountingProcessor, task: DeliveryTask): Future[void] {.asy
   inc self.calls
   task.state = DeliveryState.SuccessfullyPropagated
 
+type FailFirstProcessor = ref object of BaseSendProcessor
+  ## Leaves the task for a retry at its first call, and propagates it after.
+  calls: int
+
+method isValidProcessor(self: FailFirstProcessor, task: DeliveryTask): bool {.gcsafe.} =
+  return true
+
+method sendImpl(self: FailFirstProcessor, task: DeliveryTask): Future[void] {.async.} =
+  inc self.calls
+  task.state =
+    if self.calls == 1:
+      DeliveryState.NextRoundRetry
+    else:
+      DeliveryState.SuccessfullyPropagated
+
 proc buildTask(id: string, stamped = false): DeliveryTask =
   ## As a task from `DeliveryTask.new`, the task has no timestamp and no hash:
   ## the first attempt stamps it. A `stamped` task has them from the start.
@@ -402,6 +417,84 @@ suite "SendService RLN proof attach - RLN mounted":
       uint64(parked.msg.timestamp div 1_000_000_000) > epoch
       parked.msg.proof.len > 0
       processor.calls == 2
+
+  asyncTest "a retry in a later epoch makes a new wire object with a proof of that epoch":
+    ## The sender knows the epoch size, so it does not retry a proof of a past
+    ## epoch. The retry gets a new timestamp, a new hash and the first id of the
+    ## new epoch.
+    let processor = FailFirstProcessor()
+    let manager =
+      RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
+    let service = SendService
+      .new(false, waku, manager, processor, retryInterval = chronos.minutes(10))
+      .expect("SendService.new")
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+
+    let before = nowSec()
+    while nowSec() == before:
+      await sleepAsync(chronos.milliseconds(10))
+    let epoch = nowSec()
+    let task = buildTask("retry-next-epoch")
+    check service.enqueue(task).isOk()
+    checkUntilTimeout:
+      task.state == DeliveryState.NextRoundRetry
+    let firstHash = task.msgHash
+    check:
+      task.isStamped()
+      task.stampTried
+      task.msg.proof.len > 0
+      onchainRln.nonceManager.epochIndex == epoch div TestEpochSizeSec
+      onchainRln.nonceManager.nextId == 1'u64
+
+    while nowSec() == epoch:
+      await sleepAsync(chronos.milliseconds(10))
+    service.retryNow()
+    checkUntilTimeout:
+      task.state == DeliveryState.SuccessfullyPropagated
+    let stampSec = uint64(task.msg.timestamp div 1_000_000_000)
+    check:
+      processor.calls == 2
+      task.msgHash != firstHash
+      stampSec > epoch
+      task.msg.proof.len > 0
+      onchainRln.nonceManager.epochIndex == stampSec div TestEpochSizeSec
+      onchainRln.nonceManager.nextId == 1'u64
+
+  asyncTest "a retry in the same epoch keeps its wire object and its proof":
+    let processor = FailFirstProcessor()
+    let manager =
+      RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
+    let service = SendService
+      .new(false, waku, manager, processor, retryInterval = chronos.minutes(10))
+      .expect("SendService.new")
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+
+    let before = nowSec()
+    while nowSec() == before:
+      await sleepAsync(chronos.milliseconds(10))
+    let epoch = nowSec()
+    let task = buildTask("retry-same-epoch")
+    check service.enqueue(task).isOk()
+    checkUntilTimeout:
+      task.state == DeliveryState.NextRoundRetry
+    let firstHash = task.msgHash
+    let firstProof = task.msg.proof
+    service.retryNow()
+    checkUntilTimeout:
+      task.state == DeliveryState.SuccessfullyPropagated
+    if nowSec() != epoch:
+      # The epoch rolled during the test, so the retry had to make a new object.
+      skip()
+      return
+    check:
+      processor.calls == 2
+      task.msgHash == firstHash
+      task.msg.proof == firstProof
+      onchainRln.nonceManager.nextId == 1'u64
 
   asyncTest "attaches a proof":
     let attached = (await waku.attachRlnProof(testMessage())).expect("attachRlnProof")

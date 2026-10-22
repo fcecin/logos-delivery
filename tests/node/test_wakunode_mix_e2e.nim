@@ -403,6 +403,7 @@ suite "Waku Mix - end to end transport":
       msgHash: computeMessageHash(shard, msg),
       state: DeliveryState.Entry,
       firstAdmittedTime: Opt.some(Moment.now()), # admitted: no budget, no proof
+      admitted: true,
     )
     let before = hopCounts()
     check service.enqueue(task).isOk()

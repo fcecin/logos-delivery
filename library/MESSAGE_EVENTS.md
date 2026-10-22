@@ -178,7 +178,7 @@ For a send that no store node confirms (only with the `reliability` option on):
 2. **message_propagated** → Message delivered to peers
 3. **message_error** → No store node confirmed the message within the validation window
 
-The `on_reply` callback of `logosdelivery_ctx_send` gets the request ID before the event thread gets an event of that request. When the send queue is full, `logosdelivery_ctx_send` returns an error and no request ID. Two sends of one message are two requests. The node sets the message timestamp, and so the message hash, at the first send attempt, so the hash first comes in the first event after that attempt.
+The `on_reply` callback of `logosdelivery_ctx_send` gets the request ID before the event thread gets an event of that request. When the send queue is full, `logosdelivery_ctx_send` returns an error and no request ID. Two sends of one message are two requests. The node sets the message timestamp, and so the message hash, at the first send attempt, so the hash first comes in the first event after that attempt. A retry sends the message as a new message, with a new timestamp, a new hash and, with RLN, a new proof, when the RLN epoch of its timestamp passed, or when its timestamp is about to be older than a receiver accepts (5 minutes behind the clock of the receiver). The events of the request carry the hash of the copy that propagated. A receiver can get two copies of the content, with two hashes, when an earlier attempt reached a node that did not answer.
 
 ## Important Notes
 

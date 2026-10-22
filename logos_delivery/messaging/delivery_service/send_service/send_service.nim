@@ -23,7 +23,9 @@ logScope:
 const DeliveryWindow* = chronos.minutes(1)
   ## The delivery window: how long an admitted task tries before it fails with no
   ## propagation (`Preferred` gets two, see `maxDeliveryTime`). Also the mix
-  ## window of `MixSendProcessor` and the default Store validation window.
+  ## window of `MixSendProcessor` and the default Store validation window. A
+  ## window longer than `StampRefreshAge` makes a task renew its message (see
+  ## `stampExpired`).
 
 proc maxDeliveryTime*(anonymityLevel: AnonymityLevel): timer.Duration =
   ## `Preferred` gets two windows: one for mix, then one for the plain path.
@@ -50,6 +52,19 @@ const ArchiveTime = chronos.seconds(3)
 const StoreValidationQueryTimeout = chronos.seconds(15)
   ## Bounds one Store validation query with its dials. It exceeds one
   ## `DefaultDialTimeout`, so a dead Store peer leaves time for another.
+
+const StampRefreshMargin = chronos.seconds(60)
+  ## How much younger than `MaxMessageTimestampSkewPastSeconds` the stamp of a
+  ## wire object must be for a retry to send it again: the network latency and
+  ## the clock difference between peers, with margin.
+
+const StampRefreshAge* =
+  chronos.seconds(MaxMessageTimestampSkewPastSeconds) - StampRefreshMargin
+  ## A retry sends the current wire object again only while its stamp is younger
+  ## than this. A receiver accepts a timestamp up to
+  ## `MaxMessageTimestampSkewPastSeconds` behind its clock, whatever the retry
+  ## window of this node, so an older stamp gets a new wire object: a new
+  ## timestamp, a new hash and, with RLN, a new proof.
 
 const MaxSendsInFlight* = 50
   ## The number of sends that run at the same time. It bounds the open streams
@@ -79,8 +94,8 @@ type SendService* = ref object of RootObj
   subscribeOnSend: bool ## True only for the None anonymity level.
   sendProcessor: BaseSendProcessor
   rateLimitManager: RateLimitManager
-    ## Charges first transmissions against the per-epoch budget; re-publishes
-    ## are free.
+    ## Charges each wire object against the per-epoch budget. A retry of the same
+    ## wire object is free.
 
   waku: Waku
   checkStoreForMessages: bool
@@ -99,6 +114,8 @@ type SendService* = ref object of RootObj
     ## Also the pause of the Store validation loop while no Store peer is available.
   sendQueueCapacity*: int
   retryInterval: timer.Duration
+  stampRefreshAge: timer.Duration
+    ## See `StampRefreshAge`. Zero makes each retry a new wire object.
 
 proc setupSendProcessorChain*(
     waku: Waku, anonymityLevel: AnonymityLevel
@@ -154,6 +171,7 @@ proc new*(
     maxValidationAge: timer.Duration = DeliveryWindow,
     retryInterval: timer.Duration = RetryInterval,
     maxSendsInFlight: int = MaxSendsInFlight,
+    stampRefreshAge: timer.Duration = StampRefreshAge,
 ): Result[T, string] =
   # With zero, `retryLoop` ticks at each turn of the event loop, and the waiting
   # tasks retry with no pause.
@@ -161,6 +179,8 @@ proc new*(
     return err("retryInterval must be positive")
   if maxSendsInFlight <= 0:
     return err("maxSendsInFlight must be positive")
+  if stampRefreshAge < ZeroDuration:
+    return err("stampRefreshAge must not be negative")
 
   let checkStoreForMessages = preferP2PReliability and waku.isStoreMounted()
 
@@ -180,6 +200,7 @@ proc new*(
     archiveTime: ArchiveTime,
     sendQueueCapacity: sendQueueCapacity,
     retryInterval: retryInterval,
+    stampRefreshAge: stampRefreshAge,
     subscribeOnSend: anonymityLevel == AnonymityLevel.None,
   )
 
@@ -388,7 +409,7 @@ proc admitAndProve(self: SendService, task: DeliveryTask): Future[bool] {.async.
   if not self.sendProcessor.checkBeforeAdmission(task):
     return false
 
-  if task.firstAdmittedTime.isNone():
+  if not task.admitted:
     # Ephemeral traffic is shed rather than queued so it cannot eat into the
     # budget left for durable messages.
     if task.isEphemeral():
@@ -405,7 +426,9 @@ proc admitAndProve(self: SendService, task: DeliveryTask): Future[bool] {.async.
         requestId = task.requestId, msgHash = task.hashHex()
       self.reportTaskQueued(task)
       return false
-    task.firstAdmittedTime = Opt.some(Moment.now())
+    task.admitted = true
+    if task.firstAdmittedTime.isNone():
+      task.firstAdmittedTime = Opt.some(Moment.now())
 
   if not task.isStamped():
     # The first attempt starts here. The timestamp sets the epoch of the proof
@@ -416,8 +439,9 @@ proc admitAndProve(self: SendService, task: DeliveryTask): Future[bool] {.async.
   # The message timestamp sets its epoch, so a backend past that epoch or out of
   # budget fails the task. Other errors wait for a retry.
   task.msg = (await self.waku.attachRlnProof(task.msg)).valueOr:
-    if task.tryCount == 0:
-      # No send processor got the task, so the next attempt stamps it again.
+    if not task.stampTried:
+      # No send processor got the wire object, so the next attempt makes a new
+      # one.
       task.clearStamp()
     case error.kind
     of RlnErrorKind.Permanent, RlnErrorKind.BudgetExhausted:
@@ -431,9 +455,23 @@ proc admitAndProve(self: SendService, task: DeliveryTask): Future[bool] {.async.
   return true
 
 func needsAdmission(self: SendService, task: DeliveryTask): bool =
-  ## True when the task needs an epoch budget charge or an RLN proof. A task that
-  ## needs neither does not wait for another task in `admitAndProve`.
-  return task.firstAdmittedTime.isNone() or self.waku.needsRlnProof(task.msg)
+  ## True when the task needs a budget charge, a stamp or an RLN proof. A task
+  ## that needs none of them does not wait for another task in `admitAndProve`.
+  return not task.admitted or not task.isStamped() or self.waku.needsRlnProof(task.msg)
+
+proc stampExpired(self: SendService, task: DeliveryTask): bool =
+  ## True when a retry must not send the current wire object again: its stamp is
+  ## older than `stampRefreshAge`, so a receiver would soon refuse it, or its RLN
+  ## epoch is not the current one, so a validator refuses its proof and the
+  ## backend draws no message id for it. Both come from this node's clock, so the
+  ## sender decides before a receiver does.
+  if task.stampAge() > self.stampRefreshAge:
+    return true
+  let stampEpoch = self.waku.rlnEpochIndexOf(task.msg.timestamp).valueOr:
+    return false
+  let currentEpoch = self.waku.rlnEpochIndexOf(getNowInNanosecondTime()).valueOr:
+    return false
+  return stampEpoch != currentEpoch
 
 proc runAdmission(
     self: SendService, task: DeliveryTask
@@ -472,12 +510,23 @@ proc sendUntilPropagated(
 ): Future[bool] {.async: (raises: [CancelledError]).} =
   ## Makes the first attempt at once, then one attempt at each tick of
   ## `retryLoop`, until the task propagates. Returns false when the task failed.
+  ## A retry whose wire object expired (`stampExpired`) makes a new one first.
   while true:
     # The task holds a send slot through its admission, so the stamp of its first
     # attempt is taken when the send can run at once.
     await self.sendSlots.acquire()
     try:
+      if task.isStamped() and task.stampTried and self.stampExpired(task):
+        # The old wire object can be on the network, so the new one is a new
+        # message, and it is charged as one.
+        debug "Retry makes a new wire object",
+          requestId = task.requestId,
+          oldHash = task.hashHex(),
+          stampAge = task.stampAge()
+        task.clearStamp()
+        task.admitted = false
       if not self.needsAdmission(task) or await self.runAdmission(task):
+        task.stampTried = true
         try:
           await self.sendProcessor.process(task)
         except CancelledError as exc:
