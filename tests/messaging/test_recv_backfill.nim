@@ -15,7 +15,7 @@ import logos_delivery/api/conf/messaging_conf
 import logos_delivery/api/conf/logos_delivery_conf_json
 import logos_delivery/waku/[waku_core, waku_store/common]
 import logos_delivery/waku/persistency/persistency
-from logos_delivery/waku/waku_archive/archive import MaxMessageTimestampVariance
+from logos_delivery/waku/waku_archive/archive import MaxMessageTimestampVariancePast
 
 const
   Base = 1_700_000_000_000_000_000'i64 ## 2023-11-14
@@ -360,7 +360,7 @@ suite "Receive backfill":
 
   test "topic records: the transitions":
     let now = Base + Hour
-    let variance = MaxMessageTimestampVariance
+    let variance = MaxMessageTimestampVariancePast
     # A first subscribe is live from the subscribe, or a gap from it when live
     # delivery is in an outage, or when it went down after the subscribe. The
     # bound is below the subscribe by the variance of the timestamps.

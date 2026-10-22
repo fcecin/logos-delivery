@@ -96,7 +96,7 @@ suite "Waku Archive - message handling":
     ## Given
     let
       now = now()
-      invalidSenderTime = now + MaxMessageTimestampVariance + 1_000_000_000
+      invalidSenderTime = now + MaxMessageTimestampVarianceFuture + 1_000_000_000
         # 1 second over the max variance
 
     let message = fakeWakuMessage(ts = invalidSenderTime)
@@ -108,6 +108,27 @@ suite "Waku Archive - message handling":
     check:
       (waitFor driver.getMessagesCount()).tryGet() == 0
 
+  test "it should archive a message with a sender time older than the future variance":
+    ## A retry keeps the timestamp of its message, so a message can reach the
+    ## archive long after its timestamp.
+    ## Setup
+    let driver = newSqliteArchiveDriver()
+    let archive = newWakuArchive(driver)
+
+    ## Given
+    let
+      now = now()
+      oldSenderTime = now - MaxMessageTimestampVarianceFuture - 1
+
+    let message = fakeWakuMessage(ts = oldSenderTime)
+
+    ## When
+    waitFor archive.handleMessage(DefaultPubSubTopic, message)
+
+    ## Then
+    check:
+      (waitFor driver.getMessagesCount()).tryGet() == 1
+
   test "it should not archive a message with a sender time variance greater than max time variance (past)":
     ## Setup
     let driver = newSqliteArchiveDriver()
@@ -116,7 +137,7 @@ suite "Waku Archive - message handling":
     ## Given
     let
       now = now()
-      invalidSenderTime = now - MaxMessageTimestampVariance - 1
+      invalidSenderTime = now - MaxMessageTimestampVariancePast - 1
 
     let message = fakeWakuMessage(ts = invalidSenderTime)
 

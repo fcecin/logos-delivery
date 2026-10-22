@@ -13,7 +13,7 @@ import
   logos_delivery/waku/[waku_core, waku_store/common],
   logos_delivery/waku/common/[paging, protobuf],
   logos_delivery/waku/persistency/persistency
-from logos_delivery/waku/waku_archive/archive import MaxMessageTimestampVariance
+from logos_delivery/waku/waku_archive/archive import MaxMessageTimestampVariancePast
 
 logScope:
   topics = "recv backfill"
@@ -78,7 +78,7 @@ func newRecord*(
     at: Timestamp,
     live: bool,
     liveSince: Timestamp,
-    variance = MaxMessageTimestampVariance,
+    variance = MaxMessageTimestampVariancePast,
 ): TopicRecord =
   ## The record of a topic subscribed at `at`. When live delivery is ready now
   ## and did not change after the subscribe, it covers the topic from the
@@ -112,7 +112,7 @@ func atStart*(record: TopicRecord, lastReceivedAt: Opt[Timestamp]): TopicRecord 
 func coveredFrom*(
     liveSince, subscribedSince: Timestamp,
     delayExtra = DelayExtra,
-    variance = MaxMessageTimestampVariance,
+    variance = MaxMessageTimestampVariancePast,
 ): Timestamp =
   ## The time from which live delivery covers a topic. It is the later of the
   ## last recovery and the subscribe, plus `delayExtra` and `variance`. The
@@ -120,7 +120,9 @@ func coveredFrom*(
   return max(liveSince, subscribedSince) + delayExtra + variance
 
 func archivedBefore*(
-    now: Timestamp, archiveTime = ArchiveTime, variance = MaxMessageTimestampVariance
+    now: Timestamp,
+    archiveTime = ArchiveTime,
+    variance = MaxMessageTimestampVariancePast,
 ): Timestamp =
   ## The archive has every message with a timestamp before this time.
   return now - variance - archiveTime
