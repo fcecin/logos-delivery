@@ -295,8 +295,8 @@ suite "Waku rln relay":
     (await manager.register(idCredentials, UserMessageLimit(20))).isOkOr:
       assert false, "error returned when calling register: " & error
 
-    # usually it's 20 seconds but we set it to 1 for testing purposes which make the test faster
-    rln.rlnMaxTimestampGap = 1
+    # usually it's 300 seconds but we set it to 1 for testing purposes which make the test faster
+    rln.rlnMaxTimestampGapPast = 1
 
     var epoch = rln.getCurrentEpoch()
 
@@ -329,6 +329,53 @@ suite "Waku rln relay":
     check:
       msgValidate1 == MessageValidationResult.Valid
       msgValidate2 == MessageValidationResult.Invalid
+
+  asyncTest "validateMessageAndUpdateLog: accepts a timestamp behind the clock inside the past gap":
+    ## A retry keeps the timestamp of its message, so a message reaches a
+    ## validator long after its timestamp. The past gap accepts it. The future
+    ## gap does not accept the same distance ahead of the clock.
+    let index = MembershipIndex(5)
+    let wakuRlnConfig = getWakuRlnConfig(manager = manager, index = index)
+    var rln: RlnEvm
+    lockNewGlobalBrokerContext:
+      rln = (await RlnEvm.new(wakuRlnConfig, Opt.some(globalBrokerContext()))).valueOr:
+        raiseAssert $error
+    let manager = cast[RlnEvmGroupManager](rln.groupManager)
+    manager.receiptRetryStrategy = AnvilReceiptRetryStrategy
+    let idCredentials = generateCredentials()
+    (await manager.register(idCredentials, UserMessageLimit(20))).isOkOr:
+      assert false, "error returned when calling register: " & error
+
+    # 25 s behind the clock: past the old 20 s gap, inside the past gap.
+    let behindTime = now() - 25_000_000_000
+    var behind = WakuMessage(
+      payload: "late message".toBytes(),
+      contentTopic: DefaultPubsubTopic,
+      timestamp: behindTime,
+    )
+    behind = (
+      await rln.unsafeAppendRLNProof(
+        behind, rln.calcEpoch(float64(behindTime) / 1e9), MessageId(1)
+      )
+    ).valueOr:
+      raiseAssert $error
+    # 25 s ahead of the clock: past the future gap.
+    let aheadTime = now() + 25_000_000_000
+    var ahead = WakuMessage(
+      payload: "early message".toBytes(),
+      contentTopic: DefaultPubsubTopic,
+      timestamp: aheadTime,
+    )
+    ahead = (
+      await rln.unsafeAppendRLNProof(
+        ahead, rln.calcEpoch(float64(aheadTime) / 1e9), MessageId(2)
+      )
+    ).valueOr:
+      raiseAssert $error
+
+    check:
+      (await rln.validateMessageAndUpdateLog(behind)) == MessageValidationResult.Valid
+      (await rln.validateMessageAndUpdateLog(ahead)) == MessageValidationResult.Invalid
 
   asyncTest "multiple senders with same external nullifier":
     let index1 = MembershipIndex(5)

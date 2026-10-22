@@ -33,7 +33,8 @@ proc testRlnEvm(ctx: BrokerContext, secret: seq[byte] = @[1'u8]): RlnEvm =
     nonceManager: NonceManager.init(nonceLimit = 100),
     reserveLock: newAsyncLock(),
     rlnEpochSizeSec: TestEpochSizeSec,
-    rlnMaxTimestampGap: 20,
+    rlnMaxTimestampGapPast: 300,
+    rlnMaxTimestampGapFuture: 20,
     brokerCtx: Opt.some(ctx),
   )
 

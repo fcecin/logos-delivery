@@ -30,16 +30,25 @@ proc checkTimestampBounds(
     rlnEvm: RlnEvm, senderEpochTime: float64
 ): Result[void, RlnError] =
   ## The bound validators apply (`validateMessage`): every receiver rejects
-  ## a proof for a time more than `rlnMaxTimestampGap` from its clock, and
-  ## reserving an id for such a time would move the counter into an epoch
-  ## that has not arrived. Caller-supplied timestamps reach the generators
-  ## over REST and lightpush.
-  let gap = uint64(abs(epochTime() - senderEpochTime))
-  if gap > rlnEvm.rlnMaxTimestampGap:
+  ## a proof for a time more than `rlnMaxTimestampGapPast` behind its clock or
+  ## more than `rlnMaxTimestampGapFuture` ahead of it, and reserving an id for a
+  ## later time would move the counter into an epoch that has not arrived.
+  ## Caller-supplied timestamps reach the generators over REST and lightpush.
+  let now = epochTime()
+  let behind = uint64(max(now - senderEpochTime, 0.0))
+  let ahead = uint64(max(senderEpochTime - now, 0.0))
+  if behind > rlnEvm.rlnMaxTimestampGapPast:
     return err(
       RlnError.permanent(
-        "timestamp is " & $gap & " s from now, beyond the accepted " &
-          $rlnEvm.rlnMaxTimestampGap & " s"
+        "timestamp is " & $behind & " s behind now, beyond the accepted " &
+          $rlnEvm.rlnMaxTimestampGapPast & " s"
+      )
+    )
+  if ahead > rlnEvm.rlnMaxTimestampGapFuture:
+    return err(
+      RlnError.permanent(
+        "timestamp is " & $ahead & " s ahead of now, beyond the accepted " &
+          $rlnEvm.rlnMaxTimestampGapFuture & " s"
       )
     )
   return ok()
@@ -110,7 +119,7 @@ proc ensureMessageIdsLoaded*(
       # Within the timestamp tolerance this is a message stamped early;
       # beyond it, the clock or the saved row is wrong.
       let rowEpochStart = float64(row.epochIndex) * float64(rlnEvm.rlnEpochSizeSec)
-      if rowEpochStart - now > float64(rlnEvm.rlnMaxTimestampGap):
+      if rowEpochStart - now > float64(rlnEvm.rlnMaxTimestampGapFuture):
         warn "RLN message ids were last drawn in an epoch ahead of the clock; no ids are drawn until the clock reaches it. If the clock is right, deleting rln.db resets the counter",
           storedEpoch = row.epochIndex, currentEpoch = currentEpoch
 
