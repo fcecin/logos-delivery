@@ -56,7 +56,7 @@ Emitted when a send fails: rejected, retry window elapsed, parked too long, ephe
 **Fields:**
 - `eventType`: Always "message_error"
 - `requestId`: Request ID from the send operation
-- `messageHash`: Hash of the message that failed
+- `messageHash`: Hash of the message that failed. Empty when the send failed before its first attempt.
 - `error`: Description of what went wrong
 
 ### 4. message_queued
@@ -74,7 +74,7 @@ Emitted when a send is held back because the current epoch's rate-limit budget i
 **Fields:**
 - `eventType`: Always "message_queued"
 - `requestId`: Request ID from the send operation
-- `messageHash`: Hash of the message that was held back
+- `messageHash`: Empty. The node makes the message, its timestamp and its hash at the first send attempt, after the wait for budget.
 
 ### 5. message_received
 Emitted once for every message accepted on a subscribed content topic, whether it arrived live from the network or was recovered from a Store peer (at startup, or after a connectivity gap). The `source` field tells the two apart.
@@ -178,7 +178,7 @@ For a send that no store node confirms (only with the `reliability` option on):
 2. **message_propagated** → Message delivered to peers
 3. **message_error** → No store node confirmed the message within the validation window
 
-The `on_reply` callback of `logosdelivery_ctx_send` gets the request ID before the event thread gets an event of that request. When the send queue is full, `logosdelivery_ctx_send` returns an error and no request ID. A send of a message that the send queue already has gets the request ID of the queued send.
+The `on_reply` callback of `logosdelivery_ctx_send` gets the request ID before the event thread gets an event of that request. When the send queue is full, `logosdelivery_ctx_send` returns an error and no request ID. Two sends of one message are two requests. The node sets the message timestamp, and so the message hash, at the first send attempt, so the hash first comes in the first event after that attempt.
 
 ## Important Notes
 

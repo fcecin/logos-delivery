@@ -1,7 +1,7 @@
 {.push raises: [].}
 
 import libp2p/crypto/crypto, bearssl/rand, std/times, chronos
-import std/strutils
+import std/[hashes, strutils]
 import results, stew/byteutils
 import logos_delivery/waku/utils/requests as request_utils
 import logos_delivery/waku/waku_core/[topics/content_topic, message/message, time]
@@ -63,6 +63,10 @@ proc `$`*(r: RequestId): string {.inline.} =
 proc `==`*(a, b: RequestId): bool {.inline.} =
   string(a) == string(b)
 
+proc hash*(r: RequestId): Hash {.inline.} =
+  ## Lets a `RequestId` key a `Table`.
+  hash(string(r))
+
 proc init*(
     T: type MessageEnvelope,
     contentTopic: ContentTopic,
@@ -89,16 +93,16 @@ proc init*(
     )
 
 proc toWakuMessage*(envelope: MessageEnvelope): WakuMessage =
-  ## Convert a MessageEnvelope to a WakuMessage.
-  var wm = WakuMessage(
+  ## Converts a `MessageEnvelope` to a `WakuMessage` with no timestamp. The send
+  ## service sets the timestamp at the first send attempt (`DeliveryTask.stamp`),
+  ## so the message is fresh for the Store nodes and the RLN validators. The
+  ## proof epoch derives from that timestamp.
+  return WakuMessage(
     contentTopic: envelope.contentTopic,
     payload: envelope.payload,
     ephemeral: envelope.ephemeral,
     meta: envelope.meta,
-    timestamp: getNowInNanosecondTime(),
+    timestamp: 0,
   )
-
-  ## The send path (attachRlnProof) attaches the proof; its epoch derives from this timestamp.
-  return wm
 
 {.pop.}

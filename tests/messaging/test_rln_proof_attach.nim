@@ -56,7 +56,9 @@ var lezPlugin = LogosDeliveryRlnPlugin(get_epoch_quota: lezGetQuota)
 
 type FailingProofBackend = ref object
   ## Fails every proof with `failWith`; the test can change it between attempts.
+  ## With `succeed` set, it returns a proof instead.
   failWith: RlnErrorKind
+  succeed: bool
   attempts: int
 
 proc mountFailingRln(waku: Waku, failWith: RlnErrorKind): FailingProofBackend =
@@ -64,6 +66,8 @@ proc mountFailingRln(waku: Waku, failWith: RlnErrorKind): FailingProofBackend =
 
   proc generate(message: WakuMessage): Future[Result[seq[byte], RlnError]] {.async.} =
     backend.attempts.inc()
+    if backend.succeed:
+      return ok(@[1'u8, 2, 3])
     return err(RlnError.init(backend.failWith, "scripted attach failure"))
 
   waku.node.rlnPlugin = Opt.some(RlnPlugin(name: "stub", generateProof: generate))
@@ -80,16 +84,22 @@ method sendImpl(self: CountingProcessor, task: DeliveryTask): Future[void] {.asy
   inc self.calls
   task.state = DeliveryState.SuccessfullyPropagated
 
-proc buildTask(id: string): DeliveryTask =
-  let msg = testMessage()
+proc buildTask(id: string, stamped = false): DeliveryTask =
+  ## As a task from `DeliveryTask.new`, the task has no timestamp and no hash:
+  ## the first attempt stamps it. A `stamped` task has them from the start.
+  var msg = testMessage()
+  if not stamped:
+    msg.timestamp = 0
   let pubsubTopic = PubsubTopic("/waku/2/rs/3/0")
-  return DeliveryTask(
+  let task = DeliveryTask(
     requestId: RequestId(id),
     pubsubTopic: pubsubTopic,
     msg: msg,
-    msgHash: computeMessageHash(pubsubTopic, msg),
     state: DeliveryState.Entry,
   )
+  if stamped:
+    task.msgHash = computeMessageHash(pubsubTopic, msg)
+  return task
 
 suite "SendService RLN proof attach":
   asyncTest "passes the message through unproven when RLN is not mounted":
@@ -216,6 +226,38 @@ suite "SendService RLN proof attach - failing backend":
       backend.attempts == 2
       not service.isFull() # removed, so no later attempt reserves an id for it
 
+  asyncTest "a task that waited for the backend is stamped at the attempt that gets its proof":
+    ## A NotReady attach leaves no wire object behind. The retry stamps the task
+    ## again, so its proof and its timestamp come from the same moment.
+    let backend = waku.mountFailingRln(RlnErrorKind.NotReady)
+    let processor = CountingProcessor()
+    let service = newService(processor)
+    let task = buildTask("stamped-with-proof")
+
+    check service.enqueue(task).isOk()
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+    checkUntilTimeout:
+      task.state == DeliveryState.NextRoundRetry
+    check:
+      backend.attempts == 1
+      not task.isStamped()
+      task.msg.proof.len == 0
+
+    let beforeRetry = getNowInNanosecondTime()
+    backend.succeed = true
+    service.retryNow()
+    checkUntilTimeout:
+      task.state == DeliveryState.SuccessfullyPropagated
+    check:
+      backend.attempts == 2
+      processor.calls == 1
+      task.isStamped()
+      task.msg.timestamp >= beforeRetry
+      task.msg.proof.len > 0
+      errors.len == 0
+
 suite "SendService RLN proof attach - RLN mounted":
   var
     waku {.threadvar.}: Waku
@@ -267,7 +309,7 @@ suite "SendService RLN proof attach - RLN mounted":
         mixLightpushSize(PubsubTopic("/waku/2/rs/3/0"), proven).size
 
   asyncTest "an oversized Required send leaves EVM message ids and admission budget untouched":
-    let task = buildTask("oversized-with-evm")
+    let task = buildTask("oversized-with-evm", stamped = true)
     let limit = mixLightpushSize(task.pubsubTopic, task.msg).limit
     for n in 0 .. limit:
       task.msg.payload = newSeq[byte](n)
@@ -296,6 +338,70 @@ suite "SendService RLN proof attach - RLN mounted":
       task.firstAdmittedTime.isNone()
       onchainRln.nonceManager.nextId == 0
       quota.sentInCurrentEpoch == 0
+
+  asyncTest "a task parked for budget across an epoch roll gets a proof of its release epoch":
+    ## The local cap parks the second send. By its release, a proof drew the
+    ## first id of the next epoch. The stamp at the release gives the parked task
+    ## a timestamp of that epoch, so its proof draws from that epoch too.
+    let processor = CountingProcessor()
+    let manager = RateLimitManager
+      .new(
+        RateLimitConfig(
+          enabled: true, epochPeriodSec: TestEpochSizeSec, messagesPerEpoch: 1
+        ),
+        proc(): Future[Opt[EpochQuota]] {.async: (raises: []), gcsafe.} =
+          let res =
+            try:
+              await waku.rlnEpochQuota(nowSec())
+            except CatchableError:
+              return Opt.none(EpochQuota)
+          let quota = res.valueOr:
+            return Opt.none(EpochQuota)
+          return Opt.some(quota),
+      )
+      .expect("RateLimitManager.new")
+    let service = SendService
+      .new(false, waku, manager, processor, retryInterval = chronos.minutes(10))
+      .expect("SendService.new")
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+
+    # From the start of an epoch, so the first send and the park share it.
+    let before = nowSec()
+    while nowSec() == before:
+      await sleepAsync(chronos.milliseconds(10))
+    let epoch = nowSec()
+    let first = buildTask("in-budget")
+    let parked = buildTask("parked-across-roll")
+    check:
+      service.enqueue(first).isOk()
+      service.enqueue(parked).isOk()
+    checkUntilTimeout:
+      first.state == DeliveryState.SuccessfullyPropagated and
+        parked.state == DeliveryState.NextRoundRetry
+    check:
+      parked.firstAdmittedTime.isNone()
+      not parked.isStamped()
+      onchainRln.nonceManager.epochIndex == epoch div TestEpochSizeSec
+      onchainRln.nonceManager.nextId == 1'u64
+
+    # The epoch rolls, and a proof draws the first id of the new epoch.
+    while nowSec() == epoch:
+      await sleepAsync(chronos.milliseconds(10))
+    discard (await waku.attachRlnProof(messageAt(nowSec(), "next-epoch"))).expect(
+      "proof in the next epoch"
+    )
+    check onchainRln.nonceManager.epochIndex > epoch div TestEpochSizeSec
+
+    service.retryNow()
+    checkUntilTimeout:
+      parked.state == DeliveryState.SuccessfullyPropagated
+    check:
+      parked.isStamped()
+      uint64(parked.msg.timestamp div 1_000_000_000) > epoch
+      parked.msg.proof.len > 0
+      processor.calls == 2
 
   asyncTest "attaches a proof":
     let attached = (await waku.attachRlnProof(testMessage())).expect("attachRlnProof")

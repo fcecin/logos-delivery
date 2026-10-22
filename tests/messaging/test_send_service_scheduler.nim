@@ -64,26 +64,20 @@ suite "SendService - rate-limit scheduling":
     ## The node is never started, so stop is best-effort cleanup.
     discard await waku.stop()
 
-  proc buildTask(
-      id, payload: string,
-      timestamp: Timestamp = getNowInNanosecondTime(),
-      ephemeral = false,
-  ): DeliveryTask =
+  proc buildTask(id, payload: string, ephemeral = false): DeliveryTask =
     ## Built directly rather than via `DeliveryTask.new`, which needs a broker
-    ## provider only registered once the node starts. The message is from now,
-    ## so a task that parks for budget is not too old.
+    ## provider only registered once the node starts. As a task from
+    ## `DeliveryTask.new`, it has no timestamp and no hash: the first attempt
+    ## stamps it.
     let msg = WakuMessage(
       contentTopic: "/test/1/scheduler/proto",
       payload: payload.toBytes(),
-      timestamp: timestamp,
       ephemeral: ephemeral,
     )
-    let pubsubTopic = PubsubTopic("/waku/2/rs/3/0")
     return DeliveryTask(
       requestId: RequestId(id),
-      pubsubTopic: pubsubTopic,
+      pubsubTopic: PubsubTopic("/waku/2/rs/3/0"),
       msg: msg,
-      msgHash: computeMessageHash(pubsubTopic, msg),
       state: DeliveryState.Entry,
     )
 
@@ -233,6 +227,54 @@ suite "SendService - rate-limit scheduling":
       task.firstAdmittedTime.isSome()
       task.state == DeliveryState.SuccessfullyPropagated
 
+  asyncTest "a parked task gets its timestamp and hash when it is admitted":
+    ## The stamp comes at the first attempt, after the wait for budget, so a
+    ## Store node and an RLN validator see a fresh message. The propagation
+    ## event carries that hash.
+    let epoch = new uint64
+    epoch[] = 1'u64
+    let manager = RateLimitManager
+      .new(
+        RateLimitConfig(enabled: true, epochPeriodSec: 600, messagesPerEpoch: 1),
+        fixedEpochQuota(epoch, rateLimit = 100),
+      )
+      .expect("RateLimitManager.new")
+    let processor = FakeSendProcessor(script: @[DeliveryState.SuccessfullyPropagated])
+    let service = SendService
+      .new(false, waku, manager, processor, retryInterval = chronos.minutes(10))
+      .expect("SendService.new")
+    var propagated: seq[MessagePropagatedEvent]
+    discard MessagePropagatedEvent
+      .listen(
+        waku.brokerCtx,
+        proc(evt: MessagePropagatedEvent) {.async: (raises: []).} =
+          propagated.add(evt),
+      )
+      .expect("listen MessagePropagatedEvent")
+    defer:
+      await MessagePropagatedEvent.dropAllListeners(waku.brokerCtx)
+
+    await service.sendNow(buildTask("stamped-in-budget", "one"))
+    let parked = buildTask("stamped-after-park", "two")
+    await service.sendNow(parked)
+    check:
+      parked.state == DeliveryState.NextRoundRetry
+      not parked.isStamped()
+      parked.msg.timestamp == 0
+      parked.msgHash == EmptyWakuMessageHash
+
+    let beforeRelease = getNowInNanosecondTime()
+    epoch[] = 2'u64
+    await service.retryAndWait(1)
+    check:
+      parked.state == DeliveryState.SuccessfullyPropagated
+      parked.isStamped()
+      parked.msg.timestamp >= beforeRelease
+      parked.msgHash == computeMessageHash(parked.pubsubTopic, parked.msg)
+      propagated.mapIt(it.requestId) ==
+        @[RequestId("stamped-in-budget"), parked.requestId]
+      propagated[1].messageHash == parked.msgHash.to0xHex()
+
   asyncTest "a task parked for budget reports itself queued, exactly once":
     ## The park branch is re-entered every retry round; the event must not be.
     let epoch = new uint64
@@ -266,7 +308,8 @@ suite "SendService - rate-limit scheduling":
     check:
       queued.len == 1
       queued[0].requestId == second.requestId
-      queued[0].messageHash == second.msgHash.to0xHex()
+      queued[0].messageHash == "" # no stamp before the first attempt
+      not second.isStamped()
 
     ## Still over budget: the task parks again, the event does not repeat.
     await service.retryAndWait(1)
@@ -338,7 +381,7 @@ suite "SendService - rate-limit scheduling":
       processor.calls == callsBefore
       queued.len == 0
       errors.mapIt(it.requestId) == @[eph.requestId]
-      errors.mapIt(it.messageHash) == @[eph.msgHash.to0xHex()]
+      errors.mapIt(it.messageHash) == @[""] # dropped before its stamp
 
     ## It is not parked, so no later attempt gives it to the processor.
     await service.retryAndWait(0)
@@ -454,26 +497,35 @@ suite "SendService - rate-limit scheduling":
     let errors = new seq[MessageErrorEvent]
     listenErrors(waku.brokerCtx, errors)
 
-    ## Admitted, still retrying, with a timestamp far older than the limit.
-    let admitted = buildTask("admitted-old", "one", 1_700_000_000_000_000_000)
+    ## Admitted and still retrying: exempt from the parked age, however old.
+    let admitted = buildTask("admitted-old", "one")
     await service.sendNow(admitted)
-    let now = getNowInNanosecondTime()
-    let stale = buildTask("parked-stale", "two", now - 60_000_000_000)
-    let fresh = buildTask("parked-fresh", "three", now)
+    let stale = buildTask("parked-stale", "two")
+    let fresh = buildTask("parked-fresh", "three")
     await service.sendNow(stale)
     await service.sendNow(fresh)
     check:
       admitted.firstAdmittedTime.isSome()
       stale.firstAdmittedTime.isNone()
       fresh.firstAdmittedTime.isNone()
+      admitted.state == DeliveryState.NextRoundRetry
+      stale.state == DeliveryState.NextRoundRetry
+      fresh.state == DeliveryState.NextRoundRetry
+
+    ## The parked age counts from `enqueue`. Two tasks get older than the limit.
+    admitted.queuedAt = Moment.now() - chronos.seconds(60)
+    stale.queuedAt = Moment.now() - chronos.seconds(60)
+    await service.retryAndWait(3)
+    check:
+      admitted.state == DeliveryState.SuccessfullyPropagated
       stale.state == DeliveryState.FailedToDeliver
       errors[].mapIt(it.requestId) == @[stale.requestId]
-      admitted.state == DeliveryState.NextRoundRetry
+      errors[].mapIt(it.messageHash) == @[""] # failed before its stamp
       fresh.state == DeliveryState.NextRoundRetry
 
     ## The fresh parked task is still released when the epoch rolls.
     epoch[] = 2'u64
-    await service.retryAndWait(2)
+    await service.retryAndWait(1)
     check:
       fresh.firstAdmittedTime.isSome()
       fresh.state == DeliveryState.SuccessfullyPropagated

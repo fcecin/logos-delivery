@@ -69,7 +69,7 @@ logosdeliverynode --entry-layer=messaging --mode=core --preset=logos.test \
 
 A send is asynchronous. `200` means that the node accepted the message. The result arrives as send events with the same `requestId`:
 
-* `queued`: the send waits for rate-limit budget (only when rate limiting is on)
+* `queued`: the send waits for rate-limit budget (only when rate limiting is on). It carries no message hash: the node makes the message, its timestamp and its hash at the first send attempt, after the wait
 * `propagated`: the message reached at least one peer
 * `sent`: a Store peer confirmed that it holds the message, or, for a send over mix, the mix exit replied
 * `error`: the send failed (rejected message, no peer within the retry window, no Store confirmation within about 60 s of propagation, ...)

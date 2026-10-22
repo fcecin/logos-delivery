@@ -140,7 +140,12 @@ method checkBeforeAdmission*(
 ): bool {.gcsafe, raises: [].} =
   if self.fallbackAllowed:
     return true
-  let message = self.waku.messageForSizeCheck(task.msg).valueOr:
+  var probe = task.msg
+  if not task.isStamped():
+    # The check runs before the stamp. A timestamp of now has the bytes of the
+    # one that the stamp sets.
+    probe.timestamp = getNowInNanosecondTime()
+  let message = self.waku.messageForSizeCheck(probe).valueOr:
     task.state = DeliveryState.FailedToDeliver
     task.errorDesc = "Failed to determine RLN proof size: " & $error
     return false
