@@ -6,6 +6,8 @@ import chronos, chronicles, testutils/unittests, results, stew/byteutils
 import
   logos_delivery/waku/waku,
   logos_delivery/waku/waku_core,
+  logos_delivery/waku/node/waku_node,
+  logos_delivery/waku/rln/rln_plugin,
   logos_delivery/api/types,
   logos_delivery/api/events/messaging_client_events,
   logos_delivery/waku/factory/waku_conf,
@@ -135,16 +137,21 @@ suite "SendService - rate-limit scheduling":
 
     let task = buildTask("charge-once", "hi")
     await service.sendNow(task)
+    let hash = task.msgHash
+    let stamp = task.msg.timestamp
     check:
       manager.sentInCurrentEpoch == 1'u64
       task.firstAdmittedTime.isSome()
       task.state == DeliveryState.NextRoundRetry
 
+    ## The retry comes inside the refresh age, so it sends the same wire object.
     await service.retryAndWait(1)
     check:
       manager.sentInCurrentEpoch == 1'u64 # not re-charged on retry
       processor.calls == 2
       task.state == DeliveryState.SuccessfullyPropagated
+      task.msgHash == hash
+      task.msg.timestamp == stamp
 
   asyncTest "an over-budget task is parked, then released when the epoch rolls":
     ## Budget of one per epoch. The second send is parked until the epoch rolls,
@@ -274,6 +281,174 @@ suite "SendService - rate-limit scheduling":
       propagated.mapIt(it.requestId) ==
         @[RequestId("stamped-in-budget"), parked.requestId]
       propagated[1].messageHash == parked.msgHash.to0xHex()
+
+  proc oneSecondEpochs(): RlnPlugin =
+    ## A backend with one-second epochs and no proofs, so the service sees the
+    ## epoch of a stamp pass without a real backend.
+    return RlnPlugin(
+      name: "epochs",
+      epochIndexOf: proc(timestamp: uint64): uint64 {.gcsafe, raises: [].} =
+        timestamp,
+    )
+
+  proc nowSec(): uint64 =
+    return uint64(getNowInNanosecondTime() div 1_000_000_000)
+
+  proc waitEpochStart() {.async.} =
+    let before = nowSec()
+    while nowSec() == before:
+      await sleepAsync(chronos.milliseconds(10))
+
+  proc waitEpochAfter(epoch: uint64) {.async.} =
+    while nowSec() <= epoch:
+      await sleepAsync(chronos.milliseconds(10))
+
+  asyncTest "a retry with a stamp older than the refresh age makes a new wire object":
+    ## With a refresh age of zero, each retry sends a new message, whatever the
+    ## retry window: a receiver accepts a timestamp only so far behind its clock.
+    let epoch = new uint64
+    epoch[] = 1'u64
+    let manager = RateLimitManager
+      .new(
+        RateLimitConfig(enabled: true, epochPeriodSec: 600, messagesPerEpoch: 3),
+        fixedEpochQuota(epoch, rateLimit = 100),
+      )
+      .expect("RateLimitManager.new")
+    let processor = FakeSendProcessor(
+      script: @[DeliveryState.NextRoundRetry, DeliveryState.SuccessfullyPropagated]
+    )
+    let service = SendService
+      .new(
+        false,
+        waku,
+        manager,
+        processor,
+        retryInterval = chronos.minutes(10),
+        stampRefreshAge = ZeroDuration,
+      )
+      .expect("SendService.new")
+
+    let task = buildTask("aged-wire-object", "hi")
+    await service.sendNow(task)
+    let firstHash = task.msgHash
+    let firstStamp = task.msg.timestamp
+    check:
+      task.state == DeliveryState.NextRoundRetry
+      manager.sentInCurrentEpoch == 1'u64
+
+    await sleepAsync(chronos.milliseconds(2)) # so the new stamp differs
+    await service.retryAndWait(1)
+    check:
+      task.state == DeliveryState.SuccessfullyPropagated
+      task.msgHash != firstHash
+      task.msg.timestamp > firstStamp
+      manager.sentInCurrentEpoch == 2'u64
+
+  asyncTest "a retry in a later RLN epoch makes a new wire object and charges it":
+    ## The epoch of the stamp is not the current one, so the retry sends a new
+    ## message: a new timestamp, a new hash and a new charge. The propagation
+    ## event carries the hash of the copy that propagated.
+    waku.node.rlnPlugin = Opt.some(oneSecondEpochs())
+    let epoch = new uint64
+    epoch[] = 1'u64
+    let manager = RateLimitManager
+      .new(
+        RateLimitConfig(enabled: true, epochPeriodSec: 600, messagesPerEpoch: 3),
+        fixedEpochQuota(epoch, rateLimit = 100),
+      )
+      .expect("RateLimitManager.new")
+    let processor = FakeSendProcessor(
+      script: @[DeliveryState.NextRoundRetry, DeliveryState.SuccessfullyPropagated]
+    )
+    let service = SendService
+      .new(false, waku, manager, processor, retryInterval = chronos.minutes(10))
+      .expect("SendService.new")
+    var propagated: seq[MessagePropagatedEvent]
+    discard MessagePropagatedEvent
+      .listen(
+        waku.brokerCtx,
+        proc(evt: MessagePropagatedEvent) {.async: (raises: []).} =
+          propagated.add(evt),
+      )
+      .expect("listen MessagePropagatedEvent")
+    defer:
+      await MessagePropagatedEvent.dropAllListeners(waku.brokerCtx)
+
+    await waitEpochStart()
+    let task = buildTask("new-wire-object", "hi")
+    await service.sendNow(task)
+    let firstHash = task.msgHash
+    let firstStamp = task.msg.timestamp
+    check:
+      task.state == DeliveryState.NextRoundRetry
+      task.isStamped()
+      task.stampTried
+      manager.sentInCurrentEpoch == 1'u64
+
+    await waitEpochAfter(uint64(firstStamp div 1_000_000_000))
+    await service.retryAndWait(1)
+    check:
+      task.state == DeliveryState.SuccessfullyPropagated
+      task.msgHash != firstHash
+      task.msg.timestamp > firstStamp
+      manager.sentInCurrentEpoch == 2'u64 # the new wire object is charged
+      propagated.mapIt(it.messageHash) == @[task.msgHash.to0xHex()]
+
+  asyncTest "a retry in a later RLN epoch parks when the new wire object has no budget":
+    ## The new wire object goes through the admission again, so without budget
+    ## it waits for the budget to roll, as a first attempt does. The delivery
+    ## window keeps its anchor.
+    waku.node.rlnPlugin = Opt.some(oneSecondEpochs())
+    let epoch = new uint64
+    epoch[] = 1'u64
+    let manager = RateLimitManager
+      .new(
+        RateLimitConfig(enabled: true, epochPeriodSec: 600, messagesPerEpoch: 1),
+        fixedEpochQuota(epoch, rateLimit = 100),
+      )
+      .expect("RateLimitManager.new")
+    let processor = FakeSendProcessor(
+      script: @[DeliveryState.NextRoundRetry, DeliveryState.SuccessfullyPropagated]
+    )
+    let service = SendService
+      .new(false, waku, manager, processor, retryInterval = chronos.minutes(10))
+      .expect("SendService.new")
+    var queued: seq[MessageQueuedEvent]
+    discard MessageQueuedEvent
+      .listen(
+        waku.brokerCtx,
+        proc(evt: MessageQueuedEvent) {.async: (raises: []).} =
+          queued.add(evt),
+      )
+      .expect("listen MessageQueuedEvent")
+    defer:
+      await MessageQueuedEvent.dropAllListeners(waku.brokerCtx)
+
+    await waitEpochStart()
+    let task = buildTask("new-wire-object-parks", "hi")
+    await service.sendNow(task)
+    let firstStamp = task.msg.timestamp
+    check:
+      task.state == DeliveryState.NextRoundRetry
+      manager.sentInCurrentEpoch == 1'u64
+
+    await waitEpochAfter(uint64(firstStamp div 1_000_000_000))
+    await service.retryAndWait(1)
+    check:
+      task.state == DeliveryState.NextRoundRetry
+      not task.isStamped()
+      not task.admitted
+      task.firstAdmittedTime.isSome()
+      processor.calls == 1
+      queued.mapIt(it.messageHash) == @[""]
+
+    epoch[] = 2'u64
+    await service.retryAndWait(1)
+    check:
+      task.state == DeliveryState.SuccessfullyPropagated
+      task.isStamped()
+      manager.sentInCurrentEpoch == 1'u64
+      processor.calls == 2
 
   asyncTest "a task parked for budget reports itself queued, exactly once":
     ## The park branch is re-entered every retry round; the event must not be.

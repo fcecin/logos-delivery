@@ -303,9 +303,12 @@ suite "SendService - deliver":
     return (0 ..< count).toSeq().mapIt(prefix & $it)
 
   proc admitted(processor: ScriptedProcessor, task: DeliveryTask): DeliveryTask =
-    ## Marks the task as charged, and its first call as done, so its first call
-    ## is a retry.
+    ## Marks the task as charged and stamped, with its first call done, so its
+    ## first call is a retry of its wire object.
+    task.stamp()
+    task.stampTried = true
     task.firstAdmittedTime = Opt.some(Moment.now())
+    task.admitted = true
     processor.seen.add($task.requestId)
     return task
 

@@ -34,9 +34,17 @@ type DeliveryTask* = ref object
     ## `nextStoreValidationBatch`).
   firstAdmittedTime*: Opt[Moment]
     ## Set when the task first passes rate-limit admission; `none` while parked
-    ## waiting for epoch budget. Guards re-admission on retry and anchors the
-    ## delivery window (`isDeliveryTimedOut`), so a task parked for budget is not
-    ## aged out before it can be sent.
+    ## waiting for epoch budget. Anchors the delivery window
+    ## (`isDeliveryTimedOut`), so a task parked for budget is not aged out before
+    ## it can be sent. A new wire object keeps it.
+  admitted*: bool
+    ## True once the task is charged against the rate-limit budget.
+    ## `admitAndProve` sets it. A retry that makes a new wire object clears it,
+    ## so the new wire object is charged again. A stamp cleared before any send
+    ## processor got it keeps the charge.
+  stampTried*: bool
+    ## True once a send processor got the current wire object. `clearStamp`
+    ## clears it.
   propagatedEventEmitted*: bool
     ## Set when the task emits `MessagePropagatedEvent`. After a restart, the send
     ## service does not send the task again.
@@ -100,13 +108,23 @@ proc stamp*(self: DeliveryTask) =
   ## keeps its timestamp and its hash for all its retries.
   self.msg.timestamp = getNowInNanosecondTime()
   self.msgHash = computeMessageHash(self.pubsubTopic, self.msg)
+  self.stampTried = false
 
 proc clearStamp*(self: DeliveryTask) =
-  ## Removes the timestamp, the hash and the proof of a task that no send
-  ## processor got. The next attempt stamps the task again.
+  ## Removes the wire object of the task: the timestamp, the hash and the proof.
+  ## The next attempt makes a new one. The charge stays with the task.
   self.msg.timestamp = 0
   self.msg.proof = @[]
   self.msgHash = EmptyWakuMessageHash
+  self.stampTried = false
+
+proc stampAge*(self: DeliveryTask): timer.Duration =
+  ## Time since the stamp, by the wall clock, which is what a receiver compares
+  ## the timestamp with. Zero for a task with no stamp.
+  let now = getNowInNanosecondTime()
+  if self.isStamped() and self.msg.timestamp < now:
+    return nanoseconds(now - self.msg.timestamp)
+  return ZeroDuration
 
 proc hashHex*(self: DeliveryTask): string =
   ## The hash for the events: `0x` hex once stamped, empty before.

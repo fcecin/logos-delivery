@@ -353,6 +353,8 @@ proc toRlnPlugin*(rlnEvm: RlnEvm): RlnPlugin =
     generateProof: generate,
     proofSize: Opt.some(protocol_types.RateLimitProof().encode().len),
     getEpochQuota: quota,
+    epochIndexOf: proc(timestamp: uint64): uint64 {.gcsafe, raises: [].} =
+      rlnEvm.epochIndexOf(float64(timestamp)),
   )
 
 proc new*(

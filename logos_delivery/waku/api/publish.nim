@@ -62,6 +62,15 @@ proc attachRlnProof*(
   ## error's kind tells the caller whether a retry can succeed.
   return await attachProof(self.node.rlnPlugin, message)
 
+proc rlnEpochIndexOf*(self: Waku, timestamp: Timestamp): Opt[uint64] =
+  ## The RLN epoch index of a message timestamp (nanoseconds), from the epoch
+  ## size of the mounted backend. None without a backend that has epochs.
+  if self.node.rlnPlugin.isNone() or self.node.rlnPlugin.get().epochIndexOf.isNil():
+    return Opt.none(uint64)
+  return Opt.some(
+    self.node.rlnPlugin.get().epochIndexOf(uint64(timestamp div 1_000_000_000))
+  )
+
 func needsRlnProof*(self: Waku, message: WakuMessage): bool =
   ## True when `attachRlnProof` makes a proof for `message` and reserves an RLN
   ## message id.

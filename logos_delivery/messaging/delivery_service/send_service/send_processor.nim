@@ -42,6 +42,7 @@ proc parkForRlnProofRefresh*(task: DeliveryTask, waku: Waku, errorDesc: string) 
     return
   task.msg.proof = @[]
   task.firstAdmittedTime = Opt.none(Moment)
+  task.admitted = false
   task.state = DeliveryState.NextRoundRetry
 
 method process*(
