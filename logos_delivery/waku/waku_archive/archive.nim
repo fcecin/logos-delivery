@@ -32,9 +32,12 @@ const
   # Metrics reporting
   WakuArchiveDefaultMetricsReportInterval* = chronos.minutes(30)
 
-  # Message validation
-  # 20 seconds maximum allowable sender timestamp "drift"
-  MaxMessageTimestampVariance* = getNanoSecondTime(20)
+  # Message validation, see `MaxMessageTimestampSkewPastSeconds` and
+  # `MaxMessageTimestampSkewFutureSeconds`.
+  MaxMessageTimestampVariancePast* =
+    getNanoSecondTime(MaxMessageTimestampSkewPastSeconds)
+  MaxMessageTimestampVarianceFuture* =
+    getNanoSecondTime(MaxMessageTimestampSkewFutureSeconds)
 
 type MessageValidator* =
   proc(msg: WakuMessage): Result[void, string] {.closure, gcsafe, raises: [].}
@@ -58,8 +61,8 @@ proc validate*(msg: WakuMessage): Result[void, string] =
 
   let
     now = getNanosecondTime(getTime().toUnixFloat())
-    lowerBound = now - MaxMessageTimestampVariance
-    upperBound = now + MaxMessageTimestampVariance
+    lowerBound = now - MaxMessageTimestampVariancePast
+    upperBound = now + MaxMessageTimestampVarianceFuture
 
   if msg.timestamp < lowerBound:
     debug "Rejecting message with old timestamp",

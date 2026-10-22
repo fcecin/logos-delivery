@@ -25,7 +25,7 @@ import
   logos_delivery/waku/api/events/[health_events, peer_events],
   logos_delivery/waku/requests/health_requests,
   logos_delivery/waku/node/health_monitor/health_status
-from logos_delivery/waku/waku_archive/archive import MaxMessageTimestampVariance
+from logos_delivery/waku/waku_archive/archive import MaxMessageTimestampVariancePast
 
 const MaxMessageLife = chronos.minutes(7)
   ## The service keeps the hash of each received message this long. After an
@@ -87,8 +87,8 @@ type BackfillState* = object
     ## see `DelayExtra`, shorter in tests
   archiveTime*: Duration = chronos.nanoseconds(ArchiveTime)
     ## see `ArchiveTime`, shorter in tests
-  timestampVariance*: Duration = chronos.nanoseconds(MaxMessageTimestampVariance)
-    ## see `MaxMessageTimestampVariance`, shorter in tests
+  timestampVariance*: Duration = chronos.nanoseconds(MaxMessageTimestampVariancePast)
+    ## see `MaxMessageTimestampVariancePast`, shorter in tests
 
 type RecvService* = ref object of RootObj
   brokerCtx: BrokerContext
