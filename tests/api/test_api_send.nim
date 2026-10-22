@@ -355,6 +355,55 @@ suite "Waku API - Send":
     (await node.stop()).isOkOr:
       raiseAssert "Failed to stop node: " & error
 
+  asyncTest "a send with no peer is stored and confirmed after the old window":
+    ## The sender stamps the message at its first attempt and retries it with
+    ## that timestamp. A Store node accepts a timestamp up to the past skew
+    ## behind its clock, so a retry that reaches it after the old 20 s window is
+    ## archived and confirmed.
+    var node: LogosDelivery
+    lockNewGlobalBrokerContext:
+      node = (await LogosDelivery.new(defaultTestNodeConf())).valueOr:
+        raiseAssert error
+      node.shortenIntervals()
+      (await node.start()).isOkOr:
+        raiseAssert "Failed to start Waku node: " & error
+      # No connectToNodes: the sender has no reachable peer at the send.
+
+    let eventManager = newSendEventListenerManager(node.waku.brokerCtx)
+    defer:
+      await eventManager.teardown()
+
+    let contentTopic = ContentTopic("/waku/2/default-content/proto")
+    let requestId = (
+      await node.messagingClient.send(
+        MessageEnvelope.init(contentTopic, "late payload")
+      )
+    ).valueOr:
+      raiseAssert error
+
+    # Nothing propagates while the node is isolated. The message gets older
+    # than the 20 s that a Store node used to accept.
+    await sleepAsync(22.seconds)
+    check eventManager.propagatedCount == 0
+
+    await node.waku.node.connectToNodes(@[relayNode1PeerInfo, storeNodePeerInfo])
+
+    check await eventManager.sentFuture.withTimeout(30.seconds)
+    eventManager.validate(
+      {SendEventOutcome.Sent, SendEventOutcome.Propagated}, requestId
+    )
+
+    let stored = (
+      await storeNode.wakuArchive.findMessages(
+        ArchiveQuery(contentTopics: @[contentTopic])
+      )
+    ).valueOr:
+      ArchiveResponse()
+    check stored.hashes.len == 1
+
+    (await node.stop()).isOkOr:
+      raiseAssert "Failed to stop node: " & error
+
   asyncTest "Burst of sends is fully validated":
     ## Confirm all requests across multiple Store pages and validation batches.
     var node: LogosDelivery
