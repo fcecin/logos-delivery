@@ -1,4 +1,4 @@
-import results, std/times, chronos
+import results, chronos
 import brokers/broker_context
 import
   logos_delivery/waku/waku_core,
@@ -22,6 +22,10 @@ type DeliveryTask* = ref object
   priority*: MessagePriority
     ## Accepted from the envelope and kept; not yet used for scheduling.
   msgHash*: WakuMessageHash
+    ## Set by `stamp` together with the timestamp. All zeros before the first
+    ## attempt.
+  queuedAt*: Moment
+    ## When `enqueue` took the task. Anchors the parked age (`isParkedExpired`).
   tryCount*: int
   state*: DeliveryState
   firstPropagatedTime*: Opt[Moment]
@@ -73,24 +77,46 @@ proc new*(
     return err("Failed create DeliveryTask: " & $error)
 
   let pubsubTopic = relayShardRes.relayShard.toPubsubTopic()
-  let msgHash = computeMessageHash(pubsubTopic, msg)
 
+  # The message has no timestamp and no hash yet. `stamp` sets them at the
+  # first send attempt.
   return ok(
     T(
       requestId: requestId,
       pubsubTopic: pubsubTopic,
       msg: msg,
-      msgHash: msgHash,
       priority: envelop.priority,
     )
   )
 
-proc messageAge*(self: DeliveryTask): timer.Duration =
-  let actual = getNanosecondTime(getTime().toUnixFloat())
-  if self.msg.timestamp >= 0 and self.msg.timestamp < actual:
-    return nanoseconds(actual - self.msg.timestamp)
-  else:
-    return ZeroDuration
+proc isStamped*(self: DeliveryTask): bool =
+  ## True once the task has its wire object: a timestamp and a hash.
+  return self.msg.timestamp > 0
+
+proc stamp*(self: DeliveryTask) =
+  ## Gives the message the current time as its timestamp and computes its hash.
+  ## The send service calls it right before the first send attempt, so the
+  ## timestamp is fresh when the message reaches the network. A stamped task
+  ## keeps its timestamp and its hash for all its retries.
+  self.msg.timestamp = getNowInNanosecondTime()
+  self.msgHash = computeMessageHash(self.pubsubTopic, self.msg)
+
+proc clearStamp*(self: DeliveryTask) =
+  ## Removes the timestamp, the hash and the proof of a task that no send
+  ## processor got. The next attempt stamps the task again.
+  self.msg.timestamp = 0
+  self.msg.proof = @[]
+  self.msgHash = EmptyWakuMessageHash
+
+proc hashHex*(self: DeliveryTask): string =
+  ## The hash for the events: `0x` hex once stamped, empty before.
+  if self.isStamped():
+    return self.msgHash.to0xHex()
+  return ""
+
+proc queuedAge*(self: DeliveryTask): timer.Duration =
+  ## Time since `enqueue` took the task.
+  return timer.Moment.now() - self.queuedAt
 
 proc propagationAge*(self: DeliveryTask): timer.Duration =
   ## Time elapsed since the message was first successfully propagated.
@@ -119,9 +145,9 @@ proc isDeliveryTimedOut*(self: DeliveryTask, maxTime: timer.Duration): bool =
 
 proc isParkedExpired*(self: DeliveryTask, maxAge: timer.Duration): bool =
   ## True when a task never admitted (parked for budget) has outlived `maxAge`,
-  ## measured from the message timestamp, so parking cannot grow the backlog
-  ## and deliver arbitrarily late.
-  return self.firstAdmittedTime.isNone() and self.messageAge() > maxAge
+  ## measured from `enqueue`, so parking cannot grow the backlog and deliver
+  ## arbitrarily late.
+  return self.firstAdmittedTime.isNone() and self.queuedAge() > maxAge
 
 proc isEphemeral*(self: DeliveryTask): bool =
   return self.msg.ephemeral

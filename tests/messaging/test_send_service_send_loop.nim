@@ -249,22 +249,18 @@ suite "SendService - deliver":
     await log.teardown()
     discard await waku.stop()
 
-  proc buildTask(
-      id: string, timestamp: Timestamp = getNowInNanosecondTime(), ephemeral = false
-  ): DeliveryTask =
-    ## A message from now, so a task that parks for budget is not too old.
+  proc buildTask(id: string, ephemeral = false): DeliveryTask =
+    ## A task with no timestamp and no hash, as from `DeliveryTask.new`. The
+    ## first attempt stamps it.
     let msg = WakuMessage(
       contentTopic: "/test/1/send-loop/proto",
       payload: id.toBytes(),
-      timestamp: timestamp,
       ephemeral: ephemeral,
     )
-    let pubsubTopic = PubsubTopic("/waku/2/rs/3/0")
     return DeliveryTask(
       requestId: RequestId(id),
-      pubsubTopic: pubsubTopic,
+      pubsubTopic: PubsubTopic("/waku/2/rs/3/0"),
       msg: msg,
-      msgHash: computeMessageHash(pubsubTopic, msg),
       state: DeliveryState.Entry,
     )
 
@@ -755,34 +751,71 @@ suite "SendService - deliver":
       await service.stopSendService()
     check await log.waitPropagated(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
 
-  asyncTest "enqueue returns the task of a queued message, waits while stopped, and refuses only a full send queue":
+  asyncTest "a task is stamped once it holds a send slot":
+    ## The stamp of the first attempt waits for a send slot with the admission,
+    ## so a task that waits for a slot has no timestamp while it waits.
+    let processor = StallingProcessor()
+    let service = SendService
+      .new(
+        false,
+        waku,
+        RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new"),
+        processor,
+        retryInterval = FastRetryInterval,
+        maxSendsInFlight = 1,
+      )
+      .expect("SendService.new")
+    let holder = buildTask("slot-holder")
+    let waiter = buildTask("slot-waiter")
+    check service.enqueue(holder).isOk()
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
+      processor.replies.len == 1
+    check holder.isStamped()
+
+    check service.enqueue(waiter).isOk()
+    await sleepAsync(FUTURE_TIMEOUT_SHORT)
+    check:
+      processor.replies.len == 1
+      not waiter.isStamped()
+
+    let beforeSlot = getNowInNanosecondTime()
+    processor.replies[0].complete()
+    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
+      processor.replies.len == 2
+    check:
+      waiter.isStamped()
+      waiter.msg.timestamp >= beforeSlot
+    processor.replies[1].complete()
+    check await log.waitPropagated(2).withTimeout(FUTURE_TIMEOUT_MEDIUM)
+
+  asyncTest "enqueue keeps two sends of one message, waits while stopped, and refuses only a full send queue":
     let processor = FakePropagatingProcessor()
     let service = newService(processor, sendQueueCapacity = 2)
     let first = buildTask("first")
-    let copy = DeliveryTask(
-      requestId: RequestId("copy-of-first"),
+    let again = DeliveryTask(
+      requestId: RequestId("first-again"),
       pubsubTopic: first.pubsubTopic,
-      msg: first.msg, # the same message, so the same hash
-      msgHash: first.msgHash,
+      msg: first.msg, # the same message: a second send is a second task
       state: DeliveryState.Entry,
     )
 
     check:
       service.enqueue(first).valueOr(RequestId("refused")) == first.requestId
-      service.enqueue(copy).valueOr(RequestId("refused")) == first.requestId
-        # the task of `first`
-      service.enqueue(buildTask("second")).isOk()
+      service.enqueue(first).errorOr("accepted") ==
+        "Request id already in the send queue"
+      service.enqueue(again).valueOr(RequestId("refused")) == again.requestId
       service.isFull()
       service.enqueue(buildTask("third")).errorOr("accepted") ==
         "Send queue full, retry later"
-      service.enqueue(copy).valueOr(RequestId("refused")) == first.requestId
-        # a queued message gets its request id also when the send queue is full
 
     service.startSendService()
     check await log.waitPropagated(2).withTimeout(FUTURE_TIMEOUT_MEDIUM)
     check:
-      processor.calls == 2 # `first` and `second`
-      log.propagated == @[first.requestId, RequestId("second")]
+      processor.calls == 2 # `first` and `again`
+      log.propagated == @[first.requestId, again.requestId]
 
     await service.stopSendService()
     check service.enqueue(buildTask("after-stop")).isOk()
