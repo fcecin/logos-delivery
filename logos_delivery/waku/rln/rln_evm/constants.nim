@@ -3,6 +3,7 @@ import stint, chronos
 import ./protocol_types
 
 import ../../waku_keystore
+import ../../waku_core/message/default_values
 
 # Acceptable roots for merkle root validation of incoming messages
 const AcceptableRootWindowSize* = 50
@@ -40,7 +41,13 @@ const
   ]
   DefaultUserMessageLimit* = UserMessageLimit(20)
 
-const MaxClockGapSeconds* = 20.0 # the maximum clock difference between peers in seconds
+const MaxTimestampGapPastSeconds* = float64(MaxMessageTimestampSkewPastSeconds)
+  ## The time the timestamp of a message may lie behind the clock of a
+  ## validator, see `MaxMessageTimestampSkewPastSeconds`. The nullifier log
+  ## keeps the epochs it spans.
+const MaxTimestampGapFutureSeconds* = float64(MaxMessageTimestampSkewFutureSeconds)
+  ## The time the timestamp of a message may lie ahead of the clock of a
+  ## validator, see `MaxMessageTimestampSkewFutureSeconds`.
 
 # RLN Keystore defaults
 const RLNAppInfo* = AppInfo(

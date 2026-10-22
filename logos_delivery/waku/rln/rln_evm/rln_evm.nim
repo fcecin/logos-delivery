@@ -68,15 +68,17 @@ proc validateMessage*(
   let currentTime = getTime().toUnixFloat()
   let messageTime = msg.timestamp.float64 / 1e9
 
-  let timeDiff = uint64(abs(currentTime - messageTime))
-
   trace "Time info",
     currentTime = currentTime, messageTime = messageTime, msgHash = msg.hash
 
-  if timeDiff > rlnEvm.rlnMaxTimestampGap:
+  let behind = uint64(max(currentTime - messageTime, 0.0))
+  let ahead = uint64(max(messageTime - currentTime, 0.0))
+  if behind > rlnEvm.rlnMaxTimestampGapPast or ahead > rlnEvm.rlnMaxTimestampGapFuture:
     debug "Invalid message: timestamp difference exceeds threshold",
-      timeDiff = timeDiff,
-      maxTimestampGap = rlnEvm.rlnMaxTimestampGap,
+      behind = behind,
+      ahead = ahead,
+      maxTimestampGapPast = rlnEvm.rlnMaxTimestampGapPast,
+      maxTimestampGapFuture = rlnEvm.rlnMaxTimestampGapFuture,
       contentTopic = msg.contentTopic
     logos_delivery_rln_invalid_messages_total.inc(labelValues = ["invalid_timestamp"])
     return MessageValidationResult.Invalid
@@ -225,8 +227,10 @@ proc mount(
     brokerCtx: brokerCtx,
     reserveLock: newAsyncLock(),
     rlnEpochSizeSec: conf.epochSizeSec,
-    rlnMaxEpochGap: max(uint64(MaxClockGapSeconds / float64(conf.epochSizeSec)), 1),
-    rlnMaxTimestampGap: uint64(MaxClockGapSeconds),
+    rlnMaxEpochGap:
+      max(uint64(MaxTimestampGapPastSeconds / float64(conf.epochSizeSec)), 1),
+    rlnMaxTimestampGapPast: uint64(MaxTimestampGapPastSeconds),
+    rlnMaxTimestampGapFuture: uint64(MaxTimestampGapFutureSeconds),
     onFatalErrorAction: conf.onFatalErrorAction,
   )
 

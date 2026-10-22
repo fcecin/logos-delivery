@@ -12,7 +12,8 @@ type RlnEvm* = ref object of RootObj
   nullifierLog*: OrderedTable[Epoch, Table[Nullifier, ProofMetadata]]
   lastEpoch*: Epoch # the epoch of the last published rln message
   rlnEpochSizeSec*: uint64
-  rlnMaxTimestampGap*: uint64
+  rlnMaxTimestampGapPast*: uint64
+  rlnMaxTimestampGapFuture*: uint64
   rlnMaxEpochGap*: uint64
   groupManager*: RlnEvmGroupManagerBase
   onFatalErrorAction*: OnFatalErrorHandler

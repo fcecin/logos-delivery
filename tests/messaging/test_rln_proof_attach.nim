@@ -28,7 +28,7 @@ proc testConf(): WakuConf =
 
 const TestEpochSizeSec = 1'u64
   ## One-second epochs keep epoch-crossing cases inside the generator's
-  ## timestamp bound (`MaxClockGapSeconds`).
+  ## timestamp bounds (`MaxTimestampGapPastSeconds`, `MaxTimestampGapFutureSeconds`).
 
 proc nowSec(): uint64 =
   uint64(getTime().toUnix())
