@@ -8,7 +8,7 @@
 {.push raises: [].}
 
 import std/[tables, strutils]
-import results, chronos, libp2p/crypto/rng, libp2p_mix/pool
+import results, chronos, chronicles, libp2p/crypto/rng, libp2p_mix/mix_pool
 
 import logos_delivery/waku/waku
 import
@@ -98,27 +98,36 @@ proc lightpushPeerAvailable*(self: Waku, shard: PubsubTopic): bool =
   return self.node.peerManager.selectPeer(WakuLightPushCodec, Opt.some(shard)).isSome()
 
 proc selectMixLightpushPeer*(self: Waku, shard: PubsubTopic): Opt[RemotePeerInfo] =
-  ## Selects a lightpush service peer for `shard` that mix can route to. With
-  ## `exit_is_dest` the server is the last node of the sphinx path, so the mix
-  ## pool must hold a `MixPubInfo` for it. The selection reads the service slot
-  ## first, then draws one usable pool member uniformly.
+  ## Select an eligible lightpush exit for the shard.
+  ## Try the service slot first, then select a usable candidate at random.
+  if self.node.wakuMix.isNil():
+    return Opt.none(RemotePeerInfo)
   let peerStore = self.node.peerManager.switch.peerStore
-  let pool = MixNodePool.new(peerStore)
-
+  let pool = self.node.wakuMix.pool
   let slotted = self.node.peerManager.serviceSlots.getOrDefault(WakuLightPushCodec)
-  if not slotted.isNil() and pool.get(slotted.peerId).isSome():
-    return Opt.some(peerStore.getPeer(slotted.peerId))
+  if not slotted.isNil():
+    let info = pool.usablePeer(slotted.peerId).valueOr:
+      error "Could not read mix exit peer", error = error
+      return Opt.none(RemotePeerInfo)
+    if info.isSome():
+      return Opt.some(peerStore.getPeer(slotted.peerId))
 
   let shardInfo = RelayShard.parse(shard).valueOr:
     return Opt.none(RemotePeerInfo)
 
   var exits: seq[PeerId]
-  for peerId in pool.peerIds():
+  let peers = pool.listPeerIds().valueOr:
+    error "Could not list mix exit peers", error = error
+    return Opt.none(RemotePeerInfo)
+  for peerId in peers:
     if not peerStore[ProtoBook][peerId].contains(WakuLightPushCodec):
       continue
     if not peerStore.hasShard(peerId, shardInfo.clusterId, shardInfo.shardId):
       continue
-    if pool.get(peerId).isSome():
+    let info = pool.usablePeer(peerId).valueOr:
+      error "Could not read mix exit peer", error = error
+      return Opt.none(RemotePeerInfo)
+    if info.isSome():
       exits.add(peerId)
 
   # The exit choice must not be predictable, so draw it from the node's CSPRNG,
