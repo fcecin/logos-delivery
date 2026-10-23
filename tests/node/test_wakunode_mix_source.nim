@@ -237,6 +237,23 @@ suite "Delivery provides the mix peers":
       pool.count([]).get() == 1
       store[KeyBook][peer.peerId] == peer.publicKey
 
+  asyncTest "discovery expiry and renewed evidence change mix membership without deleting keys":
+    let node = await newTestNode()
+    defer:
+      node.peerManager.stop()
+    let peer = candidate()
+    node.peerManager.addPeer(peer, Kademlia)
+    let store = node.switch.peerStore
+    node.peerManager.configureMix().get()
+    let pool = node.peerManager.mixPool
+    check pool.count([]).get() == 1
+    store[MixAliveBook][peer.peerId] =
+      Moment.now() - DiscoveredEnrTtl - chronos.seconds(1)
+    check pool.count([]).get() == 0
+    check store[MixPubKeyBook][peer.peerId] == peer.mixPubKey.get()
+    node.peerManager.addPeer(peer, Kademlia)
+    check pool.count([]).get() == 1
+
   asyncTest "Kademlia mix discovery needs no ENR and deletion removes candidacy":
     let node = await newTestNode()
     defer:
@@ -251,6 +268,52 @@ suite "Delivery provides the mix peers":
     check:
       pool.count([]).get() == 0
       pool.usablePeer(peer.peerId).get().isNone()
+
+  asyncTest "configured keys stay durable through discovery and key updates":
+    let node = await newTestNode()
+    defer:
+      node.peerManager.stop()
+    let peer = candidate()
+    node.peerManager.addPeer(peer, Static)
+    let store = node.switch.peerStore
+    node.peerManager.configureMix().get()
+    let pool = node.peerManager.mixPool
+    node.peerManager.addPeer(
+      RemotePeerInfo.init(peer.peerId, peer.addrs, publicKey = peer.publicKey), Discv5
+    )
+    check store[SourceBook][peer.peerId] == Discv5
+    check pool.count([]).get() == 1
+    peer.mixPubKey = Opt.some(generateKeyPair().get().publicKey)
+    node.peerManager.addPeer(peer, Kademlia)
+    check:
+      store[MixAliveBook][peer.peerId] == Moment()
+      store[MixPubKeyBook][peer.peerId] == peer.mixPubKey.get()
+      pool.count([]).get() == 1
+
+  asyncTest "configuration promotes an expired discovered key to durable membership":
+    let node = await newTestNode()
+    defer:
+      node.peerManager.stop()
+    let peer = candidate()
+    node.peerManager.addPeer(peer, Kademlia)
+    let store = node.switch.peerStore
+    store[MixAliveBook][peer.peerId] =
+      Moment.now() - DiscoveredEnrTtl - chronos.seconds(1)
+    let keys = generateKeyPair().get()
+    (await node.mountMix(DefaultClusterId, keys.privateKey, @[])).get()
+    check node.wakuMix.poolSize() == 0
+    node.wakuMix.addBootNodes(
+      @[
+        MixNodePubInfo(
+          multiAddr: $peer.addrs[0] & "/p2p/" & $peer.peerId,
+          pubKey: peer.mixPubKey.get(),
+        )
+      ]
+    )
+    node.peerManager.addPeer(peer, Kademlia)
+    check:
+      store[MixAliveBook][peer.peerId] == Moment()
+      node.wakuMix.poolSize() == 1
 
   asyncTest "application insertion preserves addresses and durability while stopped":
     let node = await newTestNode()
@@ -272,6 +335,30 @@ suite "Delivery provides the mix peers":
       store[MixAliveBook][peer.peerId] == Moment()
       address in store[AddressBook][peer.peerId]
       peer.addrs[0] in store[AddressBook][peer.peerId]
+      pool.count([]).get() == 1
+
+  asyncTest "reflected records do not renew discovery and removal clears key provenance":
+    let node = await newTestNode()
+    defer:
+      node.peerManager.stop()
+    let peer = candidate()
+    node.peerManager.addPeer(peer, Kademlia)
+    let store = node.switch.peerStore
+    node.peerManager.configureMix().get()
+    let pool = node.peerManager.mixPool
+    let old = Moment.now() - DiscoveredEnrTtl - chronos.seconds(1)
+    store[MixAliveBook][peer.peerId] = old
+    node.peerManager.addServicePeer(store.getPeer(peer.peerId), WakuLightPushCodec)
+    check store[MixAliveBook][peer.peerId] == old
+    check pool.count([]).get() == 0
+    check node.peerManager.removeMixPeer(peer.peerId)
+    check store[MixAliveBook][peer.peerId] == Moment()
+    node.peerManager.addPeer(peer, Kademlia)
+    check store[MixAliveBook][peer.peerId] != Moment()
+    check node.peerManager.removeMixPeer(peer.peerId)
+    node.peerManager.addPeer(peer)
+    check:
+      store[MixAliveBook][peer.peerId] == Moment()
       pool.count([]).get() == 1
 
   asyncTest "the source obeys existing Delivery connection backoff and its expiry":
