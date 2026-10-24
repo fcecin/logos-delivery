@@ -22,6 +22,7 @@ import
     node/waku_node,
     node/node_telemetry,
     node/peer_manager,
+    node/peer_manager/waku_peer_store,
     node/waku_node/ping,
     node/health_monitor/online_monitor,
     node/health_monitor/health_status,
@@ -563,13 +564,19 @@ proc onRelayMsg(
 
   hm.healthUpdateEvent.fire()
 
+const MixHealthRefreshInterval = chronos.seconds(5)
+
 proc healthLoop(hm: NodeHealthMonitor) {.async.} =
   ## Re-evaluate the global health state of the node when notified of a potential change,
   ## and call back the application if an actual change from the last notified state happened.
   info "Health monitor loop start"
   while true:
     try:
-      await hm.healthUpdateEvent.wait()
+      if hm.node.wakuMix.isNil():
+        await hm.healthUpdateEvent.wait()
+      else:
+        # Eligibility also changes when discovery evidence or backoff expires.
+        discard await hm.healthUpdateEvent.wait().withTimeout(MixHealthRefreshInterval)
       hm.healthUpdateEvent.clear()
 
       hm.publishProtocolHealth(await hm.getAllProtocolHealthInfo())
@@ -833,6 +840,10 @@ proc new*(
   # Mix peers are learnt from discovery without any peer event, so without this
   # a filled (or drained) pool would wait for an unrelated trigger to show up.
   node.switch.peerStore[MixPubKeyBook].addHandler(
+    proc(peerId: PeerId) {.gcsafe, raises: [].} =
+      hm.onMixPoolChange()
+  )
+  node.switch.peerStore[MixExcludedBook].addHandler(
     proc(peerId: PeerId) {.gcsafe, raises: [].} =
       hm.onMixPoolChange()
   )
