@@ -6,6 +6,7 @@
 
 import
   std/[net, strutils, sequtils],
+  brokers/broker_context,
   testutils/unittests,
   chronos,
   chronicles,
@@ -15,6 +16,11 @@ import
   libp2p/crypto/crypto,
   libp2p/peerid,
   libp2p/multiaddress,
+  libp2p/switch,
+  libp2p/stream/connection,
+  libp2p/stream/lpstream,
+  libp2p/protocols/protocol,
+  libp2p_mix,
   libp2p_mix/[curve25519, mix_protocol, mix_metrics]
 
 import
@@ -88,7 +94,11 @@ proc subscribeCores(mixnet: MixNet, shard: PubsubTopic) =
       raiseAssert "subscribe core " & $i & ": " & $error
 
 proc setupMixNet(
-    basePort: int, senderAnnounce: string = "", senderDns4 = false
+    basePort: int,
+    senderAnnounce: string = "",
+    senderDns4 = false,
+    discoveryOnly = false,
+    connectSender = true,
 ): Future[MixNet] {.async.} =
   ## Builds and starts the 5-node mixnet on fixed local ports. `senderAnnounce`
   ## replaces the sender's announced address, as NAT does. `senderDns4` makes the
@@ -98,61 +108,87 @@ proc setupMixNet(
 
   for i in 0 .. NumCore:
     let port = basePort + i
-    let n =
-      if senderAnnounce.len > 0 and i == NumCore:
-        newTestWakuNode(
-          generateSecp256k1Key(),
-          parseIpAddress("127.0.0.1"),
-          Port(port),
-          extMultiAddrs = @[MultiAddress.init(senderAnnounce).tryGet()],
-          extMultiAddrsOnly = true,
+    lockNewGlobalBrokerContext:
+      let n =
+        if senderAnnounce.len > 0 and i == NumCore:
+          newTestWakuNode(
+            generateSecp256k1Key(),
+            parseIpAddress("127.0.0.1"),
+            Port(port),
+            extMultiAddrs = @[MultiAddress.init(senderAnnounce).tryGet()],
+            extMultiAddrsOnly = true,
+          )
+        elif senderDns4 and i == NumCore:
+          newTestWakuNode(
+            generateSecp256k1Key(),
+            parseIpAddress("127.0.0.1"),
+            Port(port),
+            extIp = Opt.some(parseIpAddress("127.0.0.1")),
+            extPort = Opt.some(Port(port)),
+            dns4DomainName = Opt.some("sender.test"),
+          )
+        else:
+          newTestWakuNode(
+            generateSecp256k1Key(), parseIpAddress("127.0.0.1"), Port(port)
+          )
+      let kp = generateKeyPair().expect("mix key pair")
+      mixnet.nodes.add(n)
+      mixPrivs.add(kp.privateKey)
+      mixnet.pubInfos.add(
+        MixNodePubInfo(
+          multiAddr: "/ip4/127.0.0.1/tcp/" & $port & "/p2p/" & $n.peerInfo.peerId,
+          pubKey: kp.publicKey,
         )
-      elif senderDns4 and i == NumCore:
-        newTestWakuNode(
-          generateSecp256k1Key(),
-          parseIpAddress("127.0.0.1"),
-          Port(port),
-          extIp = Opt.some(parseIpAddress("127.0.0.1")),
-          extPort = Opt.some(Port(port)),
-          dns4DomainName = Opt.some("sender.test"),
-        )
-      else:
-        newTestWakuNode(generateSecp256k1Key(), parseIpAddress("127.0.0.1"), Port(port))
-    let kp = generateKeyPair().expect("mix key pair")
-    mixnet.nodes.add(n)
-    mixPrivs.add(kp.privateKey)
-    mixnet.pubInfos.add(
-      MixNodePubInfo(
-        multiAddr: "/ip4/127.0.0.1/tcp/" & $port & "/p2p/" & $n.peerInfo.peerId,
-        pubKey: kp.publicKey,
       )
-    )
 
   for i in 0 .. NumCore:
-    let others = (0 .. NumCore).toSeq().filterIt(it != i).mapIt(mixnet.pubInfos[it])
-    if i < NumCore:
-      (await mixnet.nodes[i].mountRelay()).isOkOr:
-        raiseAssert "mountRelay core " & $i & ": " & $error
-      (await mixnet.nodes[i].mountLightpush()).isOkOr:
-        raiseAssert "mountLightpush core " & $i & ": " & $error
-    else:
-      (await mixnet.nodes[i].mountRelay()).isOkOr:
-        raiseAssert "mountRelay sender: " & $error
-      mixnet.nodes[i].mountLightpushClient()
-    # Every node mounts waku-metadata for the cluster: a node with waku-metadata
-    # drops a peer that does not speak it for the same cluster, after identify.
-    mixnet.nodes[i].mountMetadata(uint32(DefaultClusterId), @[0'u16]).isOkOr:
-      raiseAssert "mountMetadata " & $i & ": " & $error
-    (await mixnet.nodes[i].mountMix(DefaultClusterId, mixPrivs[i], others)).isOkOr:
-      raiseAssert "mountMix " & $i & ": " & $error
+    lockGlobalBrokerContext(mixnet.nodes[i].brokerCtx):
+      let others = (0 .. NumCore).toSeq().filterIt(it != i).mapIt(mixnet.pubInfos[it])
+      if i < NumCore:
+        (await mixnet.nodes[i].mountRelay()).isOkOr:
+          raiseAssert "mountRelay core " & $i & ": " & $error
+        (await mixnet.nodes[i].mountLightpush()).isOkOr:
+          raiseAssert "mountLightpush core " & $i & ": " & $error
+      else:
+        (await mixnet.nodes[i].mountRelay()).isOkOr:
+          raiseAssert "mountRelay sender: " & $error
+        mixnet.nodes[i].mountLightpushClient()
+      # Every node mounts waku-metadata for the cluster: a node with waku-metadata
+      # drops a peer that does not speak it for the same cluster, after identify.
+      mixnet.nodes[i].mountMetadata(uint32(DefaultClusterId), @[0'u16]).isOkOr:
+        raiseAssert "mountMetadata " & $i & ": " & $error
+      (
+        await mixnet.nodes[i].mountMix(
+          DefaultClusterId,
+          mixPrivs[i],
+          (if discoveryOnly: @[] else: others),
+          allowAllAddresses = true,
+        )
+      ).isOkOr:
+        raiseAssert "mountMix " & $i & ": " & $error
 
   for n in mixnet.nodes:
-    await n.start()
+    lockGlobalBrokerContext(n.brokerCtx):
+      await n.start()
+
+  if discoveryOnly:
+    for i in 0 .. NumCore:
+      doAssert mixnet.nodes[i].getMixNodePoolSize() == 0
+      for j in 0 .. NumCore:
+        if i == j:
+          continue
+        let peer = mixnet.nodes[j].peerInfo.toRemotePeerInfo()
+        peer.mixPubKey = Opt.some(mixnet.pubInfos[j].pubKey)
+        mixnet.nodes[i].peerManager.addPeer(peer, Kademlia)
+      doAssert mixnet.nodes[i].getMixNodePoolSize() == NumCore
 
   for i in 0 .. NumCore:
-    let peers = (0 .. NumCore).toSeq().filterIt(it != i).mapIt(
-        mixnet.nodes[it].peerInfo.toRemotePeerInfo()
-      )
+    if not connectSender and i == NumCore:
+      continue
+    let peers = (0 .. NumCore)
+      .toSeq()
+      .filterIt(it != i and (connectSender or it != NumCore))
+      .mapIt(mixnet.nodes[it].peerInfo.toRemotePeerInfo())
     await mixnet.nodes[i].connectToNodes(peers)
 
   return mixnet
@@ -163,7 +199,7 @@ proc teardownMixNet(mixnet: MixNet) {.async.} =
 
 suite "Waku Mix - end to end transport":
   asyncTest "a message crosses the mixnet and the reply comes back":
-    let mixnet = await setupMixNet(23840)
+    let mixnet = await setupMixNet(23840, discoveryOnly = true)
     defer:
       await teardownMixNet(mixnet)
 
@@ -301,6 +337,63 @@ suite "Waku Mix - end to end transport":
       after.forwarded - before.forwarded >= 2.0
       after.exited - before.exited >= 1.0
 
+  asyncTest "Delivery prepares replies to an undialable sender from zero connections":
+    let mixnet = await setupMixNet(
+      23940, senderAnnounce = "/ip4/127.0.0.1/tcp/1", connectSender = false
+    )
+    defer:
+      await teardownMixNet(mixnet)
+    let sender = mixnet.sender()
+    let senderId = sender.peerInfo.peerId
+    for node in mixnet.nodes[0 ..< NumCore]:
+      discard node.peerManager.removeMixPeer(senderId)
+      discard node.switch.peerStore[AddressBook].del(senderId)
+    check sender.switch.connectedPeers().len == 0
+    expect DialFailedError:
+      await mixnet.nodes[0].switch
+        .connect(senderId, @[sender.wakuMix.localMixPubInfo().multiAddr])
+        .wait(chronos.seconds(2))
+    const Codec = "/test/delivery-reply/1"
+    let echo = LPProtocol()
+    echo.codec = Codec
+    proc handler(
+        conn: Connection, proto: string
+    ) {.async: (raises: [CancelledError]).} =
+      try:
+        await conn.writeLp(await conn.readLp(1024))
+      except LPStreamError:
+        discard
+      finally:
+        await conn.close()
+
+    echo.handler = handler
+    await echo.start()
+    mixnet.nodes[1].switch.mount(echo)
+    for node in mixnet.nodes:
+      node.wakuMix.registerDestReadBehavior(Codec, readLp(1024))
+    for fixedExit in [false, true]:
+      let destination =
+        if fixedExit:
+          MixDestination.exitNode(mixnet.nodes[1].peerInfo.peerId)
+        else:
+          MixDestination.forwardToAddr(
+            mixnet.nodes[1].peerInfo.peerId, mixnet.nodes[1].switch.peerInfo.addrs[0]
+          )
+      let conn = sender.wakuMix
+        .toConnection(
+          destination,
+          Codec,
+          MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(2'u8)),
+        )
+        .get()
+      try:
+        await conn.writeLp(@[4'u8, 5, 6]).wait(chronos.seconds(5))
+        check (await conn.readLp(1024).wait(chronos.seconds(5))) == @[4'u8, 5, 6]
+        check sender.wakuMix.surbCredsLen() == 0
+        check sender.switch.connectedPeers(Direction.In).len == 0
+      finally:
+        await conn.close()
+
   asyncTest "a sender announcing only a name is answered at the host the name resolved to":
     ## The fleet's shape: `--dns4-domain-name` makes the sender announce a name,
     ## which mix cannot encode. The self hop is the resolved ENR endpoint, so the
@@ -360,7 +453,10 @@ suite "Waku Mix - end to end transport":
     let kp = generateKeyPair().expect("mix key pair")
     (
       await waku.node.mountMix(
-        DefaultClusterId, kp.privateKey, mixnet.pubInfos[0 ..< NumCore]
+        DefaultClusterId,
+        kp.privateKey,
+        mixnet.pubInfos[0 ..< NumCore],
+        allowAllAddresses = true,
       )
     ).isOkOr:
       raiseAssert "mountMix sender: " & $error

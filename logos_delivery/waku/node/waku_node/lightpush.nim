@@ -39,9 +39,16 @@ logScope:
 
 const MountWithoutRelayError* = "cannot mount lightpush because relay is not mounted"
 
-const MixReplyTimeout* = chronos.seconds(5)
+const MixPathTimeout* = chronos.seconds(10)
+  ## The time for one mix round trip after the reply peer is ready. It holds
+  ## the first-hop dial (a QUIC dial gives up after 3 s), six hops with their
+  ## delays (100 ms mean) across continents, and the lightpush answer of the
+  ## exit.
+
+const MixReplyTimeout* = DefaultMixReplyPeerTimeout + MixPathTimeout
   ## Time limit for one mix-routed lightpush, so a broken path costs one
-  ## attempt.
+  ## attempt. Before the request leaves, the reply peer preparation can take
+  ## up to `DefaultMixReplyPeerTimeout`.
 
 const MixLightpushSurbs* = 1'u8
   ## The number of SURBs in a lightpush request over mix. One SURB, so the reply
