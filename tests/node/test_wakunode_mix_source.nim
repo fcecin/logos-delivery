@@ -283,6 +283,102 @@ suite "Delivery provides the mix peers":
       node.peerManager.addPeer(candidate(address))
       check node.wakuMix.poolSize() == 1
 
+  asyncTest "only an outbound connection clears the failed-attempt state":
+    let node = await newTestNode()
+    let remote = await newTestNode()
+    await node.start()
+    await remote.start()
+    defer:
+      await node.stop()
+      await remote.stop()
+    let peer = remote.peerInfo.toRemotePeerInfo()
+    peer.mixPubKey = Opt.some(generateKeyPair().get().publicKey)
+    node.peerManager.addPeer(peer)
+    let store = node.switch.peerStore
+    node.peerManager.configureMix(true).get()
+    let pool = node.peerManager.mixPool
+    store[NumberFailedConnBook][peer.peerId] = node.peerManager.maxFailedAttempts
+    check pool.countUsable([]).get() == 0
+    # An inbound connection makes the peer usable while it lasts, and keeps the
+    # failure history.
+    await remote.switch.connect(node.peerInfo.peerId, node.peerInfo.addrs)
+    checkUntilTimeout:
+      pool.countUsable([]).get() == 1
+    check store[NumberFailedConnBook][peer.peerId] == node.peerManager.maxFailedAttempts
+    await remote.switch.disconnect(node.peerInfo.peerId)
+    checkUntilTimeout:
+      pool.countUsable([]).get() == 0
+      not remote.switch.isConnected(node.peerInfo.peerId)
+    # An outbound connection on the switch path that mix uses, not
+    # PeerManager.connectPeer, clears it.
+    await node.switch.connect(peer.peerId, peer.addrs)
+    checkUntilTimeout:
+      store[NumberFailedConnBook][peer.peerId] == 0
+    check pool.countUsable([]).get() == 1
+
+  asyncTest "a failed reply preparation dial counts as a failed dial":
+    let node = await newTestNode()
+    let keys = generateKeyPair().get()
+    (
+      await node.mountMix(
+        DefaultClusterId, keys.privateKey, @[], allowAllAddresses = true
+      )
+    ).expect("mount mix")
+    await node.start()
+    defer:
+      await node.stop()
+    # Port 1 on the loopback interface refuses the connection at once.
+    let peer = candidate("/ip4/127.0.0.1/tcp/1")
+    node.peerManager.addPeer(peer)
+    let pool = node.wakuMix.pool
+    check pool.countUsable([]).get() == 1
+    let selected = await node.wakuMix.selectReplyPeer(@[node.peerInfo.peerId])
+    check:
+      selected.isErr()
+      node.switch.peerStore[NumberFailedConnBook][peer.peerId] == 1
+      pool.countUsable([]).get() == 0
+
+  asyncTest "a hop that mix cannot dial counts as a failed dial":
+    let node = await newTestNode()
+    let keys = generateKeyPair().get()
+    (
+      await node.mountMix(
+        DefaultClusterId, keys.privateKey, @[], allowAllAddresses = true
+      )
+    ).expect("mount mix")
+    await node.start()
+    defer:
+      await node.stop()
+    # Port 1 on the loopback interface refuses the connection at once.
+    let peers = @[
+      candidate("/ip4/127.0.0.1/tcp/1"),
+      candidate("/ip4/127.0.0.1/tcp/1"),
+      candidate("/ip4/127.0.0.1/tcp/1"),
+    ]
+    for peer in peers:
+      node.peerManager.addPeer(peer)
+    let pool = node.wakuMix.pool
+    check pool.countUsable([]).get() == 3
+    # A send without replies, so no reply peer is prepared and only mix dials.
+    let destination = candidate()
+    let conn = node.wakuMix
+      .toConnection(
+        MixDestination.init(destination.peerId, destination.addrs[0]),
+        "/test/mix-dial/1",
+      )
+      .get()
+    defer:
+      await conn.close()
+    expect LPStreamError:
+      await conn.writeLp(@[1'u8]).wait(chronos.seconds(2))
+    # Mix emits the event asynchronously.
+    checkUntilTimeout:
+      pool.countUsable([]).get() == 2
+    var failures = 0
+    for peer in peers:
+      failures += node.switch.peerStore[NumberFailedConnBook][peer.peerId]
+    check failures == 1
+
 suite "Delivery selection of the final reply peer":
   asyncTest "a connected exit is excluded and Delivery connects one eligible peer and reuses it":
     let sender = await newTestNode()
@@ -369,4 +465,10 @@ suite "Delivery selection of the final reply peer":
     await ready.wait().wait(chronos.seconds(2))
     expect LPStreamError:
       await writing.wait(chronos.seconds(2))
-    check node.wakuMix.surbCredsLen == 0
+    var failures = 0
+    for count in node.switch.peerStore[NumberFailedConnBook].book.values:
+      failures += count
+    check:
+      node.wakuMix.surbCredsLen == 0
+      failures == 1
+      node.wakuMix.pool.countUsable([]).get() == 3
