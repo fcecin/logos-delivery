@@ -30,6 +30,12 @@ const MinMixPoolSize* = 4
   ## with `exit_is_dest` the exit node is a pool member and not one of the hops.
 
 type
+  SelfHopSource* {.pure.} = enum
+    ## The source of the self hop address.
+    Observed ## Other peers observed the host, as discv5 and autonat do.
+    Local ## An address of this machine, or a port mapping of its gateway.
+    Configured ## The operator stated the address.
+
   WakuMix* = ref object of MixProtocol
     peerManager*: PeerManager
     clusterId: uint16
@@ -38,6 +44,8 @@ type
       ## `true` when the last hop derivation found no address the encoder accepts.
       ## The hop that mix still holds is then a leftover, unusable even if it
       ## encodes.
+    advertised*: bool ## True while this node advertises itself as a mix node.
+    notAdvertisingReason*: string ## The last logged reason not to advertise.
 
   WakuMixResult*[T] = Result[T, string]
 
