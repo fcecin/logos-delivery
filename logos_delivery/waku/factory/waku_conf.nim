@@ -95,6 +95,7 @@ type MixConf* = ref object
   mixPubKey*: Curve25519Key
   mixnodes*: seq[MixNodePubInfo]
   mixRlnConfig*: Opt[ModuleRlnConfig]
+  allowAllAddresses*: bool
 
 type StoreServiceConf* = object
   dbMigration*: bool
