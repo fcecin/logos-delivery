@@ -10,6 +10,7 @@ import
   ./test_wakunode_mix_failed_dials,
   ./test_wakunode_mix_metadata,
   ./test_wakunode_mix_reply_path,
+  ./test_wakunode_mix_seen,
   ./test_wakunode_mix_size,
   ./test_wakunode_peer_exchange,
   ./test_wakunode_store,
