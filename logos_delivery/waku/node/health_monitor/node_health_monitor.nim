@@ -62,6 +62,8 @@ type NodeHealthMonitor* = ref object
   relayObserver: PubSubObserver
   peerEventListener: WakuPeerEventListener
   shardHealthListener: EventShardTopicHealthChangeListener
+  contentTopicSubscribedListener: ContentTopicSubscribedEventListener
+  contentTopicUnsubscribedListener: ContentTopicUnsubscribedEventListener
   eventLoopLagExceeded: bool
     ## set to true when the chronos event loop lag exceeds the severe threshold,
     ## causing the node health to be reported as EVENT_LOOP_LAGGING until lag recovers.
@@ -238,19 +240,18 @@ proc getFilterClientHealth(hm: NodeHealthMonitor): ProtocolHealth =
     hm.strength[WakuProtocol.FilterClientProtocol] = 0
     return p.notMounted()
 
-  if isNil(hm.node.wakuRelay):
-    let edgeRes = RequestEdgeFilterPeerCount.request(hm.node.brokerCtx)
-    if edgeRes.isOk():
-      let peerCount = edgeRes.get().peerCount
-      if peerCount > 0:
-        hm.strength[WakuProtocol.FilterClientProtocol] = peerCount
-        return p.ready()
-    else:
-      debug "Failed to request edge filter peer count", error = edgeRes.error
-      return p.notReady("Failed to request edge filter peer count: " & edgeRes.error)
-
   let peerCount = countCapablePeers(hm, WakuFilterSubscribeCodec)
   hm.strength[WakuProtocol.FilterClientProtocol] = peerCount
+
+  if isNil(hm.node.wakuRelay):
+    let edgeRes = RequestEdgeFilterPeerCount.request(hm.node.brokerCtx)
+    if edgeRes.isErr():
+      debug "Failed to request edge filter peer count", error = edgeRes.error
+      return p.notReady("Failed to request edge filter peer count: " & edgeRes.error)
+    # The connection status of a subscribed edge counts only the filter peers
+    # that confirmed its subscriptions.
+    if edgeRes.get().subscribed:
+      hm.strength[WakuProtocol.FilterClientProtocol] = edgeRes.get().peerCount
 
   if peerCount > 0:
     return p.ready()
@@ -754,6 +755,8 @@ proc startHealthMonitor*(hm: NodeHealthMonitor): Result[void, string] =
   if isNil(hm.node.peerManager):
     return err("startHealthMonitor: no node peerManager to monitor")
 
+  hm.healthUpdateEvent = newAsyncEvent()
+
   if not isNil(hm.node.wakuRelay):
     hm.relayObserver = PubSubObserver(
       # onRecv runs when other peers graft or prune this node
@@ -782,7 +785,25 @@ proc startHealthMonitor*(hm: NodeHealthMonitor): Result[void, string] =
   ).valueOr:
     return err("Failed to subscribe to shard health events: " & error)
 
-  hm.healthUpdateEvent = newAsyncEvent()
+  # The Filter Client health of an edge depends on its subscribed shards.
+  hm.contentTopicSubscribedListener = ContentTopicSubscribedEvent.listen(
+    hm.node.brokerCtx,
+    proc(
+        evt: ContentTopicSubscribedEvent
+    ): Future[void] {.async: (raises: []), gcsafe.} =
+      hm.healthUpdateEvent.fire(),
+  ).valueOr:
+    return err("Failed to subscribe to content topic subscribe events: " & error)
+
+  hm.contentTopicUnsubscribedListener = ContentTopicUnsubscribedEvent.listen(
+    hm.node.brokerCtx,
+    proc(
+        evt: ContentTopicUnsubscribedEvent
+    ): Future[void] {.async: (raises: []), gcsafe.} =
+      hm.healthUpdateEvent.fire(),
+  ).valueOr:
+    return err("Failed to subscribe to content topic unsubscribe events: " & error)
+
   hm.healthUpdateEvent.fire()
 
   hm.healthLoopFut = hm.healthLoop()
@@ -813,6 +834,12 @@ proc stopHealthMonitor*(hm: NodeHealthMonitor) {.async.} =
   await WakuPeerEvent.dropListener(hm.node.brokerCtx, hm.peerEventListener)
   await EventShardTopicHealthChange.dropListener(
     hm.node.brokerCtx, hm.shardHealthListener
+  )
+  await ContentTopicSubscribedEvent.dropListener(
+    hm.node.brokerCtx, hm.contentTopicSubscribedListener
+  )
+  await ContentTopicUnsubscribedEvent.dropListener(
+    hm.node.brokerCtx, hm.contentTopicUnsubscribedListener
   )
 
   if not isNil(hm.node.wakuRelay) and not isNil(hm.relayObserver):

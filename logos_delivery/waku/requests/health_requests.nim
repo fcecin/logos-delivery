@@ -46,7 +46,8 @@ RequestBroker(sync):
 
   proc signature(shard: PubsubTopic): Result[RequestEdgeShardHealth, string]
 
-# Get edge filter confirmed peer count (set when edge mode is active)
+# Get edge filter confirmed peer count (set by `SubscriptionManager`)
 RequestBroker(sync):
   type RequestEdgeFilterPeerCount* = object
-    peerCount*: int
+    peerCount*: int ## The smallest confirmed peer count of the subscribed shards
+    subscribed*: bool ## True when the edge has a content topic on a shard
