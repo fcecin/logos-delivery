@@ -847,12 +847,15 @@ proc start*(self: SubscriptionManager): Result[void, string] =
   let edgeFilterPeerCountRes = RequestEdgeFilterPeerCount.setProvider(
     self.node.brokerCtx,
     proc(): Result[RequestEdgeFilterPeerCount, string] =
+      # A shard counts from its subscribe. `edgeFilterSubLoop` adds its state
+      # later.
       var minPeers = high(int)
-      for state in self.edgeFilterSubStates.values:
-        minPeers = min(minPeers, state.peers.len)
+      for shard, sub in self.shards.pairs:
+        if sub.contentTopics.len > 0:
+          minPeers = min(minPeers, self.edgeFilterPeerCount(shard))
       if minPeers == high(int):
-        minPeers = 0
-      return ok(RequestEdgeFilterPeerCount(peerCount: minPeers)),
+        return ok(RequestEdgeFilterPeerCount(peerCount: 0, subscribed: false))
+      return ok(RequestEdgeFilterPeerCount(peerCount: minPeers, subscribed: true)),
   )
   self.ownsEdgeFilterPeerCountProvider = edgeFilterPeerCountRes.isOk()
   if edgeFilterPeerCountRes.isErr():
