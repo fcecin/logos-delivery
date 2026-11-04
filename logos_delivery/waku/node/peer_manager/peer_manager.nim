@@ -138,6 +138,9 @@ type PeerManager* = ref object
     ## Inbound budget for pure-libp2p peers; 0 admits none (the default).
   pureLibp2pPeers*: HashSet[PeerId]
     ## Connected peers admitted as pure libp2p rather than as waku members.
+  configuredPeers*: HashSet[PeerId]
+    ## The peers that the configuration or the application gave to this node.
+    ## No discovery brings one of them back, so `prunePeerStore` keeps them.
 
 #~~~~~~~~~~~~~~~~~~~#
 # Helper Functions  #
@@ -1184,7 +1187,7 @@ proc prunePeerStore*(pm: PeerManager) =
 
   # prune failed connections
   for peerId, count in peerStore[NumberFailedConnBook].book.pairs:
-    if count < pm.maxFailedAttempts:
+    if count < pm.maxFailedAttempts or peerId in pm.configuredPeers:
       continue
 
     if peersToPrune.len >= pruningCount:
@@ -1192,7 +1195,9 @@ proc prunePeerStore*(pm: PeerManager) =
 
     peersToPrune.incl(peerId)
 
-  var notConnected = peerStore.getDisconnectedPeers().mapIt(it.peerId)
+  var notConnected = peerStore.getDisconnectedPeers().mapIt(it.peerId).filterIt(
+      it notin pm.configuredPeers
+    )
 
   # Always pick random non-connected peers
   shuffle(notConnected)
