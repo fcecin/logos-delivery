@@ -1225,18 +1225,18 @@ proc prunePeerStore*(pm: PeerManager) =
 
     peersToPrune.incl(peer)
 
-  # calculate the avg peers per shard
-  let total = sum(toSeq(peersByShard.values).mapIt(it.len))
-  let avg = min(1, total div max(1, peersByShard.len))
+  # prune peers from the shard with the most peers
+  while peersToPrune.len < pruningCount:
+    var largest: uint16
+    var size = 0
+    for shard, peers in peersByShard.pairs:
+      if peers.len > size:
+        (largest, size) = (shard, peers.len)
+    if size == 0:
+      break
 
-  # prune peers from shard with higher than avg count
-  for shard, peers in peersByShard.pairs:
-    let count = max(peers.len - avg, 0)
-    for peer in peers[0 .. count]:
-      if peersToPrune.len >= pruningCount:
-        break
-
-      peersToPrune.incl(peer)
+    peersByShard.withValue(largest, peers):
+      peersToPrune.incl(peers[].pop())
 
   for peer in peersToPrune:
     peerStore.delete(peer)
