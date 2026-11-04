@@ -45,6 +45,22 @@ type DeliveryTask* = ref object
   propagatedAnonymously*: bool
     ## Set when an anonymous path propagated the message. No store node confirms
     ## it: the query would name the message from this node's own address.
+  mixConfirmed*: bool
+    ## Set when the exit answered a mix send of this task, or when this node
+    ## received the message from the network. A mix send that propagated with
+    ## no confirmation waits for one.
+  confirmation*: Future[void]
+    ## Completes when a mix send of the task is confirmed. Nil while the send
+    ## service does not wait for a confirmation of this task.
+  mixRequestLeft*: bool
+    ## Set when the request of the running mix attempt has left this node. A
+    ## cancel after that leaves the task propagated with no confirmation.
+  mixAttemptCut*: bool
+    ## Set when a stop cut a mix attempt before its request left this node. The
+    ## request may still have left, so the task never goes to the plain path.
+  sentEventEmitted*: bool
+    ## Set when the task emits `MessageSentEvent`, so a confirmed mix send
+    ## emits it once.
   seenOnNetwork*: bool
     ## Set when this node receives the message from the network after a mix
     ## attempt starts and before any plain attempt. The exit publishes before it
@@ -93,6 +109,12 @@ proc new*(
       priority: envelop.priority,
     )
   )
+
+proc confirmMix*(task: DeliveryTask) =
+  ## Records the confirmation of a mix send, and wakes the wait for it.
+  task.mixConfirmed = true
+  if not task.confirmation.isNil() and not task.confirmation.finished():
+    task.confirmation.complete()
 
 proc loggedHash*(task: DeliveryTask): string =
   ## The hash for INFO and ERROR records, withheld once the task is anonymized.

@@ -88,6 +88,7 @@ type
     crypto: Opt[ChannelCrypto] ## `none` means the channel is not encrypted
     receivedListener: MessageReceivedEventListener
     sentListener: MessageSentEventListener
+    unconfirmedListener: MessageUnconfirmedEventListener
     errorListener: MessageErrorEventListener
     closed: bool
 
@@ -119,6 +120,7 @@ proc stop*(self: ReliableChannel) {.async: (raises: []).} =
   self.closed = true
   await MessageReceivedEvent.dropListener(self.brokerCtx, self.receivedListener)
   await MessageSentEvent.dropListener(self.brokerCtx, self.sentListener)
+  await MessageUnconfirmedEvent.dropListener(self.brokerCtx, self.unconfirmedListener)
   await MessageErrorEvent.dropListener(self.brokerCtx, self.errorListener)
   if not self.cleanupFut.isNil():
     await self.cleanupFut.cancelAndWait()
@@ -445,6 +447,16 @@ proc new*(
   ).valueOr:
     error "MessageSentEvent.listen failed", channelId = channelId, error = error
     MessageSentEventListener()
+
+  # A mix send with no confirmation left this node, and SDS carries the
+  # acknowledgements of the channel, so the segment counts as sent.
+  chn.unconfirmedListener = MessageUnconfirmedEvent.listen(
+    chn.brokerCtx,
+    proc(evt: MessageUnconfirmedEvent): Future[void] {.async: (raises: []).} =
+      chn.onMessageFinal(evt.requestId, MessagingOutcome.Sent),
+  ).valueOr:
+    error "MessageUnconfirmedEvent.listen failed", channelId = channelId, error = error
+    MessageUnconfirmedEventListener()
 
   chn.errorListener = MessageErrorEvent.listen(
     chn.brokerCtx,

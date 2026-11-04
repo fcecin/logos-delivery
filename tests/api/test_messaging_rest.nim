@@ -133,6 +133,7 @@ suite "Messaging REST API":
 
     let reqA = RequestId("req-A")
     let reqB = RequestId("req-B")
+    let reqC = RequestId("req-C")
 
     # reqA sees the full lifecycle; reqB only an error.
     MessagePropagatedEvent.emit(
@@ -143,6 +144,10 @@ suite "Messaging REST API":
     )
     MessageErrorEvent.emit(
       brokerCtx, MessageErrorEvent(requestId: reqB, messageHash: "0xbb", error: "boom")
+    )
+    # reqC went out over mix and got no confirmation.
+    MessageUnconfirmedEvent.emit(
+      brokerCtx, MessageUnconfirmedEvent(requestId: reqC, messageHash: "0xcc")
     )
     await sleepAsync(settleDelay)
 
@@ -160,15 +165,21 @@ suite "Messaging REST API":
     let missingResp = await client.messagingGetSendEventsByIdRawV1($reqA)
     check missingResp.status == 404
 
-    # GET all now returns only reqB (with its error), then clears.
+    # GET all now returns reqB (with its error) and reqC, then clears.
     let allResp = await client.messagingGetSendEventsV1()
     check:
       allResp.status == 200
-      allResp.data.len == 1
-      allResp.data[0].requestId == $reqB
-      allResp.data[0].events.len == 1
-      allResp.data[0].events[0].kind == SendEventKind.Error
-      allResp.data[0].events[0].error == "boom"
+      allResp.data.len == 2
+    let statusB = allResp.data.filterIt(it.requestId == $reqB)
+    let statusC = allResp.data.filterIt(it.requestId == $reqC)
+    check:
+      statusB.len == 1
+      statusB[0].events.len == 1
+      statusB[0].events[0].kind == SendEventKind.Error
+      statusB[0].events[0].error == "boom"
+      statusC.len == 1
+      statusC[0].events.len == 1
+      statusC[0].events[0].kind == SendEventKind.Unconfirmed
 
     let emptyResp = await client.messagingGetSendEventsV1()
     check:

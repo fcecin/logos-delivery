@@ -29,6 +29,10 @@ const MinMixPoolSize* = 4
   ## The smallest pool that mix can build a path from. `PathLength` is 3, and
   ## with `exit_is_dest` the exit node is a pool member and not one of the hops.
 
+const MixReplyTimeout* = chronos.seconds(5)
+  ## How long a lightpush over mix waits for its request to leave this node, and
+  ## then for the answer of the exit.
+
 type
   SelfHopSource* {.pure.} = enum
     ## The source of the self hop address.
@@ -46,6 +50,9 @@ type
       ## encodes.
     advertised*: bool ## True while this node advertises itself as a mix node.
     notAdvertisingReason*: string ## The last logged reason not to advertise.
+    replyTimeout*: Duration
+      ## The wait of a lightpush over mix for its request to leave this node,
+      ## and then for the answer of the exit. `MixReplyTimeout` by default.
 
   WakuMixResult*[T] = Result[T, string]
 
@@ -194,7 +201,12 @@ proc new*(
     peermgr.switch.peerInfo.publicKey.skkey, peermgr.switch.peerInfo.privateKey.skkey,
   )
 
-  var m = WakuMix(peerManager: peermgr, clusterId: clusterId, pubKey: mixPubKey)
+  var m = WakuMix(
+    peerManager: peermgr,
+    clusterId: clusterId,
+    pubKey: mixPubKey,
+    replyTimeout: MixReplyTimeout,
+  )
   procCall MixProtocol(m).init(
     localMixNodeInfo,
     peermgr.switch,

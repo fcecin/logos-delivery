@@ -83,7 +83,7 @@ proc mixWindowElapsed(self: MixSendProcessor, task: DeliveryTask): bool =
 proc mixUnusable(self: MixSendProcessor, task: DeliveryTask): MixUnusable =
   ## Why mix cannot attempt `task` now, with no network call. It splits
   ## `mixReady()` into the self hop and the pool, then checks the exit with
-  ## `selectMixLightpushPeer`, as `lightpushPublishToAny(mixify = true)` does.
+  ## `selectMixLightpushPeer`, as `publishOverMixToAny` does.
   if not self.waku.mixReady():
     if self.waku.mixMounted() and not self.waku.mixSelfHopUsable():
       return MixUnusable.SelfHop
@@ -97,8 +97,9 @@ proc decideWithoutMix(
 ) =
   ## Hands a `Preferred` task to the plain path at once. Fails a `Required` task
   ## with the reason, once its admission is older than `MixUnusableGrace` while
-  ## mix is mounted.
-  if not self.fallbackAllowed:
+  ## mix is mounted. A task whose mix attempt a stop cut off is treated as
+  ## `Required`, because its message may be on the network.
+  if not self.fallbackAllowed or task.mixAttemptCut:
     if self.waku.mixMounted() and task.admissionAge() <= MixUnusableGrace:
       task.errorDesc = unusable.reason()
       task.state = DeliveryState.NextRoundRetry
@@ -173,7 +174,7 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
     self.fellBackReason = MixUnusable.None
     info "Mix can carry messages again"
 
-  if self.fallbackAllowed and self.mixWindowElapsed(task):
+  if self.fallbackAllowed and not task.mixAttemptCut and self.mixWindowElapsed(task):
     debug "Mix window elapsed, handing the task to the plain send path",
       requestId = task.requestId,
       msgHash = task.msgHash.to0xHex(),
@@ -194,35 +195,87 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
     msgHash = task.msgHash.to0xHex(),
     tryCount = task.tryCount
 
-  let numLightpushServers = (
-    await self.waku.lightpushPublishToAny(task.pubsubTopic, task.msg, mixify = true)
-  ).valueOr:
-    debug "MixSendProcessor.sendImpl failed", error = error.desc.get($error.code)
+  task.mixRequestLeft = false
+  let published =
+    try:
+      await self.waku.publishOverMixToAny(
+        task.pubsubTopic,
+        task.msg,
+        proc() {.gcsafe, raises: [].} =
+          task.mixRequestLeft = true,
+      )
+    except CancelledError as exc:
+      if task.mixRequestLeft:
+        # The request is on its way. The send is propagated and waits for its
+        # confirmation when the service runs again.
+        task.state = DeliveryState.SuccessfullyPropagated
+        task.propagatedAnonymously = true
+        if task.firstPropagatedTime.isNone():
+          task.firstPropagatedTime = Opt.some(Moment.now())
+      else:
+        # The request may have left this node before the cancel.
+        task.mixAttemptCut = true
+      raise exc
+  case published.outcome
+  of MixPublishOutcome.Failed:
+    let fault = published.response.error
+    debug "MixSendProcessor.sendImpl failed", error = fault.desc.get($fault.code)
 
-    if error.isRlnRejection():
-      task.parkForRlnProofRefresh(self.waku, error.desc.get($error.code))
+    if fault.isRlnRejection():
+      task.parkForRlnProofRefresh(self.waku, fault.desc.get($fault.code))
       return
 
-    case error.code
+    case fault.code
     of LightPushErrorCode.NO_PEERS_TO_RELAY, LightPushErrorCode.TOO_MANY_REQUESTS,
         LightPushErrorCode.OUT_OF_RLN_PROOF, LightPushErrorCode.SERVICE_NOT_AVAILABLE,
         LightPushErrorCode.INTERNAL_SERVER_ERROR:
       task.state = DeliveryState.NextRoundRetry
     else:
       task.state = DeliveryState.FailedToDeliver
-      task.errorDesc = error.desc.get($error.code)
+      task.errorDesc = fault.desc.get($fault.code)
     return
-
-  if numLightpushServers > 0:
+  of MixPublishOutcome.Unconfirmed:
+    # The request left this node and the exit publishes before it answers, so
+    # the message is on the network until a confirmation says more.
+    debug "Message sent via Mix with no answer of the exit",
+      requestId = task.requestId, msgHash = task.msgHash.to0xHex()
+  of MixPublishOutcome.Confirmed:
     debug "Message propagated via Mix",
       requestId = task.requestId, msgHash = task.msgHash.to0xHex()
-    task.state = DeliveryState.SuccessfullyPropagated
-    task.propagatedAnonymously = true
-    if task.firstPropagatedTime.isNone():
-      task.firstPropagatedTime = Opt.some(Moment.now())
-  else:
-    debug "Mix publish returned zero peers, the task waits for a retry",
-      requestId = task.requestId
-    task.state = DeliveryState.NextRoundRetry
+    task.confirmMix()
 
-  return
+  task.state = DeliveryState.SuccessfullyPropagated
+  task.propagatedAnonymously = true
+  if task.firstPropagatedTime.isNone():
+    task.firstPropagatedTime = Opt.some(Moment.now())
+
+method canResend*(self: MixSendProcessor, task: DeliveryTask): bool {.gcsafe.} =
+  ## A message that went out over mix is sent again over mix only. A plain copy
+  ## would carry the address of this node.
+  return task.propagatedAnonymously
+
+method resendImpl*(
+    self: MixSendProcessor, task: DeliveryTask
+) {.async: (raises: [CancelledError]).} =
+  ## Sends a message with no confirmation once more over mix. Mix selects a path
+  ## and an exit again. An answer of the exit, a success or a refusal of a message
+  ## that the network already has, confirms the send.
+  task.resendCount.inc()
+  let unusable = self.mixUnusable(task)
+  if unusable != MixUnusable.None:
+    debug "Mix cannot send the message again now",
+      requestId = task.requestId, reason = unusable.reason()
+    return
+  try:
+    let published = await self.waku.publishOverMixToAny(task.pubsubTopic, task.msg)
+    if published.outcome == MixPublishOutcome.Confirmed:
+      debug "The answer to a resend over Mix confirms the message",
+        requestId = task.requestId
+      task.confirmMix()
+    else:
+      debug "A resend over Mix got no confirmation",
+        requestId = task.requestId, outcome = published.outcome
+  except CancelledError as exc:
+    raise exc
+  except CatchableError as exc:
+    debug "A resend over Mix failed", requestId = task.requestId, error = exc.msg

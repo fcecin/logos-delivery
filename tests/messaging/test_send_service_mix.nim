@@ -12,6 +12,7 @@ import
   logos_delivery/waku/node/waku_node/mix_rln,
   libp2p/[peerid, multiaddress],
   libp2p/stream/connection,
+  libp2p/varint,
   logos_delivery/waku/waku,
   logos_delivery/waku/waku_mix,
   logos_delivery/waku/node/waku_node,
@@ -23,6 +24,8 @@ import
   logos_delivery/waku/rln/rln_plugin,
   logos_delivery/waku/rln/types as rln_types,
   logos_delivery/waku/waku_lightpush/common,
+  logos_delivery/waku/waku_lightpush/rpc,
+  logos_delivery/waku/waku_lightpush/rpc_codec,
   logos_delivery/waku/waku_core,
   logos_delivery/api/types,
   logos_delivery/api/events/messaging_client_events,
@@ -459,7 +462,7 @@ suite "SendService - anonymity level with a mounted mix":
 
   const shard = PubsubTopic("/waku/2/rs/3/0")
 
-  proc addMixPeer(port: int, lightpush: bool) =
+  proc addMixPeer(port: int, lightpush: bool): PeerId {.discardable.} =
     let peerId = PeerId.init(generateSecp256k1Key()).tryGet()
     let keyPair = generateKeyPair().expect("mix key pair")
     waku.node.peerManager.addPeer(
@@ -472,6 +475,7 @@ suite "SendService - anonymity level with a mounted mix":
       )
     )
     waku.node.peerManager.switch.peerStore.setShardInfo(peerId, @[0'u16])
+    return peerId
 
   asyncTest "a Required task waits for a short pool during its grace, then fails":
     ## A short pool is a reason mix cannot attempt the task. A `Required` task
@@ -694,6 +698,56 @@ suite "SendService - anonymity level with a mounted mix":
       task.state == DeliveryState.FailedToDeliver
       errors.mapIt(it.requestId) == @[task.requestId]
       errors.mapIt(it.error) == @["scripted reason"]
+
+  asyncTest "a Preferred task whose mix attempt a stop cut off never takes the plain path":
+    ## The request may have left this node before the cancel, so a plain copy
+    ## could link the message to this node. The task stays with mix, and ends as
+    ## a `Required` task does when mix cannot carry it.
+    # A first hop that accepts the connection and never answers, so the attempt
+    # waits in the write until the test cancels it.
+    var accepted = newFuture[void]("accepted")
+    var held: seq[StreamTransport]
+    let server = createStreamServer(initTAddress("127.0.0.1:0"), flags = {ReuseAddr})
+    proc holdConnections() {.async.} =
+      while true:
+        held.add(await server.accept())
+        if not accepted.finished():
+          accepted.complete()
+
+    let holding = holdConnections()
+    defer:
+      await holding.cancelAndWait()
+      for t in held:
+        await t.closeWait()
+      await server.closeWait()
+    let port = int(server.localAddress().port)
+    var hops: seq[PeerId]
+    for i in 0 ..< MinMixPoolSize:
+      hops.add(addMixPeer(port, lightpush = true))
+    check waku.mixReady()
+
+    let plain = PlainSendProcessor()
+    let mix = MixSendProcessor.new(
+      waku, waku.brokerCtx, AnonymityLevel.Preferred, chronos.minutes(1)
+    )
+    mix.chain(plain)
+    let task = buildTask("cut-attempt", chronos.seconds(1))
+    let attempt = mix.sendImpl(task)
+    check await accepted.withTimeout(FUTURE_TIMEOUT_MEDIUM)
+    await attempt.cancelAndWait()
+    check:
+      task.anonymized
+      task.mixAttemptCut
+
+    # Mix cannot carry the task now, which hands a `Preferred` task to the plain
+    # path on master.
+    for hop in hops:
+      waku.node.peerManager.switch.peerStore.delete(hop)
+    check not waku.mixReady()
+    await mix.process(task)
+    check:
+      plain.calls == 0
+      task.state == DeliveryState.NextRoundRetry
 
   asyncTest "a Preferred task falls back to the plain path once the window elapsed":
     ## The window ends the mix phase of a task that mix did not deliver. Only a
@@ -1011,6 +1065,8 @@ type StubMixConn = ref object of Connection
   stallInSend: bool
   cached: seq[byte]
   writes: seq[int] ## the bytes of each `write`
+  answer: Opt[LightPushResponse]
+    ## The answer of the exit to each request, with the request id of the request.
 
 method readOnce(
     s: StubMixConn, pbytes: pointer, nbytes: int
@@ -1042,6 +1098,17 @@ method write(
   s.writes.add(msg.len)
   if s.stallInSend:
     await s.sendStall
+  s.answer.withValue(answer):
+    # The request is a length prefix and the encoded request.
+    var prefixLen = 0
+    var length: uint64
+    doAssert PB.getUVarint(msg, prefixLen, length).isOk()
+    let request = LightpushRequest.decode(msg[prefixLen ..^ 1]).expect("request")
+    var response = answer
+    response.requestId = request.requestId
+    let encoded = response.encode()
+    let prefix = PB.toBytes(uint64(encoded.len))
+    await s.incoming.put(@(prefix.toOpenArray()) & encoded)
 
 method closeImpl(s: StubMixConn): Future[void] {.async: (raises: []).} =
   if not s.incomingFut.isNil():
@@ -1050,8 +1117,10 @@ method closeImpl(s: StubMixConn): Future[void] {.async: (raises: []).} =
 method getWrapped(s: StubMixConn): Connection =
   nil
 
-proc newStubMixConn(stallInSend = false): StubMixConn =
-  var inst = StubMixConn(stallInSend: stallInSend)
+proc newStubMixConn(
+    stallInSend = false, answer = Opt.none(LightPushResponse)
+): StubMixConn =
+  var inst = StubMixConn(stallInSend: stallInSend, answer: answer)
   inst.incoming = newAsyncQueue[seq[byte]]()
   inst.replyReceivedFut = newFuture[void]("stub.replyReceived")
   inst.sendStall = Future[void].Raising([CancelledError]).init("stub.sendStall")
@@ -1076,7 +1145,7 @@ suite "Mix send path - the reply budget":
   # limit, because the test subject is the mechanism and not the constant.
   const ReplyBudget = chronos.milliseconds(200)
 
-  proc givesUpOn(stallInSend: bool): Future[WakuLightPushResult] {.async.} =
+  proc givesUpOn(stallInSend: bool): Future[MixPublishResult] {.async.} =
     ## Calls the real `publishOverMix` with a mix connection that does not
     ## answer, and returns the result. The test does not await the call
     ## directly. It uses `race` with a long timer: when `publishOverMix` does
@@ -1112,19 +1181,84 @@ suite "Mix send path - the reply budget":
       conn.writes == @[size] # one write, so one mix message
       limit == getMaxMessageSizeForCodec(WakuLightPushCodec, MixLightpushSurbs).get()
 
-  asyncTest "a dropped reply is given up on instead of waited on forever":
+  asyncTest "a dropped reply is given up on, and the request is known to have left":
     let res = await givesUpOn(stallInSend = false)
     check:
-      res.isErr()
-      res.error.code == LightPushErrorCode.SERVICE_NOT_AVAILABLE
+      res.outcome == MixPublishOutcome.Unconfirmed
+      res.response.isErr()
+      res.response.error.code == LightPushErrorCode.SERVICE_NOT_AVAILABLE
 
-  asyncTest "a stalled first-hop dial is given up on too":
+  asyncTest "a stalled first-hop dial is given up on too, as a request that did not leave":
     ## A stall in the send leaves the reply future pending, and the close of
     ## the connection cancels the closure that completes it.
     let res = await givesUpOn(stallInSend = true)
     check:
-      res.isErr()
-      res.error.code == LightPushErrorCode.SERVICE_NOT_AVAILABLE
+      res.outcome == MixPublishOutcome.Failed
+      res.response.isErr()
+      res.response.error.code == LightPushErrorCode.SERVICE_NOT_AVAILABLE
+
+  asyncTest "the request-left handler runs after the write, and not when the write stalls":
+    let msg = fakeWakuMessage(contentTopic = "/test/1/anonymity/proto")
+    let shard = PubsubTopic("/waku/2/rs/3/0")
+    var left = 0
+    proc count() {.gcsafe, raises: [].} =
+      inc left
+
+    let sent = newStubMixConn()
+    discard
+      await waku.node.publishOverMix(Connection(sent), shard, msg, ReplyBudget, count)
+    check left == 1
+
+    let stalled = newStubMixConn(stallInSend = true)
+    discard await waku.node.publishOverMix(
+      Connection(stalled), shard, msg, ReplyBudget, count
+    )
+    check left == 1
+
+  asyncTest "a cancel during the wait for the answer resets the connection":
+    let conn = newStubMixConn()
+    let msg = fakeWakuMessage(contentTopic = "/test/1/anonymity/proto")
+    let publishing = waku.node.publishOverMix(
+      Connection(conn), PubsubTopic("/waku/2/rs/3/0"), msg, chronos.seconds(10)
+    )
+    checkUntilTimeout:
+      conn.writes.len == 1
+    await publishing.cancelAndWait()
+    check conn.isClosed
+
+  asyncTest "the answer of the exit confirms the message, also the refusal of a message the network has":
+    ## A relay that already has the message refuses it as a duplicate. The
+    ## network has the message, so the refusal confirms the send. Any other
+    ## refusal is a failure.
+    let shard = PubsubTopic("/waku/2/rs/3/0")
+    let msg = fakeWakuMessage(contentTopic = "/test/1/anonymity/proto")
+    proc outcomeOf(response: LightPushResponse): Future[MixPublishOutcome] {.async.} =
+      let conn = newStubMixConn(answer = Opt.some(response))
+      let res =
+        await waku.node.publishOverMix(Connection(conn), shard, msg, ReplyBudget)
+      return res.outcome
+
+    let success = await outcomeOf(
+      LightPushResponse(
+        statusCode: LightPushSuccessCode.SUCCESS, relayPeerCount: Opt.some(1'u32)
+      )
+    )
+    let duplicate = await outcomeOf(
+      LightPushResponse(
+        statusCode: LightPushErrorCode.INVALID_MESSAGE,
+        statusDesc: Opt.some(AlreadySeenMessageDesc),
+      )
+    )
+    let refused = await outcomeOf(
+      LightPushResponse(
+        statusCode: LightPushErrorCode.INVALID_MESSAGE,
+        statusDesc: Opt.some("Invalid message, skipping publish"),
+      )
+    )
+    check:
+      success == MixPublishOutcome.Confirmed
+      duplicate == MixPublishOutcome.Confirmed
+      refused == MixPublishOutcome.Failed
 
 suite "Mix send path - the node's own hop":
   ## `mixReady()` is false while mix cannot encode this node's own hop: every

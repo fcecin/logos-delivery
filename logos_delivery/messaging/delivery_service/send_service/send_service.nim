@@ -51,7 +51,12 @@ const StoreValidationQueryTimeout = chronos.seconds(15)
   ## Bounds one Store validation query with its dials. It exceeds one
   ## `DefaultDialTimeout`, so a dead Store peer leaves time for another.
 
-const MaxStoreMissResends* = 3 ## The most resends of one message after a Store miss.
+const MaxStoreMissResends* = 3
+  ## The most resends of one message, after a Store miss or while a mix send
+  ## waits for its confirmation.
+
+const MixResendInterval* = chronos.seconds(10)
+  ## The pause between two resends of a mix send that waits for its confirmation.
 
 const MaxSendsInFlight* = 50
   ## The number of sends that run at the same time. It bounds the open streams
@@ -107,6 +112,7 @@ type SendService* = ref object of RootObj
     ## Also the pause of the Store validation loop while no Store peer is available.
   sendQueueCapacity*: int
   retryInterval: timer.Duration
+  mixResendInterval: timer.Duration
 
 proc setupSendProcessorChain*(
     waku: Waku, anonymityLevel: AnonymityLevel
@@ -162,11 +168,14 @@ proc new*(
     maxValidationAge: timer.Duration = DeliveryWindow,
     retryInterval: timer.Duration = RetryInterval,
     maxSendsInFlight: int = MaxSendsInFlight,
+    mixResendInterval: timer.Duration = MixResendInterval,
 ): Result[T, string] =
   # With zero, `retryLoop` ticks at each turn of the event loop, and the waiting
   # tasks retry with no pause.
   if retryInterval <= ZeroDuration:
     return err("retryInterval must be positive")
+  if mixResendInterval <= ZeroDuration:
+    return err("mixResendInterval must be positive")
   if maxSendsInFlight <= 0:
     return err("maxSendsInFlight must be positive")
 
@@ -188,6 +197,7 @@ proc new*(
     archiveTime: ArchiveTime,
     sendQueueCapacity: sendQueueCapacity,
     retryInterval: retryInterval,
+    mixResendInterval: mixResendInterval,
     subscribeOnSend: anonymityLevel == AnonymityLevel.None,
   )
 
@@ -203,6 +213,15 @@ proc storeConfirmationExpected(self: SendService, task: DeliveryTask): bool =
   ## True when a plain send of this task would wait for a store confirmation:
   ## reliability is on and the message is not ephemeral.
   return self.checkStoreForMessages and not task.isEphemeral()
+
+proc awaitsMixConfirmation*(self: SendService, task: DeliveryTask): bool =
+  ## True while a mix send of this task propagated and waits for its
+  ## confirmation, the answer of an exit or a copy of the message from the
+  ## network. Only when a plain send would wait for a store confirmation.
+  return
+    self.storeConfirmationExpected(task) and
+    task.state == DeliveryState.SuccessfullyPropagated and task.propagatedAnonymously and
+    not task.mixConfirmed
 
 proc awaitsStoreValidation*(self: SendService, task: DeliveryTask): bool =
   ## True while a propagated task still needs a store node to confirm it. A task
@@ -249,18 +268,6 @@ func storeAnswerPending(task: DeliveryTask): bool =
   ## True while the `deliver` of the task waits for a Store confirmation.
   return not task.storeAnswer.isNil() and not task.storeAnswer.finished()
 
-proc startResend(self: SendService, task: DeliveryTask) =
-  ## Starts the resend of `task` and does not wait for it. A task gets no second
-  ## resend while its last resend runs, and at most `MaxStoreMissResends` in all,
-  ## so a peer that does not answer holds one resend for each task and a message
-  ## that the Store lags on is not sent again every round.
-  if task.resendCount >= MaxStoreMissResends or self.sendProcessor.isNil():
-    return
-  self.resends.withValue(task.msgHash, resend):
-    if not resend[].finished():
-      return
-  self.resends[task.msgHash] = self.sendProcessor.resend(task)
-
 proc dropFinishedResends(self: SendService) =
   ## Removes the resends that ended.
   var ended: seq[WakuMessageHash]
@@ -269,6 +276,28 @@ proc dropFinishedResends(self: SendService) =
       ended.add(msgHash)
   for msgHash in ended:
     self.resends.del(msgHash)
+
+proc startResend(self: SendService, task: DeliveryTask) =
+  ## Starts the resend of `task` and does not wait for it. A task gets no second
+  ## resend while its last resend runs, and at most `MaxStoreMissResends` in all,
+  ## so a peer that does not answer holds one resend for each task and a message
+  ## that the Store lags on is not sent again every round.
+  if task.resendCount >= MaxStoreMissResends or self.sendProcessor.isNil():
+    return
+  self.dropFinishedResends()
+  self.resends.withValue(task.msgHash, resend):
+    if not resend[].finished():
+      return
+  self.resends[task.msgHash] = self.sendProcessor.resend(task)
+
+proc stopResend(
+    self: SendService, task: DeliveryTask
+) {.async: (raises: [CancelledError]).} =
+  ## Cancels the resend of a task that gets its last event, waits for it to end,
+  ## and forgets it.
+  self.resends.withValue(task.msgHash, resend):
+    await resend[].cancelAndWait()
+  self.resends.del(task.msgHash)
 
 proc checkMsgsInStore(self: SendService, batch: seq[DeliveryTask]) {.async.} =
   ## Asks a Store peer about one batch, confirms the tasks that it reports, and
@@ -386,6 +415,16 @@ proc failExpired(self: SendService, task: DeliveryTask): bool =
     return true
   return false
 
+proc reportMixSent(self: SendService, task: DeliveryTask) =
+  ## Emits `MessageSentEvent` once for a confirmed mix send. A confirmed mix
+  ## send ends with the event of a plain send that a store node confirmed, so
+  ## both paths end with the same event. The INFO line omits the hash.
+  if task.sentEventEmitted:
+    return
+  task.sentEventEmitted = true
+  info "Message successfully sent over mix", requestId = task.requestId
+  MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+
 proc reportPropagated(self: SendService, task: DeliveryTask) =
   ## Emits `MessagePropagatedEvent`, and `MessageSentEvent` for a mixed send that
   ## a plain send would confirm in Store.
@@ -395,12 +434,8 @@ proc reportPropagated(self: SendService, task: DeliveryTask) =
     requestId = task.requestId, msgHash = task.loggedHash()
   MessagePropagatedEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
   task.propagatedEventEmitted = true
-  if task.propagatedAnonymously and self.storeConfirmationExpected(task):
-    # The exit's reply completes a mixed send when a plain send would wait for
-    # a store confirmation, so both paths end with the same event. The INFO line
-    # omits the hash.
-    info "Message successfully sent over mix", requestId = task.requestId
-    MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+  if task.mixConfirmed and self.storeConfirmationExpected(task):
+    self.reportMixSent(task)
 
 proc reportTaskQueued(self: SendService, task: DeliveryTask) =
   ## Emits `MessageQueuedEvent` once for a task that waits for epoch budget.
@@ -492,16 +527,20 @@ proc retryLoop(self: SendService) {.async: (raises: [CancelledError]).} =
     self.retryNow()
 
 proc completeIfSeen(task: DeliveryTask): bool =
-  ## Completes a task whose message this node received from the network after a
-  ## mix attempt started, as a mix send whose reply arrived. Returns true when it
-  ## completes the task.
-  if not task.seenOnNetwork or task.firstPropagatedTime.isSome():
+  ## Confirms a task whose message this node received from the network after a
+  ## mix attempt started, and completes it as a propagated mix send when its
+  ## attempt did not. Returns true when the task is propagated and confirmed. A
+  ## plain attempt puts the message on the network in the clear, so a copy says
+  ## nothing about the mix send after it.
+  if not task.seenOnNetwork or task.plainAttempted:
     return false
-  debug "Message seen on the network, the mix send is complete",
-    requestId = task.requestId, msgHash = task.msgHash.to0xHex()
-  task.state = DeliveryState.SuccessfullyPropagated
-  task.propagatedAnonymously = true
-  task.firstPropagatedTime = Opt.some(Moment.now())
+  if task.firstPropagatedTime.isNone():
+    debug "Message seen on the network, the mix send is complete",
+      requestId = task.requestId, msgHash = task.msgHash.to0xHex()
+    task.state = DeliveryState.SuccessfullyPropagated
+    task.propagatedAnonymously = true
+    task.firstPropagatedTime = Opt.some(Moment.now())
+  task.confirmMix()
   return true
 
 proc sendUntilPropagated(
@@ -510,7 +549,9 @@ proc sendUntilPropagated(
   ## Makes the first attempt at once, then one attempt at each tick of
   ## `retryLoop`, until the task propagates. Returns false when the task failed.
   while true:
-    if task.completeIfSeen():
+    # A mix attempt that a stop cut off after its request left propagated the
+    # task. A copy from the network completes it as well.
+    if task.state == DeliveryState.SuccessfullyPropagated or task.completeIfSeen():
       self.reportPropagated(task)
       return true
     if not self.needsAdmission(task) or await self.runAdmission(task):
@@ -579,18 +620,63 @@ proc waitForStoreValidation(
     task.storeValidationWaited = task.storeValidationWaited + (Moment.now() - started)
     task.storeAnswer = nil
 
+proc waitForMixConfirmation(
+    self: SendService, task: DeliveryTask
+) {.async: (raises: [CancelledError]).} =
+  ## Waits for the confirmation of a mix send, until the waits of the task add up
+  ## to `maxValidationAge`, and sends the message again each `mixResendInterval`
+  ## while it waits. A send with no confirmation at the end of the window ends
+  ## with `MessageUnconfirmedEvent`, not with an error. The network has the
+  ## message with a high probability, and a plain send would name this node.
+  let started = Moment.now()
+  try:
+    while true:
+      let left =
+        self.maxValidationAge - task.storeValidationWaited - (Moment.now() - started)
+      if left <= ZeroDuration:
+        break
+      # `withTimeout` cancels the future when the time ends, so each wait gets a
+      # new one. A confirmation between two waits sets `mixConfirmed`.
+      task.confirmation = newFuture[void]("mix confirmation")
+      if task.mixConfirmed or
+          await task.confirmation.withTimeout(min(left, self.mixResendInterval)):
+        await self.stopResend(task)
+        self.reportMixSent(task)
+        self.finish(task)
+        return
+      if left > self.mixResendInterval:
+        self.startResend(task)
+    info "Message sent over mix, with no confirmation within the window",
+      requestId = task.requestId,
+      waited = task.storeValidationWaited + (Moment.now() - started),
+      resends = task.resendCount
+    await self.stopResend(task)
+    MessageUnconfirmedEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+    self.finish(task)
+  finally:
+    task.storeValidationWaited = task.storeValidationWaited + (Moment.now() - started)
+    task.confirmation = nil
+
 proc deliver(
     self: SendService, task: DeliveryTask
 ) {.async: (raises: [CancelledError]).} =
-  ## Sends the task until it propagates, then waits for a Store confirmation
-  ## when one is expected. Each event goes out when its step ends.
+  ## Sends the task until it propagates, then waits for a Store confirmation or
+  ## for the confirmation of a mix send when one is expected. Each event goes out
+  ## when its step ends.
   try:
     if not task.propagatedEventEmitted:
       if not await self.sendUntilPropagated(task):
         return
     if self.awaitsStoreValidation(task):
       await self.waitForStoreValidation(task)
+    elif self.awaitsMixConfirmation(task):
+      await self.waitForMixConfirmation(task)
     else:
+      # A mix send confirmed before this `deliver` ran, as after a restart,
+      # still owes its event.
+      if task.propagatedAnonymously and task.mixConfirmed and
+          self.storeConfirmationExpected(task):
+        self.reportMixSent(task)
       self.finish(task)
   except CancelledError as exc:
     # A cancel can stop `process` before it moves `Entry` or `FallbackRetry`.
@@ -647,6 +733,8 @@ proc markSeen(self: SendService, pubsubTopic: PubsubTopic, msg: WakuMessage) =
   if task.isNil() or not task.anonymized or task.plainAttempted:
     return
   task.seenOnNetwork = true
+  if task.state == DeliveryState.SuccessfullyPropagated:
+    task.confirmMix()
 
 proc startSendService*(self: SendService) =
   ## Starts each task. Call it after `stopSendService` ends. A call while the

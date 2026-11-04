@@ -132,6 +132,9 @@ method process(self: ScriptedProc, task: DeliveryTask): Future[void] {.async.} =
     return
   task.state = DeliveryState.SuccessfullyPropagated
   task.propagatedAnonymously = self.overMix
+  if self.overMix:
+    # The exit answered, so the mix send is confirmed.
+    task.confirmMix()
   if task.firstPropagatedTime.isNone():
     task.firstPropagatedTime = Opt.some(Moment.now())
 

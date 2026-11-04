@@ -13,6 +13,14 @@ EventBroker:
     messageHash*: string
 
 EventBroker:
+  # Event emitted when a send over mix got no confirmation within its window.
+  # The message left this node and the network has it with a high probability.
+  # Only with the `reliability` option on, and never for an ephemeral message.
+  type MessageUnconfirmedEvent* = object
+    requestId*: RequestId
+    messageHash*: string
+
+EventBroker:
   # Event emitted when a message send operation fails
   type MessageErrorEvent* = object
     requestId*: RequestId

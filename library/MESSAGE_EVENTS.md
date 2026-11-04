@@ -2,12 +2,12 @@
 
 ## Overview
 
-The liblogosdelivery library emits four types of message delivery events and one message receipt event that clients can listen to by registering a per-event callback with `logosdelivery_add_event_listener()`. The events are delivered under the wire names `onMessageQueued`, `onMessageSent`, `onMessagePropagated`, `onMessageError` and `onMessageReceived` (the JSON `eventType` inside each payload is `message_queued` / `message_sent` / `message_propagated` / `message_error` / `message_received`).
+The liblogosdelivery library emits five types of message delivery events and one message receipt event that clients can listen to by registering a per-event callback with `logosdelivery_add_event_listener()`. The events are delivered under the wire names `onMessageQueued`, `onMessageSent`, `onMessageUnconfirmed`, `onMessagePropagated`, `onMessageError` and `onMessageReceived` (the JSON `eventType` inside each payload is `message_queued` / `message_sent` / `message_unconfirmed` / `message_propagated` / `message_error` / `message_received`).
 
 ## Event Types
 
 ### 1. message_sent
-Emitted when the node confirms the delivery of a message that is not ephemeral, with the `reliability` option on. For a normal send, a store node confirms the delivery. For a send over mix, the reply of the mix exit confirms it. For an ephemeral message, or with the `reliability` option off, `message_sent` does not come, and a successful send ends at `message_propagated`.
+Emitted when the node confirms the delivery of a message that is not ephemeral, with the `reliability` option on. For a normal send, a store node confirms the delivery. For a send over mix, the answer of the mix exit confirms it, or a copy of the message that this node receives from the network. For an ephemeral message, or with the `reliability` option off, `message_sent` does not come, and a successful send ends at `message_propagated`.
 
 **JSON Structure:**
 ```json
@@ -23,7 +23,24 @@ Emitted when the node confirms the delivery of a message that is not ephemeral, 
 - `requestId`: Request ID returned from the send operation
 - `messageHash`: Hash of the message that was sent
 
-### 2. message_propagated
+### 2. message_unconfirmed
+Emitted when a send over mix got no confirmation within its window, with the `reliability` option on and for a message that is not ephemeral. The request left this node and the mix exit publishes before it answers, so the network has the message with a high probability. The answer of the exit did not come back, as for a sender behind NAT, and no copy of the message reached this node. The node sent the message again a few times while it waited. This event ends the send. It is not an error, and the node does not send the message again in the clear.
+
+**JSON Structure:**
+```json
+{
+  "eventType": "message_unconfirmed",
+  "requestId": "unique-request-id",
+  "messageHash": "0x..."
+}
+```
+
+**Fields:**
+- `eventType`: Always "message_unconfirmed"
+- `requestId`: Request ID from the send operation
+- `messageHash`: Hash of the message that was sent
+
+### 3. message_propagated
 Emitted when a message has been successfully propagated to neighboring nodes on the network.
 
 **JSON Structure:**
@@ -40,7 +57,7 @@ Emitted when a message has been successfully propagated to neighboring nodes on 
 - `requestId`: Request ID from the send operation
 - `messageHash`: Hash of the message that was propagated
 
-### 3. message_error
+### 4. message_error
 Emitted when a send fails: rejected, retry window elapsed, parked too long, ephemeral dropped near the rate limit, or store validation timed out.
 
 **JSON Structure:**
@@ -59,7 +76,7 @@ Emitted when a send fails: rejected, retry window elapsed, parked too long, ephe
 - `messageHash`: Hash of the message that failed
 - `error`: Description of what went wrong
 
-### 4. message_queued
+### 5. message_queued
 Emitted when a send is held back because the current epoch's rate-limit budget is spent. The message is not rejected: it stays queued and goes out once the budget refills. Emitted at most once per send, on the first time the message is held back.
 
 **JSON Structure:**
@@ -76,7 +93,7 @@ Emitted when a send is held back because the current epoch's rate-limit budget i
 - `requestId`: Request ID from the send operation
 - `messageHash`: Hash of the message that was held back
 
-### 5. message_received
+### 6. message_received
 Emitted once for every message accepted on a subscribed content topic, whether it arrived live from the network or was recovered from a Store peer (at startup, or after a connectivity gap). The `source` field tells the two apart.
 
 **JSON Structure:**
@@ -165,7 +182,13 @@ For a typical successful message send:
 
 1. **send** → Returns request ID
 2. **message_propagated** → Message delivered to peers
-3. **message_sent** → A store node or the mix exit confirms the message (only with the `reliability` option on)
+3. **message_sent** → A store node confirms the message, or the mix exit answers, or a copy of the message reaches this node (only with the `reliability` option on)
+
+For a send over mix whose exit does not answer (only with the `reliability` option on):
+
+1. **send** → Returns request ID
+2. **message_propagated** → The request left this node
+3. **message_unconfirmed** → No confirmation came within the window
 
 For a failed message send:
 
