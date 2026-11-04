@@ -1,6 +1,6 @@
 {.push raises: [].}
 
-import std/strutils
+import std/[sets, strutils]
 import chronicles, chronos, results, metrics
 
 import
@@ -158,6 +158,7 @@ proc processBootNodes(
         peerId, @[multiAddr], publicKey = peerPubKey, mixPubKey = Opt.some(node.pubKey)
       )
     )
+    peermgr.configuredPeers.incl(peerId)
   # `count` is the accepted entries; the addresses of one peer make one member.
   let routable = mix.poolSize()
   info "Using mix bootstrap nodes", entries = count, poolSize = routable
