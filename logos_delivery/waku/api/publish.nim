@@ -31,6 +31,7 @@ import
 # WakuLightPushResult, PushMessageHandler, LightPushErrorCode (common) plus the
 # LightPushStatusCode `$`/`==` the send processors branch on (rpc).
 export common, rpc
+export MixPublishOutcome, MixPublishResult, MixRequestLeftHandler, mixPublishFailed
 
 proc hasRelay*(self: Waku): bool =
   ## True if relay (gossipsub publishing) is mounted.
@@ -154,6 +155,27 @@ proc mixLightpushSize*(
   ## The bytes of a lightpush request over mix for `message`, and the limit of
   ## one mix message.
   return lightpush.mixLightpushSize(shard, message)
+
+proc publishOverMixToAny*(
+    self: Waku,
+    shard: PubsubTopic,
+    message: WakuMessage,
+    onRequestLeft: MixRequestLeftHandler = nil,
+): Future[MixPublishResult] {.async.} =
+  ## Selects a mix exit for `shard` and publishes `message` through it. The
+  ## result tells whether the exit confirmed the message, whether the request
+  ## left this node with no answer, or what failed.
+  let peer = self.selectMixLightpushPeer(shard).valueOr:
+    return mixPublishFailed(
+      LightPushErrorCode.SERVICE_NOT_AVAILABLE,
+      "no mix-capable lightpush peer available for shard",
+    )
+  try:
+    return await self.node.lightpushPublishOverMix(shard, message, peer, onRequestLeft)
+  except CancelledError as exc:
+    raise exc
+  except CatchableError as e:
+    return mixPublishFailed(LightPushErrorCode.INTERNAL_SERVER_ERROR, e.msg)
 
 proc lightpushPublishToAny*(
     self: Waku, shard: PubsubTopic, message: WakuMessage, mixify: bool = false

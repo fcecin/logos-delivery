@@ -31,17 +31,15 @@ import
   ../peer_manager,
   ../../common/rate_limit/setting,
   ../../rln,
-  ../../rln/rln_plugin
+  ../../rln/rln_plugin,
+  ../../utils/requests,
+  ../../waku_mix
 from ../../rln/types import RlnErrorKind
 
 logScope:
   topics = "waku node lightpush api"
 
 const MountWithoutRelayError* = "cannot mount lightpush because relay is not mounted"
-
-const MixReplyTimeout* = chronos.seconds(5)
-  ## Time limit for one mix-routed lightpush, so a broken path costs one
-  ## attempt.
 
 const MixLightpushSurbs* = 1'u8
   ## The number of SURBs in a lightpush request over mix. One SURB, so the reply
@@ -66,30 +64,153 @@ proc mixLightpushSize*(
     0
   return (size, limit)
 
+type
+  MixPublishOutcome* {.pure.} = enum
+    ## What a lightpush over mix knows about its message when it returns.
+    Confirmed ## The exit answered, and the network has the message.
+    Unconfirmed ## The request left this node, and no answer came in time.
+    Failed ## The request did not leave this node, or the exit refused it.
+
+  MixPublishResult* = object
+    outcome*: MixPublishOutcome
+    response*: lightpush_protocol.WakuLightPushResult
+      ## The answer of the exit, or the fault, as the lightpush client reports it.
+
+  MixRequestLeftHandler* = proc() {.gcsafe, raises: [].}
+    ## Runs when the request has left this node, before the wait for the answer.
+    ## A caller that a cancel ends during that wait then knows that the message
+    ## is on its way.
+
+func mixPublishFailed*(code: LightpushStatusCode, desc: string): MixPublishResult =
+  MixPublishResult(
+    outcome: MixPublishOutcome.Failed, response: lighpushErrorResult(code, desc)
+  )
+
+func mixPublishUnconfirmed(desc: string): MixPublishResult =
+  MixPublishResult(
+    outcome: MixPublishOutcome.Unconfirmed,
+    response: lighpushErrorResult(LightPushErrorCode.SERVICE_NOT_AVAILABLE, desc),
+  )
+
+func confirms(response: lightpush_protocol.WakuLightPushResult): bool =
+  ## True when the answer of the exit says that the network has the message. A
+  ## relay that already has the message refuses it with `AlreadySeenMessageDesc`.
+  response.isOk() or (
+    response.error.code == LightPushErrorCode.INVALID_MESSAGE and
+    response.error.desc == Opt.some(AlreadySeenMessageDesc)
+  )
+
 proc publishOverMix*(
     node: WakuNode,
     conn: Connection,
     pubsubTopic: PubsubTopic,
     message: WakuMessage,
     replyTimeout: Duration = MixReplyTimeout,
-): Future[lightpush_protocol.WakuLightPushResult] {.async.} =
-  ## Publishes on a mix connection and returns within `replyTimeout`. The mix
-  ## connection limits its wait for the reply, but not the first-hop dial.
-  let publishFut =
-    node.wakuLightpushClient.publish(Opt.some(pubsubTopic), message, conn)
-  let deadline = sleepAsync(replyTimeout)
-  discard await race(FutureBase(publishFut), FutureBase(deadline))
-
-  if not publishFut.finished():
-    await conn.reset()
-    publishFut.cancelSoon()
-    debug "Mix lightpush timed out", pubsubTopic = pubsubTopic, timeout = replyTimeout
-    return lighpushErrorResult(
-      LightPushErrorCode.SERVICE_NOT_AVAILABLE, "Waku lightpush over mix timed out"
+    onRequestLeft: MixRequestLeftHandler = nil,
+): Future[MixPublishResult] {.async.} =
+  ## Publishes on a mix connection. The write carries the request to the first
+  ## hop, and the read waits for the answer of the exit. Each gets `replyTimeout`.
+  ## `onRequestLeft` runs between the two.
+  ## The mix connection bounds neither the first-hop dial nor the write on its
+  ## own, and it waits longer for the answer than one attempt should.
+  try:
+    let request = LightpushRequest(
+      requestId: generateRequestId(node.rng),
+      pubSubTopic: Opt.some(pubsubTopic),
+      message: ensureTimestampSet(message),
     )
+    let writing = conn.writeLp(request.encode())
+    if not await writing.withTimeout(replyTimeout):
+      writing.cancelSoon()
+      await conn.reset()
+      debug "Mix lightpush request did not leave this node in time",
+        pubsubTopic = pubsubTopic, timeout = replyTimeout
+      return mixPublishFailed(
+        LightPushErrorCode.SERVICE_NOT_AVAILABLE,
+        "Waku lightpush over mix timed out before the request left this node",
+      )
+    if writing.failed():
+      await conn.reset()
+      debug "Mix lightpush request could not be sent",
+        pubsubTopic = pubsubTopic, error = writing.error.msg
+      return mixPublishFailed(
+        LightPushErrorCode.SERVICE_NOT_AVAILABLE,
+        "Waku lightpush over mix could not send the request: " & writing.error.msg,
+      )
 
-  await deadline.cancelAndWait()
-  return await publishFut
+    # From here on the request is on its way, so a lost answer leaves the message
+    # on the network with no confirmation.
+    if not onRequestLeft.isNil():
+      onRequestLeft()
+    let reading = conn.readLp(lightpush_protocol.DefaultMaxPushResponseSize)
+    if not await reading.withTimeout(replyTimeout):
+      reading.cancelSoon()
+      await conn.reset()
+      debug "Mix lightpush got no answer in time",
+        pubsubTopic = pubsubTopic, timeout = replyTimeout
+      return mixPublishUnconfirmed("Waku lightpush over mix timed out")
+    await conn.closeWithEOF()
+    if reading.failed():
+      debug "Mix lightpush could not read the answer",
+        pubsubTopic = pubsubTopic, error = reading.error.msg
+      return mixPublishUnconfirmed(
+        "Waku lightpush over mix could not read the answer: " & reading.error.msg
+      )
+    let response = LightPushResponse.decode(reading.read()).valueOr:
+      debug "Mix lightpush could not decode the answer", pubsubTopic = pubsubTopic
+      return
+        mixPublishUnconfirmed("Waku lightpush over mix got an answer it cannot decode")
+    if response.requestId != request.requestId and
+        response.statusCode notin
+        [LightPushErrorCode.TOO_MANY_REQUESTS, LightPushErrorCode.PAYLOAD_TOO_LARGE] and
+        not (
+          response.statusCode == LightPushErrorCode.BAD_REQUEST and
+          response.requestId == UnknownRequestId
+        ):
+      debug "Mix lightpush got an answer for another request",
+        requestId = request.requestId, responseRequestId = response.requestId
+      return mixPublishUnconfirmed(
+        "Waku lightpush over mix got an answer for another request"
+      )
+    let answer = toPushResult(response)
+    return MixPublishResult(
+      outcome:
+        if answer.confirms(): MixPublishOutcome.Confirmed else: MixPublishOutcome.Failed,
+      response: answer,
+    )
+  except CancelledError as exc:
+    # A cancel from the send service ends the attempt. Nothing reads the
+    # answer, so the connection goes too.
+    await conn.reset()
+    raise exc
+
+proc mixPublish*(
+    node: WakuNode,
+    peer: RemotePeerInfo | PeerInfo,
+    pubsubTopic: PubsubTopic,
+    message: WakuMessage,
+    replyTimeout: Duration,
+    onRequestLeft: MixRequestLeftHandler = nil,
+): Future[MixPublishResult] {.async.} =
+  ## Opens a mix connection to `peer` as the exit and publishes on it.
+  when defined(libp2p_mix_experimental_exit_is_dest):
+    #TODO: How to handle multiple addresses?
+    let conn = node.wakuMix.toConnection(
+      MixDestination.exitNode(peer.peerId),
+      WakuLightPushCodec,
+      MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(MixLightpushSurbs)),
+        # indicating we only want a single path to be used for reply hence numSurbs = 1
+    ).valueOr:
+      debug "Could not create mix connection"
+      return mixPublishFailed(
+        LightPushErrorCode.SERVICE_NOT_AVAILABLE,
+        "Waku lightpush with mix not available",
+      )
+    return
+      await node.publishOverMix(conn, pubsubTopic, message, replyTimeout, onRequestLeft)
+  else:
+    # Fail the build here, not every mixed send at runtime
+    {.error: "mix sends need -d:libp2p_mix_experimental_exit_is_dest".}
 
 ## Waku lightpush
 proc mountLegacyLightPush*(
@@ -286,26 +407,9 @@ proc lightpushPublishHandler(
       msg_hash = msgHash,
       mixify = mixify
     if mixify:
-      when defined(libp2p_mix_experimental_exit_is_dest):
-        #TODO: How to handle multiple addresses?
-        let conn = node.wakuMix.toConnection(
-          MixDestination.exitNode(peer.peerId),
-          WakuLightPushCodec,
-          MixParameters(
-            expectReply: Opt.some(true), numSurbs: Opt.some(MixLightpushSurbs)
-          ),
-            # indicating we only want a single path to be used for reply hence numSurbs = 1
-        ).valueOr:
-          debug "Could not create mix connection"
-          return lighpushErrorResult(
-            LightPushErrorCode.SERVICE_NOT_AVAILABLE,
-            "Waku lightpush with mix not available",
-          )
-
-        return await node.publishOverMix(conn, pubsubTopic, message)
-      else:
-        # Fail the build here, not every mixed send at runtime
-        {.error: "mix sends need -d:libp2p_mix_experimental_exit_is_dest".}
+      let published =
+        await node.mixPublish(peer, pubsubTopic, message, node.wakuMix.replyTimeout)
+      return published.response
     else:
       return
         await node.wakuLightpushClient.publish(Opt.some(pubsubTopic), message, peer)
@@ -325,6 +429,80 @@ proc lightpushPublishHandler(
     return await node.wakuLightPush.handleSelfLightPushRequest(
       Opt.some(pubsubTopic), message
     )
+
+proc prepareLightpushMessage(
+    node: WakuNode, pubsubTopic: PubsubTopic, message: WakuMessage, mixify: bool
+): Future[Result[WakuMessage, ErrorStatus]] {.async.} =
+  ## Stamps the message, checks its size for mix, and attaches the RLN proof.
+  # toRLNSignal hashes the timestamp into the proof, so fix it before proof gen;
+  # the downstream ensureTimestampSet then becomes a no-op.
+  let message = ensureTimestampSet(message)
+
+  if mixify:
+    # A backend that cannot declare its proof size is a node defect.
+    let sizedMessage = node.rlnPlugin.messageForSizeCheck(message).valueOr:
+      return err(
+        (
+          LightPushErrorCode.INTERNAL_SERVER_ERROR,
+          Opt.some("failed to determine RLN proof size: " & $error),
+        )
+      )
+    let (size, limit) = mixLightpushSize(pubsubTopic, sizedMessage)
+    if size > limit:
+      return err(
+        (
+          LightPushErrorCode.INVALID_MESSAGE,
+          Opt.some(
+            "message too large for mix: the request has " & $size &
+              " bytes, the limit is " & $limit & " bytes"
+          ),
+        )
+      )
+
+  # A Permanent failure comes from the message itself, such as a timestamp
+  # outside the validators' bound, so it is the client's INVALID_MESSAGE, as
+  # the relay validator answered before proof generation checked it. Any
+  # other failure is the node's: it has no proof to offer right now.
+  let msgWithProof = (await attachProof(node.rlnPlugin, message)).valueOr:
+    let code =
+      if error.kind == RlnErrorKind.Permanent:
+        LightPushErrorCode.INVALID_MESSAGE
+      else:
+        LightPushErrorCode.OUT_OF_RLN_PROOF
+    return err((code, Opt.some("failed to attach RLN proof: " & $error)))
+  return ok(msgWithProof)
+
+proc refreshRlnProofOnRejection(
+    node: WakuNode, firstResult: lightpush_protocol.WakuLightPushResult
+): lightpush_protocol.WakuLightPushResult =
+  ## Schedules an RLN proof refresh when the service refused the proof, and
+  ## reports the refusal as `OUT_OF_RLN_PROOF`.
+  # Gate the refresh on unambiguously RLN-related failures: 504
+  # (OUT_OF_RLN_PROOF) is always RLN; 420 (INVALID_MESSAGE) also covers non-RLN
+  # rejections (e.g. oversized), so additionally require RlnValidatorErrorMsg.
+  if firstResult.isOk():
+    return firstResult
+  let isRlnRelatedFailure =
+    firstResult.error.code == LightPushErrorCode.OUT_OF_RLN_PROOF or (
+      firstResult.error.code == LightPushErrorCode.INVALID_MESSAGE and
+      firstResult.error.desc.get("").contains(RlnValidatorErrorMsg)
+    )
+  if not isRlnRelatedFailure:
+    return firstResult
+
+  # Ask the backend to refresh what proofs are built against and return
+  # immediately, normalized to 504 with RlnProofRefreshScheduledMsg so callers
+  # can tell "stale proof, retry" from a permanent rejection. A backend without
+  # a refresh hook gets the result back unchanged.
+  if not node.rlnPlugin.notifyProofRejected():
+    return firstResult
+  debug "lightpush send rejected as RLN-invalid; RLN proof refresh scheduled",
+    statusCode = $firstResult.error.code
+  return lighpushErrorResult(
+    LightPushErrorCode.OUT_OF_RLN_PROOF,
+    RlnProofRefreshScheduledMsg & ": " &
+      firstResult.error.desc.get($firstResult.error.code),
+  )
 
 proc lightpushPublish*(
     node: WakuNode,
@@ -372,63 +550,37 @@ proc lightpushPublish*(
       debug "Lightpush publish error", error = msg
       return lighpushErrorResult(LightPushErrorCode.INTERNAL_SERVER_ERROR, msg)
 
-  # toRLNSignal hashes the timestamp into the proof, so fix it before proof gen;
-  # the downstream ensureTimestampSet then becomes a no-op.
-  let message = ensureTimestampSet(message)
-
-  if mixify:
-    # A backend that cannot declare its proof size is a node defect.
-    let sizedMessage = node.rlnPlugin.messageForSizeCheck(message).valueOr:
-      return lighpushErrorResult(
-        LightPushErrorCode.INTERNAL_SERVER_ERROR,
-        "failed to determine RLN proof size: " & $error,
-      )
-    let (size, limit) = mixLightpushSize(pubsubForPublish, sizedMessage)
-    if size > limit:
-      return lighpushErrorResult(
-        LightPushErrorCode.INVALID_MESSAGE,
-        "message too large for mix: the request has " & $size & " bytes, the limit is " &
-          $limit & " bytes",
-      )
-
-  # A Permanent failure comes from the message itself, such as a timestamp
-  # outside the validators' bound, so it is the client's INVALID_MESSAGE, as
-  # the relay validator answered before proof generation checked it. Any
-  # other failure is the node's: it has no proof to offer right now.
-  let msgWithProof = (await attachProof(node.rlnPlugin, message)).valueOr:
-    let code =
-      if error.kind == RlnErrorKind.Permanent:
-        LightPushErrorCode.INVALID_MESSAGE
-      else:
-        LightPushErrorCode.OUT_OF_RLN_PROOF
-    return lighpushErrorResult(code, "failed to attach RLN proof: " & $error)
+  let msgWithProof = (
+    await node.prepareLightpushMessage(pubsubForPublish, message, mixify)
+  ).valueOr:
+    return err(error)
 
   let firstResult =
     await lightpushPublishHandler(node, pubsubForPublish, msgWithProof, toPeer, mixify)
+  return node.refreshRlnProofOnRejection(firstResult)
 
-  # Gate the refresh on unambiguously RLN-related failures: 504
-  # (OUT_OF_RLN_PROOF) is always RLN; 420 (INVALID_MESSAGE) also covers non-RLN
-  # rejections (e.g. oversized), so additionally require RlnValidatorErrorMsg.
-  if firstResult.isOk():
-    return firstResult
-  let isRlnRelatedFailure =
-    firstResult.error.code == LightPushErrorCode.OUT_OF_RLN_PROOF or (
-      firstResult.error.code == LightPushErrorCode.INVALID_MESSAGE and
-      firstResult.error.desc.get("").contains(RlnValidatorErrorMsg)
+proc lightpushPublishOverMix*(
+    node: WakuNode,
+    pubsubTopic: PubsubTopic,
+    message: WakuMessage,
+    peer: RemotePeerInfo,
+    onRequestLeft: MixRequestLeftHandler = nil,
+): Future[MixPublishResult] {.async.} =
+  ## Publishes `message` through `peer` as the mix exit, and tells whether the
+  ## exit confirmed it, whether the request left with no answer, or what failed.
+  if node.wakuLightpushClient.isNil() or node.wakuMix.isNil():
+    debug "Failed to publish message using mix as mix or lightpush is not mounted"
+    return mixPublishFailed(
+      LightPushErrorCode.SERVICE_NOT_AVAILABLE, "Waku lightpush with mix not available"
     )
-  if not isRlnRelatedFailure:
-    return firstResult
-
-  # Ask the backend to refresh what proofs are built against and return
-  # immediately, normalized to 504 with RlnProofRefreshScheduledMsg so callers
-  # can tell "stale proof, retry" from a permanent rejection. A backend without
-  # a refresh hook gets the result back unchanged.
-  if not node.rlnPlugin.notifyProofRejected():
-    return firstResult
-  debug "lightpush send rejected as RLN-invalid; RLN proof refresh scheduled",
-    statusCode = $firstResult.error.code
-  return lighpushErrorResult(
-    LightPushErrorCode.OUT_OF_RLN_PROOF,
-    RlnProofRefreshScheduledMsg & ": " &
-      firstResult.error.desc.get($firstResult.error.code),
+  let msgWithProof = (await node.prepareLightpushMessage(pubsubTopic, message, true)).valueOr:
+    return MixPublishResult(
+      outcome: MixPublishOutcome.Failed,
+      response: lightpush_protocol.WakuLightPushResult.err(error),
+    )
+  var published = await node.mixPublish(
+    peer, pubsubTopic, msgWithProof, node.wakuMix.replyTimeout, onRequestLeft
   )
+  if published.outcome == MixPublishOutcome.Failed:
+    published.response = node.refreshRlnProofOnRejection(published.response)
+  return published

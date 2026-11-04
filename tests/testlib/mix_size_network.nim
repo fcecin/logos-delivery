@@ -20,9 +20,12 @@ type
     ## Makes the first lightpush request at the exit wait until the test lets it
     ## reply, and keeps the result of its publish.
     enabled: bool ## True until the first request.
+    requests*: int ## The lightpush requests that reached the exit.
     requested*: AsyncEvent
     reply*: AsyncEvent
     publishResult*: Opt[WakuLightPushResult]
+    laterResults*: seq[WakuLightPushResult]
+      ## The answers of the exit to the requests after the first.
     arrivals*: seq[WakuMessageHash]
       ## The hashes of the messages that the exit received over relay.
 
@@ -35,8 +38,11 @@ proc mountHookedLightpush(node: WakuNode, hook: ExitHook) =
   let handler: PushMessageHandler = proc(
       pubsubTopic: PubsubTopic, message: WakuMessage
   ): Future[WakuLightPushResult] {.async.} =
+    inc hook.requests
     if not hook.enabled:
-      return await relayHandler(pubsubTopic, message)
+      let answer = await relayHandler(pubsubTopic, message)
+      hook.laterResults.add(answer)
+      return answer
     hook.enabled = false
     hook.requested.fire()
     await hook.reply.wait()
@@ -65,18 +71,19 @@ proc meshFormed(net: MixSizeNetwork): bool =
   return true
 
 proc startMixNodes*(hook: ExitHook = nil): Future[MixSizeNetwork] {.async.} =
-  ## Starts four connected mix nodes on ephemeral loopback ports. `hook` makes
-  ## the first lightpush request at the exit wait for the test.
+  ## Starts four connected mix nodes on ephemeral loopback ports. With `hook`,
+  ## only the exit serves lightpush, and its first request waits for the test.
   var net: MixSizeNetwork
   for i in 0 ..< 4:
     let node = newTestWakuNode(
       generateSecp256k1Key(), parseIpAddress("127.0.0.1"), Port(0), quicEnabled = false
     )
     (await node.mountRelay()).expect("mount relay")
-    if i == 0 and not hook.isNil():
-      node.mountHookedLightpush(hook)
-    else:
+    if hook.isNil():
       (await node.mountLightpush()).expect("mount lightpush")
+    elif i == 0:
+      # Only the exit serves lightpush, so each request of the sender reaches it.
+      node.mountHookedLightpush(hook)
     node.mountMetadata(uint32(DefaultClusterId), @[0'u16]).expect("mount metadata")
     let keys = generateKeyPair().expect("mix keys")
     (await node.mountMix(DefaultClusterId, keys.privateKey, @[])).expect("mount mix")

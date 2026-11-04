@@ -16,6 +16,7 @@ import
 type MessagingRestEvents* = ref object
   cache*: MessagingEventCache
   sent: Opt[MessageSentEventListener]
+  unconfirmed: Opt[MessageUnconfirmedEventListener]
   queued: Opt[MessageQueuedEventListener]
   propagated: Opt[MessagePropagatedEventListener]
   errored: Opt[MessageErrorEventListener]
@@ -31,6 +32,9 @@ proc stop*(self: MessagingRestEvents, ctx: BrokerContext) {.async: (raises: []).
   if self.sent.isSome():
     await MessageSentEvent.dropListener(ctx, self.sent.get())
     self.sent = Opt.none(MessageSentEventListener)
+  if self.unconfirmed.isSome():
+    await MessageUnconfirmedEvent.dropListener(ctx, self.unconfirmed.get())
+    self.unconfirmed = Opt.none(MessageUnconfirmedEventListener)
   if self.queued.isSome():
     await MessageQueuedEvent.dropListener(ctx, self.queued.get())
     self.queued = Opt.none(MessageQueuedEventListener)
@@ -60,6 +64,12 @@ proc start*(self: MessagingRestEvents, ctx: BrokerContext): Result[void, string]
     let registered = listener.valueOr:
       return err(listenFailed("MessageSentEvent", error))
     self.sent = Opt.some(registered)
+  if self.unconfirmed.isNone():
+    let listener = MessageUnconfirmedEvent.listenIt(ctx):
+      cache.recordSend($it.requestId, it.messageHash, SendEventKind.Unconfirmed)
+    let registered = listener.valueOr:
+      return err(listenFailed("MessageUnconfirmedEvent", error))
+    self.unconfirmed = Opt.some(registered)
   if self.queued.isNone():
     let listener = MessageQueuedEvent.listenIt(ctx):
       cache.recordSend($it.requestId, it.messageHash, SendEventKind.Queued)

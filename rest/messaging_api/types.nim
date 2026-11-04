@@ -167,6 +167,7 @@ type
   SendEventKind* {.pure.} = enum
     Queued = "queued"
     Sent = "sent"
+    Unconfirmed = "unconfirmed"
     Propagated = "propagated"
     Error = "error"
 
@@ -228,6 +229,8 @@ proc readValue*(
     value = SendEventKind.Queued
   of "sent":
     value = SendEventKind.Sent
+  of "unconfirmed":
+    value = SendEventKind.Unconfirmed
   of "propagated":
     value = SendEventKind.Propagated
   of "error":
