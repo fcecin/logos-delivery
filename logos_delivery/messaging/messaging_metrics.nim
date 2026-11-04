@@ -13,6 +13,8 @@ import logos_delivery/api/types
 
 declarePublicCounter logos_delivery_send_store_validation_timeouts,
   "messages propagated but failed without store-node validation within the retry window"
+declarePublicCounter logos_delivery_send_mix_fallbacks,
+  "Preferred sends handed to the plain path because mix could not carry them"
 declarePublicCounter logos_delivery_recv_messages,
   "messages delivered to the application, live from the network or history from Store",
   ["source"]
@@ -27,6 +29,9 @@ for source in MessageSource:
 
 proc recordStoreValidationTimeout*() =
   logos_delivery_send_store_validation_timeouts.inc()
+
+proc recordMixFallback*() =
+  logos_delivery_send_mix_fallbacks.inc()
 
 proc recordReceived*(source: MessageSource, payloadBytes: int) =
   logos_delivery_recv_messages.inc(labelValues = [$source])

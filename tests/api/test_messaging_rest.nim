@@ -136,11 +136,15 @@ suite "Messaging REST API":
     let reqC = RequestId("req-C")
 
     # reqA sees the full lifecycle; reqB only an error.
+    # reqA went out over mix and a store node confirmed a later plain copy, so
+    # the two records differ in `anonymous`.
     MessagePropagatedEvent.emit(
-      brokerCtx, MessagePropagatedEvent(requestId: reqA, messageHash: "0xaa")
+      brokerCtx,
+      MessagePropagatedEvent(requestId: reqA, messageHash: "0xaa", anonymous: true),
     )
     MessageSentEvent.emit(
-      brokerCtx, MessageSentEvent(requestId: reqA, messageHash: "0xaa")
+      brokerCtx,
+      MessageSentEvent(requestId: reqA, messageHash: "0xaa", anonymous: false),
     )
     MessageErrorEvent.emit(
       brokerCtx, MessageErrorEvent(requestId: reqB, messageHash: "0xbb", error: "boom")
@@ -157,8 +161,8 @@ suite "Messaging REST API":
       byIdResp.status == 200
       byIdResp.data.requestId == $reqA
       byIdResp.data.events.len == 2
-      byIdResp.data.events.anyIt(it.kind == SendEventKind.Sent)
-      byIdResp.data.events.anyIt(it.kind == SendEventKind.Propagated)
+      byIdResp.data.events.anyIt(it.kind == SendEventKind.Propagated and it.anonymous)
+      byIdResp.data.events.anyIt(it.kind == SendEventKind.Sent and not it.anonymous)
 
     # Unknown / already-polled id → 404 (raw string client so the text error
     # body decodes; the typed client would raise on a non-2xx body).

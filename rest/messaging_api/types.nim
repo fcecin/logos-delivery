@@ -174,6 +174,8 @@ type
   SendEventRecord* = object
     kind*: SendEventKind
     messageHash*: string
+    anonymous*: bool
+      ## True when the message went out over mix, for `Propagated` and `Sent`.
     error*: string ## populated only for `Error`
     timestamp*: int64 ## nanoseconds, stamped when cached
 
@@ -197,6 +199,8 @@ proc writeValue*(
   writer.beginRecord()
   writer.writeField("kind", $value.kind)
   writer.writeField("messageHash", value.messageHash)
+  if value.kind in [SendEventKind.Propagated, SendEventKind.Sent]:
+    writer.writeField("anonymous", value.anonymous)
   if value.error.len > 0:
     writer.writeField("error", value.error)
   writer.writeField("timestamp", value.timestamp)
@@ -256,6 +260,7 @@ proc readValue*(
   var
     kind = Opt.none(SendEventKind)
     messageHash = ""
+    anonymous = false
     error = ""
     timestamp = int64(0)
 
@@ -265,6 +270,8 @@ proc readValue*(
       kind = Opt.some(reader.readValue(SendEventKind))
     of "messageHash":
       messageHash = reader.readValue(string)
+    of "anonymous":
+      anonymous = reader.readValue(bool)
     of "error":
       error = reader.readValue(string)
     of "timestamp":
@@ -276,7 +283,11 @@ proc readValue*(
     reader.raiseUnexpectedValue("Field `kind` is missing")
 
   value = SendEventRecord(
-    kind: kind.get(), messageHash: messageHash, error: error, timestamp: timestamp
+    kind: kind.get(),
+    messageHash: messageHash,
+    anonymous: anonymous,
+    error: error,
+    timestamp: timestamp,
   )
 
 proc readValue*(

@@ -96,6 +96,19 @@ method sendImpl(
   await self.release.wait()
   task.state = DeliveryState.FallbackRetry
 
+type HandoverProcessor = ref object of BaseSendProcessor
+  ## A mix attempt that hands the task to the plain path at once.
+
+method isPlain(self: HandoverProcessor): bool {.gcsafe.} =
+  return false
+
+method isValidProcessor(self: HandoverProcessor, task: DeliveryTask): bool {.gcsafe.} =
+  return true
+
+method sendImpl(self: HandoverProcessor, task: DeliveryTask): Future[void] {.async.} =
+  task.anonymized = true
+  task.state = DeliveryState.FallbackRetry
+
 type PlainCounter = ref object of BaseSendProcessor
   ## A plain processor that counts the resends it gets.
   resends: int
@@ -145,6 +158,7 @@ type Events = ref object
   ## The events of the send, one future for each kind, so a test can wait for
   ## the one it expects and check that the others did not come.
   propagated, sent, unconfirmed, error: Future[void]
+  anonymous: seq[bool] ## The `anonymous` field of each `propagated` and `sent` event.
   listeners: seq[proc(): Future[void] {.async: (raises: []).}]
 
 proc listen(waku: Waku): Events =
@@ -159,6 +173,7 @@ proc listen(waku: Waku): Events =
     .listen(
       ctx,
       proc(event: MessagePropagatedEvent) {.async: (raises: []).} =
+        events.anonymous.add(event.anonymous)
         events.propagated.complete(),
     )
     .expect("listen")
@@ -166,6 +181,7 @@ proc listen(waku: Waku): Events =
     .listen(
       ctx,
       proc(event: MessageSentEvent) {.async: (raises: []).} =
+        events.anonymous.add(event.anonymous)
         events.sent.complete(),
     )
     .expect("listen")
@@ -261,8 +277,44 @@ suite "SendService - a mix send with no answer of the exit":
     check:
       task.mixConfirmed
       mix.calls == 1
+      events.anonymous == @[true, true]
       not events.unconfirmed.finished()
       not events.error.finished()
+
+  asyncTest "the events of a Preferred send that went to the plain path say so":
+    ## The mix attempt marked the task, and the plain path propagated it. The
+    ## events report the path that carried the message, not the attempt.
+    let mix = HandoverProcessor()
+    let plain = PlainCounter()
+    mix.chain(plain)
+    let service = newService(mix)
+    defer:
+      await service.stopSendService()
+    let events = waku.listen()
+    defer:
+      await events.drop()
+    let task = buildTask("plain-after-mix")
+    check service.enqueue(task).isOk()
+
+    check await events.propagated.withTimeout(FUTURE_TIMEOUT)
+    check:
+      task.anonymized
+      not task.propagatedAnonymously
+      events.anonymous == @[false]
+
+  asyncTest "the events of a plain send say that the message went out in the clear":
+    let plain = PlainCounter()
+    let service = newService(plain)
+    defer:
+      await service.stopSendService()
+    let events = waku.listen()
+    defer:
+      await events.drop()
+    let task = buildTask("plain")
+    check service.enqueue(task).isOk()
+
+    check await events.propagated.withTimeout(FUTURE_TIMEOUT)
+    check events.anonymous == @[false]
 
   asyncTest "a copy of the message received during the attempt confirms the send when the attempt ends":
     ## The copy arrives while the attempt still waits for the answer of the exit.

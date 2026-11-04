@@ -14,7 +14,8 @@ Emitted when the node confirms the delivery of a message that is not ephemeral, 
 {
   "eventType": "message_sent",
   "requestId": "unique-request-id",
-  "messageHash": "0x..."
+  "messageHash": "0x...",
+  "anonymous": false
 }
 ```
 
@@ -22,6 +23,7 @@ Emitted when the node confirms the delivery of a message that is not ephemeral, 
 - `eventType`: Always "message_sent"
 - `requestId`: Request ID returned from the send operation
 - `messageHash`: Hash of the message that was sent
+- `anonymous`: `true` when the message went out over mix. At the `Preferred` anonymity level a message that mix cannot carry goes out in the clear, and this field says so
 
 ### 2. message_unconfirmed
 Emitted when a send over mix got no confirmation within its window, with the `reliability` option on and for a message that is not ephemeral. The request left this node and the mix exit publishes before it answers, so the network has the message with a high probability. The answer of the exit did not come back, as for a sender behind NAT, and no copy of the message reached this node. The node sent the message again a few times while it waited. This event ends the send. It is not an error, and the node does not send the message again in the clear.
@@ -48,7 +50,8 @@ Emitted when a message has been successfully propagated to neighboring nodes on 
 {
   "eventType": "message_propagated",
   "requestId": "unique-request-id",
-  "messageHash": "0x..."
+  "messageHash": "0x...",
+  "anonymous": false
 }
 ```
 
@@ -56,6 +59,7 @@ Emitted when a message has been successfully propagated to neighboring nodes on 
 - `eventType`: Always "message_propagated"
 - `requestId`: Request ID from the send operation
 - `messageHash`: Hash of the message that was propagated
+- `anonymous`: `true` when the message went out over mix
 
 ### 4. message_error
 Emitted when a send fails: rejected, retry window elapsed, parked too long, ephemeral dropped near the rate limit, or store validation timed out.

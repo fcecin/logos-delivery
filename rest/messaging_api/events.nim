@@ -60,7 +60,9 @@ proc start*(self: MessagingRestEvents, ctx: BrokerContext): Result[void, string]
 
   if self.sent.isNone():
     let listener = MessageSentEvent.listenIt(ctx):
-      cache.recordSend($it.requestId, it.messageHash, SendEventKind.Sent)
+      cache.recordSend(
+        $it.requestId, it.messageHash, SendEventKind.Sent, anonymous = it.anonymous
+      )
     let registered = listener.valueOr:
       return err(listenFailed("MessageSentEvent", error))
     self.sent = Opt.some(registered)
@@ -78,7 +80,12 @@ proc start*(self: MessagingRestEvents, ctx: BrokerContext): Result[void, string]
     self.queued = Opt.some(registered)
   if self.propagated.isNone():
     let listener = MessagePropagatedEvent.listenIt(ctx):
-      cache.recordSend($it.requestId, it.messageHash, SendEventKind.Propagated)
+      cache.recordSend(
+        $it.requestId,
+        it.messageHash,
+        SendEventKind.Propagated,
+        anonymous = it.anonymous,
+      )
     let registered = listener.valueOr:
       return err(listenFailed("MessagePropagatedEvent", error))
     self.propagated = Opt.some(registered)
