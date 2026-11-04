@@ -423,7 +423,9 @@ proc reportMixSent(self: SendService, task: DeliveryTask) =
     return
   task.sentEventEmitted = true
   info "Message successfully sent over mix", requestId = task.requestId
-  MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+  MessageSentEvent.emit(
+    self.brokerCtx, task.requestId, task.msgHash.to0xHex(), task.propagatedAnonymously
+  )
 
 proc reportPropagated(self: SendService, task: DeliveryTask) =
   ## Emits `MessagePropagatedEvent`, and `MessageSentEvent` for a mixed send that
@@ -432,7 +434,9 @@ proc reportPropagated(self: SendService, task: DeliveryTask) =
   # anonymized message; `MixSendProcessor` still logs it at DEBUG.
   info "Message successfully propagated",
     requestId = task.requestId, msgHash = task.loggedHash()
-  MessagePropagatedEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+  MessagePropagatedEvent.emit(
+    self.brokerCtx, task.requestId, task.msgHash.to0xHex(), task.propagatedAnonymously
+  )
   task.propagatedEventEmitted = true
   if task.mixConfirmed and self.storeConfirmationExpected(task):
     self.reportMixSent(task)
@@ -604,7 +608,12 @@ proc waitForStoreValidation(
       # `Preferred` send whose mix reply was lost.
       info "Message successfully sent",
         requestId = task.requestId, msgHash = task.loggedHash()
-      MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+      MessageSentEvent.emit(
+        self.brokerCtx,
+        task.requestId,
+        task.msgHash.to0xHex(),
+        task.propagatedAnonymously,
+      )
       self.finish(task)
     else:
       info "Message propagated but not validated by a store node within time window; stop trying.",

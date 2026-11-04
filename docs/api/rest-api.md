@@ -75,7 +75,7 @@ A send is asynchronous. `200` means that the node accepted the message. The resu
 * `unconfirmed`: a send over mix got no confirmation within about 60 s of propagation. The message left the node, and the network has it with a high probability. The node does not send it again in the clear
 * `error`: the send failed (rejected message, no peer within the retry window, no Store confirmation within about 60 s of propagation, ...)
 
-After a `sent`, `unconfirmed` or `error` event, no more events come for that message.
+After a `sent`, `unconfirmed` or `error` event, no more events come for that message. A `propagated` or `sent` record has `anonymous` set when the message went out over mix. At the `Preferred` level a message that mix cannot carry goes out in the clear, and its records say so.
 
 * The `sent` event needs reliability. A send without mix also needs a Store peer.
 * A message sent with `"ephemeral": true` gets no `sent` event, because Store nodes do not keep ephemeral messages.

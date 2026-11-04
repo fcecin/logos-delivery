@@ -3,6 +3,7 @@ import logos_delivery/waku/waku_core, logos_delivery/waku/waku
 import logos_delivery/waku/api/publish
 import logos_delivery/waku/waku_mix
 import logos_delivery/api/conf/modes
+import logos_delivery/messaging/messaging_metrics
 
 import ./[delivery_task, send_processor]
 
@@ -92,6 +93,13 @@ proc mixUnusable(self: MixSendProcessor, task: DeliveryTask): MixUnusable =
     return MixUnusable.NoExit
   return MixUnusable.None
 
+proc handToPlainPath(task: DeliveryTask) =
+  ## Hands a `Preferred` task to the plain path, and counts the task once.
+  task.errorDesc = "" # the plain path reports its own outcome
+  task.state = DeliveryState.FallbackRetry
+  if not task.plainAttempted:
+    recordMixFallback()
+
 proc decideWithoutMix(
     self: MixSendProcessor, task: DeliveryTask, unusable: MixUnusable
 ) =
@@ -120,8 +128,7 @@ proc decideWithoutMix(
     requestId = task.requestId,
     msgHash = task.msgHash.to0xHex(),
     reason = unusable.reason()
-  task.errorDesc = "" # the plain path reports its own outcome
-  task.state = DeliveryState.FallbackRetry
+  task.handToPlainPath()
 
 proc decideTooLarge(self: MixSendProcessor, task: DeliveryTask, size, limit: int) =
   ## Fails a `Required` task at once, because no later pass can make the message
@@ -136,8 +143,7 @@ proc decideTooLarge(self: MixSendProcessor, task: DeliveryTask, size, limit: int
     return
   debug "Message too large for mix, handing it to the plain send path",
     requestId = task.requestId, msgHash = task.msgHash.to0xHex(), size, limit
-  task.errorDesc = "" # the plain path reports its own outcome
-  task.state = DeliveryState.FallbackRetry
+  task.handToPlainPath()
 
 method checkBeforeAdmission*(
     self: MixSendProcessor, task: DeliveryTask
@@ -179,8 +185,7 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
       requestId = task.requestId,
       msgHash = task.msgHash.to0xHex(),
       admissionAge = task.admissionAge()
-    task.errorDesc = ""
-    task.state = DeliveryState.FallbackRetry
+    task.handToPlainPath()
     return
 
   # Mark before the attempt: the exit publishes before it replies, so a message

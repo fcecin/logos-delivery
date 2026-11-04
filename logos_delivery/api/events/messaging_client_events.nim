@@ -7,10 +7,11 @@ export event_broker, api_types
 EventBroker:
   # Event emitted when a store node, or the mix exit for a send over mix, confirms
   # a message. Only with the `reliability` option on, and never for an ephemeral
-  # message.
+  # message. `anonymous` is true when the message went out over mix.
   type MessageSentEvent* = object
     requestId*: RequestId
     messageHash*: string
+    anonymous*: bool
 
 EventBroker:
   # Event emitted when a send over mix got no confirmation within its window.
@@ -36,9 +37,11 @@ EventBroker:
 
 EventBroker:
   # Confirmation that a message has been correctly delivered to some neighbouring nodes.
+  # `anonymous` is true when the message went out over mix.
   type MessagePropagatedEvent* = object
     requestId*: RequestId
     messageHash*: string
+    anonymous*: bool
 
 EventBroker:
   # Event emitted when either a message belongs to Live communication or

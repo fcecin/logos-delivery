@@ -34,6 +34,8 @@ import
   logos_delivery/messaging/delivery_service/send_service/
     [send_service, send_processor, mix_processor, delivery_task]
 import ../testlib/[futures, testasync, wakucore, wakunodeconf]
+from metrics import value
+import logos_delivery/messaging/messaging_metrics
 
 ## Tests for the anonymity levels of the send path. The first suite mounts no
 ## mix, so the level decides at once; the second mounts mix and fills the pool
@@ -575,6 +577,7 @@ suite "SendService - anonymity level with a mounted mix":
     mix.chain(plain)
 
     let task = sizedTask("too-large-preferred", mixLimit() + 1)
+    let fallbacks = logos_delivery_send_mix_fallbacks.value()
     check await mix.process(task).withTimeout(FUTURE_TIMEOUT)
     check:
       plain.calls == 1
@@ -582,6 +585,7 @@ suite "SendService - anonymity level with a mounted mix":
       task.tryCount == 0
       not task.anonymized
       not task.propagatedAnonymously
+      logos_delivery_send_mix_fallbacks.value() == fallbacks + 1
       mix.fellBackFor() == MixUnusable.None # a size hand-over records no mix outage
 
   asyncTest "a Required task waits with no exit on the shard during its grace, then fails":
@@ -628,6 +632,21 @@ suite "SendService - anonymity level with a mounted mix":
     check:
       plain.calls == 1
       fresh.state == DeliveryState.SuccessfullyPropagated
+
+  asyncTest "a Preferred task handed to the plain path counts once, also when the plain path retries":
+    let plain = RetryingProcessor(reason: "no peer")
+    let mix = MixSendProcessor.new(
+      waku, waku.brokerCtx, AnonymityLevel.Preferred, chronos.minutes(1)
+    )
+    mix.chain(plain)
+    let task = buildTask("counted-once", chronos.seconds(1))
+    let fallbacks = logos_delivery_send_mix_fallbacks.value()
+    await mix.process(task)
+    await mix.process(task)
+    check:
+      task.plainAttempted
+      task.state == DeliveryState.NextRoundRetry
+      logos_delivery_send_mix_fallbacks.value() == fallbacks + 1
 
   asyncTest "a Preferred hand-over for an unusable mix is visible, once, and so is the recovery":
     ## `fellBackFor()` holds the reason that the INFO lines print. No exit hands
