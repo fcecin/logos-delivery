@@ -1,7 +1,7 @@
 {.used.}
 
 import
-  std/[sequtils, strutils, times, sugar, net],
+  std/[sequtils, sets, strutils, times, sugar, net],
   results,
   testutils/unittests,
   chronos,
@@ -1604,6 +1604,70 @@ procSuite "Peer Manager":
       not pm.switch.peerStore.peers.anyIt(it.peerId == peers[2].peerId)
       not pm.switch.peerStore.peers.anyIt(it.peerId == peers[3].peerId)
       not pm.switch.peerStore.peers.anyIt(it.peerId == peers[4].peerId)
+
+  test "prunePeerStore() keeps a configured peer":
+    let pm = PeerManager.new(
+      switch = SwitchBuilder
+        .new()
+        .withRng(crypto.newRng())
+        .withMplex()
+        .withNoise()
+        .withPeerStore(25)
+        .withMaxConnections(20)
+        .build(),
+      maxFailedAttempts = 1,
+      storage = nil,
+      maxConnections = 20,
+    )
+    proc peer(): RemotePeerInfo =
+      parsePeerInfo("/ip4/0.0.0.0/tcp/0/p2p/" & $PeerId.random(crypto.newRng()).get())
+        .get()
+
+    # One configured peer and one plain peer in each pass of the prune, the
+    # failed dials and the disconnected peers.
+    let configuredFailed = peer()
+    let failed = peer()
+    let configured = peer()
+    let plain = peer()
+    for p in [configuredFailed, failed, configured, plain]:
+      pm.addPeer(p)
+    for p in [configuredFailed, configured]:
+      pm.configuredMixNodes.incl(p.peerId)
+    for p in [configuredFailed, failed]:
+      pm.switch.peerStore[NumberFailedConnBook][p.peerId] = pm.maxFailedAttempts
+
+    # A capacity of 0 makes the prune take every peer that it may take.
+    pm.switch.peerStore.setCapacity(0)
+    pm.prunePeerStore()
+
+    check pm.switch.peerStore.peers.mapIt(it.peerId).toHashSet() ==
+      [configuredFailed.peerId, configured.peerId].toHashSet()
+
+  asyncTest "a configured mix node leaves the cleanup queue of libp2p at a disconnect":
+    let pm = PeerManager.new(
+      switch = SwitchBuilder
+        .new()
+        .withRng(crypto.newRng())
+        .withMplex()
+        .withNoise()
+        .withPeerStore(25)
+        .withMaxConnections(20)
+        .build(),
+      storage = nil,
+      maxConnections = 20,
+    )
+    let configured = PeerId.random(crypto.newRng()).get()
+    let plain = PeerId.random(crypto.newRng()).get()
+    pm.configuredMixNodes.incl(configured)
+
+    # As libp2p does at a disconnect: it queues the peer, then emits `Left`.
+    for peerId in [configured, plain]:
+      pm.switch.peerStore.toClean.add(peerId)
+      await pm.switch.connManager.triggerPeerEvents(
+        peerId, PeerEvent(kind: PeerEventKind.Left)
+      )
+
+    check pm.switch.peerStore.toClean == @[plain]
 
   asyncTest "canBeConnected() returns correct value":
     let pm = PeerManager.new(

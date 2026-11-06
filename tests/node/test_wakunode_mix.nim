@@ -526,6 +526,34 @@ suite "Waku Mix - bootstrap nodes":
     check node.getMixNodePoolSize() == MinMixPoolSize
     await node.stop()
 
+  asyncTest "a bootstrap node stays through a prune of the peer store":
+    ## A bootstrap node has no ENR and no connection, so a prune takes it among
+    ## the first, and no discovery brings it back. The plain peer shows that the
+    ## prune ran.
+    let node = await mountWith(
+      @[
+        mixBootnode("/ip4/127.0.0.1/tcp/60101"),
+        mixBootnode("/ip4/127.0.0.1/tcp/60102"),
+        mixBootnode("/ip4/127.0.0.1/tcp/60103"),
+        mixBootnode("/ip4/127.0.0.1/tcp/60104"),
+      ]
+    )
+    let plain = PeerId.init(generateSecp256k1Key()).tryGet()
+    node.peerManager.addPeer(
+      RemotePeerInfo.init(
+        plain, @[MultiAddress.init("/ip4/127.0.0.1/tcp/60105").tryGet()]
+      )
+    )
+
+    # A capacity of 1 makes the prune take every peer but one.
+    node.peerManager.switch.peerStore.setCapacity(1)
+    node.peerManager.prunePeerStore()
+
+    check:
+      node.getMixNodePoolSize() == MinMixPoolSize
+      plain notin node.peerManager.switch.peerStore.peers.mapIt(it.peerId)
+    await node.stop()
+
   asyncTest "a node skips its own entry in the bootstrap list":
     ## A fleet node finds itself in its own preset. The mount skips that entry,
     ## so mix never draws this node as a hop or an exit.
