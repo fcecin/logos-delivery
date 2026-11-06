@@ -137,6 +137,9 @@ type PeerManager* = ref object
     ## Inbound budget for pure-libp2p peers; 0 admits none (the default).
   pureLibp2pPeers*: HashSet[PeerId]
     ## Connected peers admitted as pure libp2p rather than as waku members.
+  configuredMixNodes*: HashSet[PeerId]
+    ## The mix nodes of `--mixnode` and of a network preset. Discovery does not
+    ## add a literal entry again, so `prunePeerStore` keeps them.
 
 #~~~~~~~~~~~~~~~~~~~#
 # Helper Functions  #
@@ -991,6 +994,11 @@ proc onPeerEvent(pm: PeerManager, peerId: PeerId, event: PeerEvent) {.async.} =
     direction = UnknownDirection
     connectedness = CanConnect
 
+    # libp2p puts each peer that disconnects in a queue, and deletes the oldest
+    # peers of the queue when it is longer than the capacity of the store.
+    if peerId in pm.configuredMixNodes:
+      pm.switch.peerStore.toClean.keepItIf(it != peerId)
+
     if not pm.pureLibp2pPeers.missingOrExcl(peerId):
       logos_delivery_pure_libp2p_peers.set(pm.pureLibp2pPeers.len.int64)
 
@@ -1197,7 +1205,7 @@ proc prunePeerStore*(pm: PeerManager) =
 
   # prune failed connections
   for peerId, count in peerStore[NumberFailedConnBook].book.pairs:
-    if count < pm.maxFailedAttempts:
+    if count < pm.maxFailedAttempts or peerId in pm.configuredMixNodes:
       continue
 
     if peersToPrune.len >= pruningCount:
@@ -1205,7 +1213,9 @@ proc prunePeerStore*(pm: PeerManager) =
 
     peersToPrune.incl(peerId)
 
-  var notConnected = peerStore.getDisconnectedPeers().mapIt(it.peerId)
+  var notConnected = peerStore.getDisconnectedPeers().mapIt(it.peerId).filterIt(
+      it notin pm.configuredMixNodes
+    )
 
   # Always pick random non-connected peers
   shuffle(notConnected)
