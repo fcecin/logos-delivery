@@ -112,7 +112,13 @@ proc queryToAny*(
 
   # Shuffle to distribute load across store peers and limit retries
   shuffle(peers)
-  let peersToTry = peers[0 ..< min(peers.len, MaxQueryRetries)]
+  # Ask the connected store peers first, so a query opens a connection only
+  # when the node has none to a store peer.
+  let switch = self.peerManager.switch
+  let connectedFirst =
+    peers.filterIt(switch.isConnected(it.peerId)) &
+    peers.filterIt(not switch.isConnected(it.peerId))
+  let peersToTry = connectedFirst[0 ..< min(connectedFirst.len, MaxQueryRetries)]
 
   var lastError: StoreError
   for peer in peersToTry:
