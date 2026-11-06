@@ -125,6 +125,18 @@ func archivedBefore*(
   ## The archive has every message with a timestamp before this time.
   return now - variance - archiveTime
 
+func archivedAtRecovery*(
+    liveSince, subscribedSince: Timestamp,
+    archiveTime = ArchiveTime,
+    variance = MaxMessageTimestampVariance,
+): Timestamp =
+  ## The archive has every message with a timestamp before this time when
+  ## live delivery starts to cover a topic again. That moment is the later of
+  ## the last recovery and the subscribe. The last part of the gap of a topic
+  ## starts here. The bound does not move with the clock, so a record at or
+  ## after it waits for the archive.
+  return archivedBefore(max(liveSince, subscribedSince), archiveTime, variance)
+
 type LastReceivedRow {.proto3.} = object ## The stored last received time.
   at {.fieldNumber: 1, pint.}: Timestamp
 

@@ -306,7 +306,8 @@ proc backfillFetchTopic(
 ): Future[Result[BackfillFetchOutcome, string]] {.async.} =
   ## One Store query for `topic`. The gap ends where live delivery covers the
   ## topic again. The worker fetches at once the part of the gap that the
-  ## archive has for sure. The last part waits until the archive has it.
+  ## archive has for sure. The last part waits until the archive has it. A
+  ## wake of the worker in that wait sends no query.
   let record = self.backfill.records.getOrDefault(topic)
   let now = getNowInNanosecondTime()
   let stop = coveredFrom(
@@ -321,7 +322,15 @@ proc backfillFetchTopic(
   # The time when the archive has every message before `stop`.
   let restArchivedAt =
     stop + self.backfill.timestampVariance.nanos + self.backfill.archiveTime.nanos
-  if stop > archived and record.timestamp >= archived:
+  # The start of the last part. It is a fixed bound. A bound that moves with
+  # the clock, as `archived` does, gives each wake a new short range to fetch.
+  let lastPart = archivedAtRecovery(
+    self.backfill.liveSince,
+    self.backfill.subscribedSince[topic],
+    self.backfill.archiveTime.nanos,
+    self.backfill.timestampVariance.nanos,
+  )
+  if stop > archived and record.timestamp >= lastPart:
     # Only the last part is left, and the archive may not have it yet.
     return ok(BackfillFetchOutcome(readyAt: Opt.some(restArchivedAt)))
   let fetchStop = min(stop, archived)
