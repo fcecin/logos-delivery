@@ -241,6 +241,38 @@ suite "Store Client":
 
       check observedLastPeers.len >= 2
 
+    asyncTest "queryToAny asks a connected store peer first":
+      proc countingHandler(count: ref int): StoreQueryRequestHandler =
+        return proc(
+            req: StoreQueryRequest
+        ): Future[StoreQueryResult] {.async, gcsafe.} =
+          inc count[]
+          return ok(StoreQueryResponse(messages: messageSeq))
+
+      let connectedCount = new(int)
+      let otherCount = new(int)
+      var storeSwitches: seq[Switch]
+      for count in [connectedCount, otherCount]:
+        let storeSwitch = newTestSwitch()
+        discard await newTestWakuStore(storeSwitch, handler = countingHandler(count))
+        await storeSwitch.start()
+        storeSwitches.add(storeSwitch)
+        let peerInfo = storeSwitch.peerInfo.toRemotePeerInfo()
+        peerInfo.protocols = @[WakuStoreCodec]
+        clientSwitch.peerStore.addPeer(peerInfo)
+      defer:
+        await allFutures(storeSwitches.mapIt(it.stop()))
+
+      await clientSwitch.connect(
+        storeSwitches[0].peerInfo.peerId, storeSwitches[0].peerInfo.addrs
+      )
+      # A random choice sends some of these queries to the other peer.
+      for _ in 0 ..< 10:
+        check (await client.queryToAny(storeQuery)).isOk()
+      check:
+        connectedCount[] == 10
+        otherCount[] == 0
+
     asyncTest "queryToAny asks only the exclusive store peers":
       let peerManager = PeerManager.new(clientSwitch)
       let exclusiveClient = WakuStoreClient.new(peerManager, crypto.newRng())
