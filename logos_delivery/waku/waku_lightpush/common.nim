@@ -33,6 +33,9 @@ const TooManyRequestsMessage* = "Request rejected due to too many requests"
 ## requestId a service answers with when it rejects a request before reading it
 const UnknownRequestId* = "N/A"
 
+const AlreadySeenMessageDesc* = "Dropping already-seen message"
+  ## The refusal of a message that the relay of the service already has.
+
 func isSuccess*(response: LightPushResponse): bool =
   return response.statusCode == LightPushSuccessCode.SUCCESS
 
@@ -78,9 +81,7 @@ func mapPubishingErrorToPushResult*(
       (LightPushErrorCode.INVALID_MESSAGE, Opt.some("Empty topic, skipping publish"))
     )
   of DuplicateMessage:
-    return err(
-      (LightPushErrorCode.INVALID_MESSAGE, Opt.some("Dropping already-seen message"))
-    )
+    return err((LightPushErrorCode.INVALID_MESSAGE, Opt.some(AlreadySeenMessageDesc)))
   of NoPeersToPublish:
     return err(
       (

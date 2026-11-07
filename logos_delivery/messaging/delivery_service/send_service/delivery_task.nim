@@ -40,9 +40,19 @@ type DeliveryTask* = ref object
   anonymized*: bool
     ## Set at the first anonymous send attempt and never cleared; from then on,
     ## the INFO and ERROR records of this task withhold the hash.
-  propagatedAnonymously*: bool
-    ## Set when an anonymous path propagated the message. No store node confirms
-    ## it: the query would name the message from this node's own address.
+  seenOnNetwork*: bool
+    ## Set when this node receives the message from the network after a mix
+    ## attempt starts and before the task is deanonymized. The exit publishes
+    ## before it replies, so the send is complete also when the reply is lost.
+  deanonymized*: bool
+    ## Set before the first plain send attempt of the task and never cleared. A
+    ## message is deanonymized from the moment that a plain send of it is
+    ## attempted, whatever the attempt does. From then on a copy of the message
+    ## from the network does not complete the task as a mix send. See
+    ## `isAnonymous`.
+  seenWaiter*: Future[void]
+    ## Completed by `markSeen` while an attempt runs, so that an attempt that
+    ## waits for the reply of the exit ends at once. Nil between attempts.
   lastStoreQueryTime*: Opt[Moment]
     ## When a Store peer was last asked about this task, none before the first query.
   storeValidationWaited*: timer.Duration
@@ -122,6 +132,13 @@ proc isParkedExpired*(self: DeliveryTask, maxAge: timer.Duration): bool =
   ## measured from the message timestamp, so parking cannot grow the backlog
   ## and deliver arbitrarily late.
   return self.firstAdmittedTime.isNone() and self.messageAge() > maxAge
+
+func isAnonymous*(self: DeliveryTask): bool =
+  ## True when the node attempted a mix send of the message and never a plain
+  ## send of it. A propagated task that is anonymous went out over mix, so no
+  ## store node confirms it: the query would name the message from this node's
+  ## own address.
+  self.anonymized and not self.deanonymized
 
 proc isEphemeral*(self: DeliveryTask): bool =
   return self.msg.ephemeral

@@ -577,7 +577,7 @@ suite "SendService - anonymity level with a mounted mix":
       task.state == DeliveryState.SuccessfullyPropagated
       task.tryCount == 0
       not task.anonymized
-      not task.propagatedAnonymously
+      task.deanonymized
       mix.fellBackFor() == MixUnusable.None # a size hand-over records no mix outage
 
   asyncTest "a Required task waits with no exit on the shard during its grace, then fails":

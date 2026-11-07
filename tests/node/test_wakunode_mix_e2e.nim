@@ -338,8 +338,8 @@ suite "Waku Mix - end to end transport":
       surbBuildErrors() == surbErrorsBefore
 
   asyncTest "a mixed send through the send service completes and is marked as mixed":
-    ## `MixSendProcessor` sets `propagatedAnonymously` after a real mixed publish, which
-    ## no unit test reaches. The sender is a `Waku` with the `Required` chain.
+    ## A real mixed publish of `MixSendProcessor` propagates the task, which no
+    ## unit test reaches. The sender is a `Waku` with the `Required` chain.
     let mixnet = await setupMixNet(23910)
     defer:
       await teardownMixNet(mixnet)
@@ -412,6 +412,5 @@ suite "Waku Mix - end to end transport":
     let after = hopCounts()
     check:
       task.state == DeliveryState.SuccessfullyPropagated
-      task.propagatedAnonymously # no store query for this task
       task.anonymized # set at the attempt
       after.exited - before.exited >= 1.0

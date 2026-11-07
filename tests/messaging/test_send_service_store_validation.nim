@@ -23,7 +23,7 @@ import logos_delivery/waku/waku_lightpush/common
 import logos_delivery/waku/node/waku_node/lightpush
 
 ## Store-based reliability asks a store node for a propagated message's hash, in
-## clear from this node's own address. It must never ask for a mixed message.
+## clear from this node's own address. It must never ask for an anonymous message.
 
 proc testConf(): WakuConf =
   defaultTestWakuNodeConf().toWakuConf().valueOr:
@@ -44,9 +44,14 @@ proc newTask(id: string): DeliveryTask =
     state: DeliveryState.Entry,
   )
 
-proc propagatedAt(id: string, time: Moment): DeliveryTask =
-  ## A task that propagated at `time` and waits for a Store confirmation.
+proc propagatedAt(id: string, time: Moment, overMix = false): DeliveryTask =
+  ## A task that propagated at `time`. A task that propagated in the clear waits
+  ## for a Store confirmation.
   let task = newTask(id)
+  if overMix:
+    task.anonymized = true
+  else:
+    task.deanonymized = true
   task.state = DeliveryState.SuccessfullyPropagated
   task.firstPropagatedTime = Opt.some(time)
   return task
@@ -68,9 +73,8 @@ suite "SendService - store validation and mix":
     return SendService.new(reliability, waku, manager, chain).expect("SendService.new")
 
   proc propagatedTask(overMix: bool, ephemeral = false): DeliveryTask =
-    let task = propagatedAt("t", Moment.now())
+    let task = propagatedAt("t", Moment.now(), overMix)
     task.msg.ephemeral = ephemeral
-    task.propagatedAnonymously = overMix
     return task
 
   asyncTest "the store client is mounted even on a node that serves no store":
@@ -83,7 +87,7 @@ suite "SendService - store validation and mix":
       propagatedTask(overMix = false)
     )
 
-  asyncTest "a message that went out over mix is never confirmed against a store node":
+  asyncTest "an anonymous message is never confirmed against a store node":
     ## The query would carry its hash, in clear, from this node's own address.
     check not service(reliability = true).awaitsStoreValidation(
       propagatedTask(overMix = true)
@@ -130,10 +134,42 @@ method process(self: ScriptedProc, task: DeliveryTask): Future[void] {.async.} =
   if self.calls in self.retryCalls:
     task.state = DeliveryState.NextRoundRetry
     return
+  if self.overMix:
+    task.anonymized = true
+  else:
+    task.deanonymized = true
   task.state = DeliveryState.SuccessfullyPropagated
-  task.propagatedAnonymously = self.overMix
   if task.firstPropagatedTime.isNone():
     task.firstPropagatedTime = Opt.some(Moment.now())
+
+type MixAfterPlainProc = ref object of BaseSendProcessor
+  ## A mix attempt that hands the first pass to the plain path, and that
+  ## propagates the message over mix at the next pass.
+  calls: int
+
+method isPlain(self: MixAfterPlainProc): bool {.gcsafe.} =
+  return false
+
+method isValidProcessor(self: MixAfterPlainProc, task: DeliveryTask): bool {.gcsafe.} =
+  return true
+
+method sendImpl(self: MixAfterPlainProc, task: DeliveryTask): Future[void] {.async.} =
+  inc self.calls
+  task.anonymized = true
+  if self.calls == 1:
+    task.state = DeliveryState.FallbackRetry
+    return
+  task.state = DeliveryState.SuccessfullyPropagated
+  task.firstPropagatedTime = Opt.some(Moment.now())
+
+type PlainRetryProc = ref object of BaseSendProcessor
+  ## A plain attempt that leaves the task for a retry.
+
+method isValidProcessor(self: PlainRetryProc, task: DeliveryTask): bool {.gcsafe.} =
+  return true
+
+method sendImpl(self: PlainRetryProc, task: DeliveryTask): Future[void] {.async.} =
+  task.state = DeliveryState.NextRoundRetry
 
 const FastLoop = chronos.milliseconds(10)
   ## The loop interval of a test service. It keeps each wait for a loop short.
@@ -247,6 +283,46 @@ suite "SendService - mix completion":
     check await sent.waitCount(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
     check not await sent.waitCount(2).withTimeout(FUTURE_TIMEOUT_SHORT)
 
+  asyncTest "a send over mix after a plain attempt waits for a Store confirmation":
+    ## The plain attempt deanonymized the message, so the reply of the exit does
+    ## not end the send.
+    let sent = EventCounter()
+    let listener = countSent(sent)
+    defer:
+      await MessageSentEvent.dropListener(waku.brokerCtx, listener)
+    let mix = MixAfterPlainProc()
+    mix.chain(PlainRetryProc())
+    let manager =
+      RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
+    let service = SendService
+      .new(
+        true,
+        waku,
+        manager,
+        mix,
+        AnonymityLevel.Preferred,
+        retryInterval = chronos.milliseconds(100),
+      )
+      .expect("SendService.new") # reliability = on
+    let task = newTask("mix-after-plain")
+
+    check service.enqueue(task).isOk()
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+
+    checkUntilTimeout:
+      task.state == DeliveryState.SuccessfullyPropagated
+      not task.storeAnswer.isNil()
+    check:
+      mix.calls == 2
+      task.deanonymized
+      service.awaitsStoreValidation(task)
+    check not await sent.waitCount(1).withTimeout(FUTURE_TIMEOUT_SHORT)
+
+    task.storeAnswer.complete()
+    check await sent.waitCount(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
+
   asyncTest "reliability off: a mixed send ends the same as a plain one (no MessageSent)":
     ## With store reliability off, a plain and a mixed send both end at
     ## `MessagePropagated`.
@@ -359,11 +435,10 @@ suite "SendService - Store validation batches":
       later[1].requestId == RequestId("t0")
       later[99].requestId == RequestId("t98")
 
-  asyncTest "a task that propagated within ArchiveTime or over mix is not in a batch":
+  asyncTest "a task that propagated within ArchiveTime or anonymously is not in a batch":
     let now = Moment.now()
     let young = propagatedAt("young", now - chronos.seconds(1))
-    let mixed = propagatedAt("mixed", now - chronos.seconds(10))
-    mixed.propagatedAnonymously = true
+    let mixed = propagatedAt("mixed", now - chronos.seconds(10), overMix = true)
     let plain = propagatedAt("plain", now - chronos.seconds(10))
     check service.nextStoreValidationBatch(@[young, mixed, plain], now) == @[plain]
 

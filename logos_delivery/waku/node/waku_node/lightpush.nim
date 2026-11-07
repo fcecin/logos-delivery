@@ -78,7 +78,14 @@ proc publishOverMix*(
   let publishFut =
     node.wakuLightpushClient.publish(Opt.some(pubsubTopic), message, conn)
   let deadline = sleepAsync(replyTimeout)
-  discard await race(FutureBase(publishFut), FutureBase(deadline))
+  try:
+    discard await race(FutureBase(publishFut), FutureBase(deadline))
+  except CancelledError as exc:
+    # `race` does not cancel the futures that it waits for.
+    publishFut.cancelSoon()
+    deadline.cancelSoon()
+    await noCancel conn.reset()
+    raise exc
 
   if not publishFut.finished():
     await conn.reset()

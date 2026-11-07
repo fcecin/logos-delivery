@@ -11,7 +11,7 @@ import
   logos_delivery/waku/waku,
   logos_delivery/waku/api/[store, publish],
   logos_delivery/messaging/rate_limit_manager/rate_limit_manager
-import logos_delivery/api/events/messaging_client_events
+import logos_delivery/api/events/[kernel_events, messaging_client_events]
 import logos_delivery/api/conf/modes
 import logos_delivery/messaging/messaging_metrics
 
@@ -75,10 +75,15 @@ type SendService* = ref object of RootObj
     ## Chronos wakes the waiters in the order that they started to wait, so the
     ## parked tasks reach `admissionLock` in the order that they parked.
   retryLoopHandle: Future[void] ## The `retryLoop`, nil while the service does not run.
+  seenMsgListener: MessageSeenEventListener
+    ## Calls `markSeen` for each message that this node receives from the network.
   attempts: int
     ## The number of attempts that ended, in admission or in a send. Only tests
     ## read it.
   subscribeOnSend: bool ## True only for the None anonymity level.
+  readsOwnCopies: bool
+    ## True above the `None` level, where a mix attempt can make a task wait for
+    ## a copy of its message.
   sendProcessor: BaseSendProcessor
   rateLimitManager: RateLimitManager
     ## Charges first transmissions against the per-epoch budget; re-publishes
@@ -187,6 +192,7 @@ proc new*(
     sendQueueCapacity: sendQueueCapacity,
     retryInterval: retryInterval,
     subscribeOnSend: anonymityLevel == AnonymityLevel.None,
+    readsOwnCopies: anonymityLevel != AnonymityLevel.None,
   )
 
   return ok(sendService)
@@ -203,12 +209,12 @@ proc storeConfirmationExpected(self: SendService, task: DeliveryTask): bool =
   return self.checkStoreForMessages and not task.isEphemeral()
 
 proc awaitsStoreValidation*(self: SendService, task: DeliveryTask): bool =
-  ## True while a propagated task still needs a store node to confirm it. A task
-  ## that went out over mix never does: the store query would carry its hash in
-  ## clear from this node's own address.
+  ## True while a propagated task still needs a store node to confirm it. An
+  ## anonymous task never does: the store query would carry its hash in clear
+  ## from this node's own address.
   return
     self.storeConfirmationExpected(task) and
-    task.state == DeliveryState.SuccessfullyPropagated and not task.propagatedAnonymously
+    task.state == DeliveryState.SuccessfullyPropagated and not task.isAnonymous()
 
 func storeValidationKey(task: DeliveryTask): Moment =
   ## The last Store query time, or the first propagation for a task never asked.
@@ -294,7 +300,7 @@ proc checkMsgsInStore(self: SendService, batch: seq[DeliveryTask]) {.async.} =
 
   # The Store peer decides which hashes its answer lists, and it can list hashes
   # that this node did not ask about. Only a task whose `deliver` waits for a Store
-  # confirmation takes a hash from the answer, so a message sent over mix is never
+  # confirmation takes a hash from the answer, so an anonymous message is never
   # confirmed.
   var reported: HashSet[WakuMessageHash]
   for item in storeResp.messages:
@@ -385,7 +391,7 @@ proc failExpired(self: SendService, task: DeliveryTask): bool =
   return false
 
 proc reportPropagated(self: SendService, task: DeliveryTask) =
-  ## Emits `MessagePropagatedEvent`, and `MessageSentEvent` for a mixed send that
+  ## Emits `MessagePropagatedEvent`, and `MessageSentEvent` for an anonymous send that
   ## a plain send would confirm in Store.
   # INFO lines reach log collectors, where a hash would tie this node to an
   # anonymized message; `MixSendProcessor` still logs it at DEBUG.
@@ -393,7 +399,7 @@ proc reportPropagated(self: SendService, task: DeliveryTask) =
     requestId = task.requestId, msgHash = task.loggedHash()
   MessagePropagatedEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
   task.propagatedEventEmitted = true
-  if task.propagatedAnonymously and self.storeConfirmationExpected(task):
+  if task.isAnonymous() and self.storeConfirmationExpected(task):
     # The exit's reply completes a mixed send when a plain send would wait for
     # a store confirmation, so both paths end with the same event. The INFO line
     # omits the hash.
@@ -486,17 +492,47 @@ proc retryLoop(self: SendService) {.async: (raises: [CancelledError]).} =
     await sleepAsync(self.retryInterval)
     self.retryNow()
 
+proc completeIfSeen(task: DeliveryTask): bool =
+  ## Completes a task whose message this node received from the network after a
+  ## mix attempt started and before the task was deanonymized. Returns true
+  ## when it completes the task.
+  if not task.seenOnNetwork or task.firstPropagatedTime.isSome():
+    return false
+  debug "Message seen on the network, the mix send is complete",
+    requestId = task.requestId, msgHash = task.msgHash.to0xHex()
+  task.state = DeliveryState.SuccessfullyPropagated
+  task.firstPropagatedTime = Opt.some(Moment.now())
+  return true
+
 proc sendUntilPropagated(
     self: SendService, task: DeliveryTask
 ): Future[bool] {.async: (raises: [CancelledError]).} =
   ## Makes the first attempt at once, then one attempt at each tick of
   ## `retryLoop`, until the task propagates. Returns false when the task failed.
   while true:
+    if task.completeIfSeen():
+      self.reportPropagated(task)
+      return true
     if not self.needsAdmission(task) or await self.runAdmission(task):
       await self.sendSlots.acquire()
+      # A copy can arrive during the admission or the wait for a slot, and the
+      # attempt can hand the task to the plain path with no await.
+      if task.completeIfSeen():
+        self.sendSlots.release2()
+        self.reportPropagated(task)
+        return true
+      let attempt = self.sendProcessor.process(task)
+      task.seenWaiter = newFuture[void]("send service seen waiter")
       try:
-        await self.sendProcessor.process(task)
+        # A copy of the message from the network ends the attempt at once,
+        # because the network has the message.
+        discard await race(FutureBase(attempt), FutureBase(task.seenWaiter))
+        if attempt.finished():
+          await attempt
+        else:
+          await attempt.cancelAndWait()
       except CancelledError as exc:
+        await attempt.cancelAndWait()
         raise exc
       except CatchableError as exc:
         # The send path returns remote errors as results, so an exception is a local
@@ -504,8 +540,11 @@ proc sendUntilPropagated(
         error "Exception in a send attempt",
           requestId = task.requestId, msgHash = task.loggedHash(), error = exc.msg
       finally:
+        task.seenWaiter = nil
         self.sendSlots.release2()
     self.attempts.inc()
+    # A task with `seenOnNetwork` is complete, also when its attempt failed.
+    discard task.completeIfSeen()
     case task.state
     of DeliveryState.SuccessfullyPropagated:
       self.reportPropagated(task)
@@ -536,8 +575,7 @@ proc waitForStoreValidation(
   try:
     if left > ZeroDuration and await task.storeAnswer.withTimeout(left):
       task.state = DeliveryState.SuccessfullyValidated
-      # An anonymized task gets here only through the clear republish of a
-      # `Preferred` send whose mix reply was lost.
+      # An anonymized task gets here only when it is deanonymized.
       info "Message successfully sent",
         requestId = task.requestId, msgHash = task.loggedHash()
       MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
@@ -545,7 +583,7 @@ proc waitForStoreValidation(
     else:
       info "Message propagated but not validated by a store node within time window; stop trying.",
         requestId = task.requestId,
-        msgHash = task.msgHash.to0xHex(),
+        msgHash = task.loggedHash(),
         waited = task.storeValidationWaited + (Moment.now() - started)
       recordStoreValidationTimeout()
       self.fail(
@@ -613,6 +651,20 @@ proc enqueue*(self: SendService, task: DeliveryTask): Result[RequestId, string] 
   self.startDeliverSoon(task)
   return ok(task.requestId)
 
+proc markSeen(self: SendService, pubsubTopic: PubsubTopic, msg: WakuMessage) =
+  ## Marks the task of a message that this node received from the network, when
+  ## the task had a mix attempt and is not deanonymized. A plain send can put
+  ## the message on the network in the clear, so a copy of it tells nothing
+  ## about the mix send.
+  if self.deliveryTasks.len == 0:
+    return
+  let task = self.deliveryTasks.getOrDefault(computeMessageHash(pubsubTopic, msg))
+  if task.isNil() or not task.anonymized or task.deanonymized:
+    return
+  task.seenOnNetwork = true
+  if not task.seenWaiter.isNil() and not task.seenWaiter.finished():
+    task.seenWaiter.complete()
+
 proc startSendService*(self: SendService) =
   ## Starts each task. Call it after `stopSendService` ends. A call while the
   ## service runs does nothing.
@@ -622,14 +674,25 @@ proc startSendService*(self: SendService) =
   for task in self.deliveryTasks.values:
     self.startDeliverSoon(task)
   self.retryLoopHandle = self.retryLoop()
+  if self.readsOwnCopies:
+    self.seenMsgListener = MessageSeenEvent.listen(
+      self.brokerCtx,
+      proc(event: MessageSeenEvent) {.async: (raises: []).} =
+        self.markSeen(event.topic, event.message),
+    ).valueOr:
+      # Without the listener, only the reply of the exit completes a mix send.
+      error "Failed to set MessageSeenEvent listener", error = error
+      MessageSeenEventListener()
   if self.checkStoreForMessages:
     self.storeValidationHandle = self.storeValidationLoop()
 
 proc stopSendService*(self: SendService) {.async: (raises: []).} =
   ## Cancels each `deliver`, `retryLoop`, the Store validation loop and each
-  ## resend. The tasks stay in the send queue with no event, and
-  ## `startSendService` starts them again.
+  ## resend, and drops the `MessageSeenEvent` listener. The tasks stay in the
+  ## send queue with no event, and `startSendService` starts them again.
   self.running = false
+  let seenMsgListener = self.seenMsgListener
+  self.seenMsgListener = MessageSeenEventListener()
   var handles: seq[Future[void]]
   for handle in [self.retryLoopHandle, self.storeValidationHandle]:
     if not handle.isNil():
@@ -644,3 +707,8 @@ proc stopSendService*(self: SendService) {.async: (raises: []).} =
     if task.isRunning():
       handles.add(task.deliverHandle)
   await cancelAndWait(handles)
+  # After the cancels, so that a copy still marks a task until its `deliver`
+  # ends. A drop also cancels the running handlers of the other listeners of
+  # `MessageSeenEvent` in this broker context.
+  if seenMsgListener != MessageSeenEventListener():
+    await MessageSeenEvent.dropListener(self.brokerCtx, seenMsgListener)
