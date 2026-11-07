@@ -31,6 +31,8 @@ import
   logos_delivery/messaging/delivery_service/send_service/
     [send_service, send_processor, mix_processor, delivery_task]
 import ../testlib/[futures, testasync, wakucore, wakunodeconf]
+from metrics import value
+import logos_delivery/messaging/messaging_metrics
 
 ## Tests for the anonymity levels of the send path. The first suite mounts no
 ## mix, so the level decides at once; the second mounts mix and fills the pool
@@ -57,6 +59,12 @@ method isValidProcessor(self: RetryingProcessor, task: DeliveryTask): bool {.gcs
 method sendImpl(self: RetryingProcessor, task: DeliveryTask): Future[void] {.async.} =
   task.errorDesc = self.reason
   task.state = DeliveryState.NextRoundRetry
+
+type NoPeerProcessor = ref object of BaseSendProcessor
+  ## A plain processor with no peer, so it never attempts a task.
+
+method isValidProcessor(self: NoPeerProcessor, task: DeliveryTask): bool {.gcsafe.} =
+  return false
 
 proc testConf(): WakuConf =
   defaultTestWakuNodeConf().toWakuConf().valueOr:
@@ -571,6 +579,7 @@ suite "SendService - anonymity level with a mounted mix":
     mix.chain(plain)
 
     let task = sizedTask("too-large-preferred", mixLimit() + 1)
+    let fallbacks = logos_delivery_send_mix_fallbacks.value()
     check await mix.process(task).withTimeout(FUTURE_TIMEOUT)
     check:
       plain.calls == 1
@@ -578,6 +587,7 @@ suite "SendService - anonymity level with a mounted mix":
       task.tryCount == 0
       not task.anonymized
       task.deanonymized
+      logos_delivery_send_mix_fallbacks.value() == fallbacks + 1
       mix.fellBackFor() == MixUnusable.None # a size hand-over records no mix outage
 
   asyncTest "a Required task waits with no exit on the shard during its grace, then fails":
@@ -624,6 +634,35 @@ suite "SendService - anonymity level with a mounted mix":
     check:
       plain.calls == 1
       fresh.state == DeliveryState.SuccessfullyPropagated
+
+  asyncTest "a Preferred task handed to the plain path counts once, also when the plain path retries":
+    let plain = RetryingProcessor(reason: "busy")
+    let mix = MixSendProcessor.new(
+      waku, waku.brokerCtx, AnonymityLevel.Preferred, chronos.minutes(1)
+    )
+    mix.chain(plain)
+    let task = buildTask("counted-once", chronos.seconds(1))
+    let fallbacks = logos_delivery_send_mix_fallbacks.value()
+    await mix.process(task)
+    await mix.process(task)
+    check:
+      task.deanonymized
+      task.state == DeliveryState.NextRoundRetry
+      logos_delivery_send_mix_fallbacks.value() == fallbacks + 1
+
+  asyncTest "a Preferred task that is never deanonymized is not counted":
+    ## Each pass hands the task over, and no plain send is attempted.
+    let mix = MixSendProcessor.new(
+      waku, waku.brokerCtx, AnonymityLevel.Preferred, chronos.minutes(1)
+    )
+    mix.chain(NoPeerProcessor())
+    let task = buildTask("counted-once-no-peer", chronos.seconds(1))
+    let fallbacks = logos_delivery_send_mix_fallbacks.value()
+    for _ in 0 ..< 3:
+      await mix.process(task)
+    check:
+      not task.deanonymized
+      logos_delivery_send_mix_fallbacks.value() == fallbacks
 
   asyncTest "a Preferred hand-over for an unusable mix is visible, once, and so is the recovery":
     ## `fellBackFor()` holds the reason that the INFO lines print. No exit hands
@@ -709,11 +748,13 @@ suite "SendService - anonymity level with a mounted mix":
 
     # Mix had the task since admission and did not deliver it.
     let task = buildTask("preferred-late", chronos.minutes(2))
+    let fallbacks = logos_delivery_send_mix_fallbacks.value()
     await mix.process(task)
 
     check:
       plain.calls == 1
       task.state == DeliveryState.SuccessfullyPropagated
+      logos_delivery_send_mix_fallbacks.value() == fallbacks + 1
 
   asyncTest "an RLN proof refresh starts a new Preferred mix window":
     ## `parkForRlnProofRefresh` clears `firstAdmittedTime`, so the new proof

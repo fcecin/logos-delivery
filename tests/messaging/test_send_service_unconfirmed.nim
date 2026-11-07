@@ -92,6 +92,7 @@ proc buildTask(id: string, admitted = Moment.now()): DeliveryTask =
 
 type SendEvents = ref object
   propagated, unconfirmed, errors: int
+  unconfirmedAnonymous: seq[bool]
   propagatedListener: MessagePropagatedEventListener
   unconfirmedListener: MessageUnconfirmedEventListener
   errorListener: MessageErrorEventListener
@@ -114,7 +115,8 @@ suite "SendService - a task whose mix request got no answer":
       .listen(
         waku.brokerCtx,
         proc(event: MessageUnconfirmedEvent) {.async: (raises: []).} =
-          sendEvents.unconfirmed.inc(),
+          sendEvents.unconfirmed.inc()
+          sendEvents.unconfirmedAnonymous.add(event.anonymous),
       )
       .expect("listen")
     events.errorListener = MessageErrorEvent
@@ -192,3 +194,23 @@ suite "SendService - a task whose mix request got no answer":
     checkUntilTimeout:
       events.unconfirmed == 1
     check mix.calls == 0
+
+  asyncTest "the unconfirmed end of a deanonymized send does not say anonymous":
+    let service = newService(CountingProcessor())
+    defer:
+      await service.stopSendService()
+    let mixOnly = buildTask("mix-only", Moment.now() - service.maxDeliveryTime * 2)
+    let plainFirst =
+      buildTask("plain-first", Moment.now() - service.maxDeliveryTime * 2)
+    for task in [mixOnly, plainFirst]:
+      task.anonymized = true
+      task.mixUnanswered = true
+    plainFirst.deanonymized = true
+
+    check service.enqueue(mixOnly).isOk()
+    checkUntilTimeout:
+      events.unconfirmed == 1
+    check service.enqueue(plainFirst).isOk()
+    checkUntilTimeout:
+      events.unconfirmed == 2
+    check events.unconfirmedAnonymous == @[true, false]

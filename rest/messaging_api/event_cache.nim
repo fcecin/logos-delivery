@@ -57,12 +57,14 @@ proc recordSend*(
     messageHash: string,
     kind: SendEventKind,
     error = "",
+    anonymous = false,
 ) =
   ## Append a send event to its request id's timeline, creating the entry (and
   ## evicting the oldest request id past the overflow cap) as needed.
   let record = SendEventRecord(
     kind: kind,
     messageHash: messageHash,
+    anonymous: anonymous,
     error: error,
     timestamp: getNowInNanosecondTime(),
   )

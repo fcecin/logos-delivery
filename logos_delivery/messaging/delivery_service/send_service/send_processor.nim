@@ -1,6 +1,7 @@
 import results, chronos
 import brokers/broker_context
 import logos_delivery/waku/waku, logos_delivery/waku/api/publish
+import logos_delivery/messaging/messaging_metrics
 import ./delivery_task
 
 {.push raises: [].}
@@ -81,6 +82,9 @@ method process*(
   while not currentProcessor.isNil() and keepTrying:
     if currentProcessor.isValidProcessor(task):
       if currentProcessor.isPlain():
+        if not task.deanonymized and not self.isPlain():
+          # The chain starts with mix, so this is a fallback to the plain path.
+          recordMixFallback()
         task.deanonymized = true
       await currentProcessor.sendImpl(task)
     currentProcessor = currentProcessor.fallbackProcessor

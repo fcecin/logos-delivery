@@ -14,7 +14,8 @@ Emitted when the node confirms the delivery of a message that is not ephemeral, 
 {
   "eventType": "message_sent",
   "requestId": "unique-request-id",
-  "messageHash": "0x..."
+  "messageHash": "0x...",
+  "anonymous": false
 }
 ```
 
@@ -22,6 +23,7 @@ Emitted when the node confirms the delivery of a message that is not ephemeral, 
 - `eventType`: Always "message_sent"
 - `requestId`: Request ID returned from the send operation
 - `messageHash`: Hash of the message that was sent
+- `anonymous`: `true` when the message went out over mix and is not deanonymized. An attempt to send it in the clear makes it `false`, also when the attempt sent nothing. At the `Preferred` anonymity level a message that mix cannot carry goes out in the clear, and this field says so
 
 ### 2. message_propagated
 Emitted when a message has been successfully propagated to neighboring nodes on the network.
@@ -31,7 +33,8 @@ Emitted when a message has been successfully propagated to neighboring nodes on 
 {
   "eventType": "message_propagated",
   "requestId": "unique-request-id",
-  "messageHash": "0x..."
+  "messageHash": "0x...",
+  "anonymous": false
 }
 ```
 
@@ -39,6 +42,7 @@ Emitted when a message has been successfully propagated to neighboring nodes on 
 - `eventType`: Always "message_propagated"
 - `requestId`: Request ID from the send operation
 - `messageHash`: Hash of the message that was propagated
+- `anonymous`: `true` when the message went out over mix and is not deanonymized. At the `Preferred` anonymity level a message that mix cannot carry goes out in the clear, and this field says so
 
 ### 3. message_error
 Emitted when a send fails: rejected, retry window elapsed, parked too long, ephemeral dropped near the rate limit, or store validation timed out.
@@ -114,7 +118,8 @@ Emitted when a send over mix ends with no confirmation in its window. The reques
 {
   "eventType": "message_unconfirmed",
   "requestId": "unique-request-id",
-  "messageHash": "0x..."
+  "messageHash": "0x...",
+  "anonymous": true
 }
 ```
 
@@ -122,6 +127,7 @@ Emitted when a send over mix ends with no confirmation in its window. The reques
 - `eventType`: Always "message_unconfirmed"
 - `requestId`: Request ID from the send operation
 - `messageHash`: Hash of the message that was sent
+- `anonymous`: `false` when the message is deanonymized
 
 ## Usage
 
