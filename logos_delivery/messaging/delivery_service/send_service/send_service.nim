@@ -365,7 +365,9 @@ proc endUnconfirmed(self: SendService, task: DeliveryTask) =
   ## window, with `MessageUnconfirmedEvent`, its last event.
   info "Message sent over mix with no confirmation", requestId = task.requestId
   recordMixUnconfirmed()
-  MessageUnconfirmedEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+  MessageUnconfirmedEvent.emit(
+    self.brokerCtx, task.requestId, task.msgHash.to0xHex(), task.isAnonymous()
+  )
   self.finish(task)
 
 proc failExpired(self: SendService, task: DeliveryTask): bool =
@@ -410,14 +412,18 @@ proc reportPropagated(self: SendService, task: DeliveryTask) =
   # anonymized message; `MixSendProcessor` still logs it at DEBUG.
   info "Message successfully propagated",
     requestId = task.requestId, msgHash = task.loggedHash()
-  MessagePropagatedEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+  MessagePropagatedEvent.emit(
+    self.brokerCtx, task.requestId, task.msgHash.to0xHex(), task.isAnonymous()
+  )
   task.propagatedEventEmitted = true
   if task.isAnonymous() and self.storeConfirmationExpected(task):
     # The exit's reply completes a mixed send when a plain send would wait for
     # a store confirmation, so both paths end with the same event. The INFO line
     # omits the hash.
     info "Message successfully sent over mix", requestId = task.requestId
-    MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+    MessageSentEvent.emit(
+      self.brokerCtx, task.requestId, task.msgHash.to0xHex(), task.isAnonymous()
+    )
 
 proc reportTaskQueued(self: SendService, task: DeliveryTask) =
   ## Emits `MessageQueuedEvent` once for a task that waits for epoch budget.
@@ -602,7 +608,9 @@ proc waitForStoreValidation(
       # An anonymized task gets here only when it is deanonymized.
       info "Message successfully sent",
         requestId = task.requestId, msgHash = task.loggedHash()
-      MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+      MessageSentEvent.emit(
+        self.brokerCtx, task.requestId, task.msgHash.to0xHex(), task.isAnonymous()
+      )
       self.finish(task)
     else:
       info "Message propagated but not validated by a store node within time window; stop trying.",

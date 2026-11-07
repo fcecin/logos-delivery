@@ -116,6 +116,11 @@ proc mixUnusable(self: MixSendProcessor, task: DeliveryTask): MixUnusable =
     return MixUnusable.NoExit
   return MixUnusable.None
 
+proc handToPlainPath(task: DeliveryTask) =
+  ## Hands a `Preferred` task to the plain path.
+  task.errorDesc = "" # the plain path reports its own outcome
+  task.state = DeliveryState.FallbackRetry
+
 proc decideWithoutMix(
     self: MixSendProcessor, task: DeliveryTask, unusable: MixUnusable
 ) =
@@ -143,8 +148,7 @@ proc decideWithoutMix(
     requestId = task.requestId,
     msgHash = task.msgHash.to0xHex(),
     reason = unusable.reason()
-  task.errorDesc = "" # the plain path reports its own outcome
-  task.state = DeliveryState.FallbackRetry
+  task.handToPlainPath()
 
 proc decideTooLarge(self: MixSendProcessor, task: DeliveryTask, size, limit: int) =
   ## Fails a `Required` task at once, because no later pass can make the message
@@ -159,8 +163,7 @@ proc decideTooLarge(self: MixSendProcessor, task: DeliveryTask, size, limit: int
     return
   debug "Message too large for mix, handing it to the plain send path",
     requestId = task.requestId, msgHash = task.msgHash.to0xHex(), size, limit
-  task.errorDesc = "" # the plain path reports its own outcome
-  task.state = DeliveryState.FallbackRetry
+  task.handToPlainPath()
 
 method checkBeforeAdmission*(
     self: MixSendProcessor, task: DeliveryTask
@@ -209,8 +212,7 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
       requestId = task.requestId,
       msgHash = task.msgHash.to0xHex(),
       admissionAge = task.admissionAge()
-    task.errorDesc = ""
-    task.state = DeliveryState.FallbackRetry
+    task.handToPlainPath()
     return
 
   # A refusal of a message that the network has confirms an earlier mix attempt.

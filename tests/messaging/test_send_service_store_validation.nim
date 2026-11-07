@@ -283,13 +283,56 @@ suite "SendService - mix completion":
     check await sent.waitCount(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
     check not await sent.waitCount(2).withTimeout(FUTURE_TIMEOUT_SHORT)
 
-  asyncTest "a send over mix after a plain attempt waits for a Store confirmation":
-    ## The plain attempt deanonymized the message, so the reply of the exit does
-    ## not end the send.
-    let sent = EventCounter()
-    let listener = countSent(sent)
+  proc sentAnonymous(processor: ScriptedProc): Future[seq[bool]] {.async.} =
+    ## The `anonymous` field of each `MessageSentEvent` of one mixed send.
+    var anonymous: seq[bool]
+    let listener = MessageSentEvent
+      .listen(
+        waku.brokerCtx,
+        proc(e: MessageSentEvent) {.async: (raises: []).} =
+          anonymous.add(e.anonymous),
+      )
+      .expect("listen")
     defer:
       await MessageSentEvent.dropListener(waku.brokerCtx, listener)
+    let manager =
+      RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
+    let service = SendService
+      .new(true, waku, manager, processor, AnonymityLevel.Preferred)
+      .expect("SendService.new") # reliability = on
+    check service.enqueue(newTask("sent-anonymous")).isOk()
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+    checkUntilTimeout:
+      anonymous.len == 1
+    return anonymous
+
+  asyncTest "the sent event of a send over mix only says anonymous":
+    check (await sentAnonymous(ScriptedProc(overMix: true))) == @[true]
+
+  asyncTest "a send over mix after a plain attempt waits for a Store confirmation":
+    ## The plain attempt deanonymized the message, so the reply of the exit does
+    ## not end the send, and no event says anonymous.
+    var propagated, sent: seq[bool]
+    let propagatedListener = MessagePropagatedEvent
+      .listen(
+        waku.brokerCtx,
+        proc(e: MessagePropagatedEvent) {.async: (raises: []).} =
+          propagated.add(e.anonymous),
+      )
+      .expect("listen")
+    defer:
+      await MessagePropagatedEvent.dropListener(waku.brokerCtx, propagatedListener)
+    let sentListener = MessageSentEvent
+      .listen(
+        waku.brokerCtx,
+        proc(e: MessageSentEvent) {.async: (raises: []).} =
+          sent.add(e.anonymous),
+      )
+      .expect("listen")
+    defer:
+      await MessageSentEvent.dropListener(waku.brokerCtx, sentListener)
     let mix = MixAfterPlainProc()
     mix.chain(PlainRetryProc())
     let manager =
@@ -314,14 +357,20 @@ suite "SendService - mix completion":
     checkUntilTimeout:
       task.state == DeliveryState.SuccessfullyPropagated
       not task.storeAnswer.isNil()
+    checkUntilTimeout:
+      propagated.len == 1
     check:
       mix.calls == 2
       task.deanonymized
       service.awaitsStoreValidation(task)
-    check not await sent.waitCount(1).withTimeout(FUTURE_TIMEOUT_SHORT)
+      propagated == @[false]
+      sent.len == 0
 
     task.storeAnswer.complete()
-    check await sent.waitCount(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
+
+    checkUntilTimeout:
+      sent.len == 1
+    check sent == @[false]
 
   asyncTest "reliability off: a mixed send ends the same as a plain one (no MessageSent)":
     ## With store reliability off, a plain and a mixed send both end at

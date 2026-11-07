@@ -2,7 +2,7 @@
 ##
 ## Label cardinality is bounded by construction: `recordReceived` takes the
 ## `MessageSource` enum rather than a string, so `source` can only ever be
-## `live` or `history`. Four receive series in total, plus the send counter.
+## `live` or `history`. Four receive series in total, plus the send counters.
 ##
 ## nim-metrics appends `_total` to each counter name on export.
 
@@ -15,6 +15,8 @@ declarePublicCounter logos_delivery_send_mix_unconfirmed,
   "mix sends that ended with no confirmation in their window"
 declarePublicCounter logos_delivery_send_store_validation_timeouts,
   "messages propagated but failed without store-node validation within the retry window"
+declarePublicCounter logos_delivery_send_mix_fallbacks,
+  "Preferred sends that the node deanonymized, because mix could not carry them or its window ended"
 declarePublicCounter logos_delivery_recv_messages,
   "messages delivered to the application, live from the network or history from Store",
   ["source"]
@@ -32,6 +34,9 @@ proc recordMixUnconfirmed*() =
 
 proc recordStoreValidationTimeout*() =
   logos_delivery_send_store_validation_timeouts.inc()
+
+proc recordMixFallback*() =
+  logos_delivery_send_mix_fallbacks.inc()
 
 proc recordReceived*(source: MessageSource, payloadBytes: int) =
   logos_delivery_recv_messages.inc(labelValues = [$source])

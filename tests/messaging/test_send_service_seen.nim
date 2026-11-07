@@ -78,6 +78,30 @@ method sendImpl(self: SlotTestProcessor, task: DeliveryTask): Future[void] {.asy
     if task.tryCount == 0: DeliveryState.NextRoundRetry else: DeliveryState.FallbackRetry
   task.tryCount.inc()
 
+type PlainThenMixProcessor = ref object of BaseSendProcessor
+  ## A mix processor that hands the first attempt to the plain path, as when mix
+  ## is not usable yet, and propagates the second over mix.
+  calls: int
+
+method isPlain(self: PlainThenMixProcessor): bool {.gcsafe.} =
+  return false
+
+method isValidProcessor(
+    self: PlainThenMixProcessor, task: DeliveryTask
+): bool {.gcsafe.} =
+  return true
+
+method sendImpl(
+    self: PlainThenMixProcessor, task: DeliveryTask
+): Future[void] {.async.} =
+  inc self.calls
+  if self.calls == 1:
+    task.state = DeliveryState.FallbackRetry
+    return
+  task.anonymized = true
+  task.state = DeliveryState.SuccessfullyPropagated
+  task.firstPropagatedTime = Opt.some(Moment.now())
+
 type HandoverProcessor = ref object of BaseSendProcessor
   ## A mix attempt that hands the task to the plain path at once.
 
@@ -174,12 +198,12 @@ suite "SendService - a message seen on the network":
     let service = newService(mix)
     defer:
       await service.stopSendService()
-    var propagated = 0
+    var anonymous: seq[bool]
     let listener = MessagePropagatedEvent
       .listen(
         waku.brokerCtx,
         proc(event: MessagePropagatedEvent) {.async: (raises: []).} =
-          propagated.inc(),
+          anonymous.add(event.anonymous),
       )
       .expect("listen")
     defer:
@@ -196,7 +220,8 @@ suite "SendService - a message seen on the network":
     check:
       task.firstPropagatedTime.isSome()
     checkUntilTimeout:
-      propagated == 1
+      anonymous.len == 1
+    check anonymous == @[true]
 
   asyncTest "a message seen during an attempt ends the attempt at once":
     ## The attempt waits for the reply of the exit. The copy from the network
@@ -295,6 +320,35 @@ suite "SendService - a message seen on the network":
     check:
       plain.calls == 0
       not task.deanonymized
+
+  asyncTest "a send that is deanonymized before its mix attempt is not anonymous":
+    ## An attempt of a plain send deanonymized the task, so the events must not
+    ## say anonymous.
+    let mix = PlainThenMixProcessor()
+    let plain = PlainRetryProcessor()
+    mix.chain(plain)
+    let service = newService(mix)
+    defer:
+      await service.stopSendService()
+    var anonymous: seq[bool]
+    let listener = MessagePropagatedEvent
+      .listen(
+        waku.brokerCtx,
+        proc(event: MessagePropagatedEvent) {.async: (raises: []).} =
+          anonymous.add(event.anonymous),
+      )
+      .expect("listen")
+    defer:
+      await MessagePropagatedEvent.dropListener(waku.brokerCtx, listener)
+    let task = buildTask("plain-then-mix")
+
+    check service.enqueue(task).isOk()
+
+    checkUntilTimeout:
+      anonymous.len == 1
+    check:
+      plain.calls == 1
+      anonymous == @[false]
 
   asyncTest "a stopped service does not read the network, and a restart reads it again":
     let mix = LostReplyProcessor()

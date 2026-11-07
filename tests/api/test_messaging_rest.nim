@@ -135,19 +135,21 @@ suite "Messaging REST API":
     let reqB = RequestId("req-B")
     let reqC = RequestId("req-C")
 
-    # reqA sees the full lifecycle; reqB only an error.
+    # reqA sees the full lifecycle over mix; reqB only an error.
     MessagePropagatedEvent.emit(
-      brokerCtx, MessagePropagatedEvent(requestId: reqA, messageHash: "0xaa")
+      brokerCtx,
+      MessagePropagatedEvent(requestId: reqA, messageHash: "0xaa", anonymous: true),
     )
     MessageSentEvent.emit(
-      brokerCtx, MessageSentEvent(requestId: reqA, messageHash: "0xaa")
+      brokerCtx, MessageSentEvent(requestId: reqA, messageHash: "0xaa", anonymous: true)
     )
     MessageErrorEvent.emit(
       brokerCtx, MessageErrorEvent(requestId: reqB, messageHash: "0xbb", error: "boom")
     )
     # reqC went out over mix and got no confirmation.
     MessageUnconfirmedEvent.emit(
-      brokerCtx, MessageUnconfirmedEvent(requestId: reqC, messageHash: "0xcc")
+      brokerCtx,
+      MessageUnconfirmedEvent(requestId: reqC, messageHash: "0xcc", anonymous: true),
     )
     await sleepAsync(settleDelay)
 
@@ -157,8 +159,8 @@ suite "Messaging REST API":
       byIdResp.status == 200
       byIdResp.data.requestId == $reqA
       byIdResp.data.events.len == 2
-      byIdResp.data.events.anyIt(it.kind == SendEventKind.Sent)
-      byIdResp.data.events.anyIt(it.kind == SendEventKind.Propagated)
+      byIdResp.data.events.anyIt(it.kind == SendEventKind.Propagated and it.anonymous)
+      byIdResp.data.events.anyIt(it.kind == SendEventKind.Sent and it.anonymous)
 
     # Unknown / already-polled id → 404 (raw string client so the text error
     # body decodes; the typed client would raise on a non-2xx body).
@@ -179,6 +181,7 @@ suite "Messaging REST API":
       allResp.data[1].requestId == $reqC
       allResp.data[1].events.len == 1
       allResp.data[1].events[0].kind == SendEventKind.Unconfirmed
+      allResp.data[1].events[0].anonymous
 
     let emptyResp = await client.messagingGetSendEventsV1()
     check:
