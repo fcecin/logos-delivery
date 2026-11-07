@@ -69,6 +69,9 @@ proc new*(
     mixWindow: mixWindow,
   )
 
+method isPlain*(self: MixSendProcessor): bool {.gcsafe.} =
+  return false
+
 method isValidProcessor*(self: MixSendProcessor, task: DeliveryTask): bool {.gcsafe.} =
   return true
 
@@ -179,6 +182,9 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
     task.state = DeliveryState.FallbackRetry
     return
 
+  # A refusal of a message that the network has confirms an earlier mix attempt.
+  let mixTriedBefore = task.isAnonymous()
+
   # Mark before the attempt: the exit publishes before it replies, so a message
   # whose reply is lost is still on the network. From here on, the send service
   # logs no hash for this task at INFO or ERROR.
@@ -194,6 +200,17 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
   let numLightpushServers = (
     await self.waku.lightpushPublishToAny(task.pubsubTopic, task.msg, mixify = true)
   ).valueOr:
+    if mixTriedBefore and error.code == LightPushErrorCode.INVALID_MESSAGE and
+        error.desc.get("") == AlreadySeenMessageDesc:
+      # The relay of the exit has the message. An earlier mix attempt delivered
+      # it, and its answer was lost.
+      debug "Message already on the network, the mix send is complete",
+        requestId = task.requestId, msgHash = task.msgHash.to0xHex()
+      task.state = DeliveryState.SuccessfullyPropagated
+      if task.firstPropagatedTime.isNone():
+        task.firstPropagatedTime = Opt.some(Moment.now())
+      return
+
     debug "MixSendProcessor.sendImpl failed", error = error.desc.get($error.code)
 
     if error.isRlnRejection():
@@ -214,7 +231,6 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
     debug "Message propagated via Mix",
       requestId = task.requestId, msgHash = task.msgHash.to0xHex()
     task.state = DeliveryState.SuccessfullyPropagated
-    task.propagatedAnonymously = true
     if task.firstPropagatedTime.isNone():
       task.firstPropagatedTime = Opt.some(Moment.now())
   else:

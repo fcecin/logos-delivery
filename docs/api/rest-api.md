@@ -71,19 +71,19 @@ A send is asynchronous. `200` means that the node accepted the message. The resu
 
 * `queued`: the send waits for rate-limit budget (only when rate limiting is on)
 * `propagated`: the message reached at least one peer
-* `sent`: a Store peer confirmed that it holds the message, or, for a send over mix, the mix exit replied
+* `sent`: a Store peer confirmed that it holds the message, or, for a send over mix, the mix exit replied. A deanonymized message, which the node attempted to send in the clear, waits for a Store peer
 * `error`: the send failed (rejected message, no peer within the retry window, no Store confirmation within about 60 s of propagation, ...)
 
 After a `sent` or `error` event, no more events come for that message.
 
-* The `sent` event needs reliability. A send without mix also needs a Store peer.
+* The `sent` event needs reliability. A send in the clear, or a deanonymized send over mix, also needs a Store peer.
 * A message sent with `"ephemeral": true` gets no `sent` event, because Store nodes do not keep ephemeral messages.
 * Reliability is on by default, and off for the `twn` and `status.prod` presets. `--reliability` overrides that.
 * Without reliability, or for an ephemeral message, `propagated` is the last event.
 * Later versions can add new event types. A client must skip an event type that it does not know.
 * `GET /messaging/v1/events/send/{requestId}` answers `404` while the node has no event for that request: the request id is unknown, a client already read its events, or no event came yet. Call it again until the last event comes.
 
-The receivers can have the message after an `error` event. While a message waits for its `sent` event, the node sends it again, up to 3 times, each time a Store peer does not report it.
+The receivers can have the message after an `error` event. While a message waits for its `sent` event, the node sends it again in the clear, up to 3 times, each time a Store peer does not report it. A deanonymized message can be sent again in the clear also when it went out over mix.
 
 * Each received message comes as a JSON object with:
   * the message hash
