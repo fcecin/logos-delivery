@@ -70,6 +70,10 @@ proc messageForSizeCheck*(
 ): Result[WakuMessage, RlnError] =
   return self.node.rlnPlugin.messageForSizeCheck(message)
 
+func maxMessageSizeBytes*(self: Waku): uint64 =
+  ## The largest encoded message that this node publishes (`--max-msg-size`).
+  return self.conf.maxMessageSizeBytes
+
 func isRlnRejection*(error: ErrorStatus): bool =
   ## True when a publish failure means "the RLN proof was not accepted", so the
   ## message is worth retrying with a freshly generated proof rather than being

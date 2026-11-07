@@ -41,7 +41,7 @@ Emitted when a message has been successfully propagated to neighboring nodes on 
 - `messageHash`: Hash of the message that was propagated
 
 ### 3. message_error
-Emitted when a send fails: rejected, retry window elapsed, parked too long, ephemeral dropped near the rate limit, or store validation timed out.
+Emitted when a send fails: rejected, too large, retry window elapsed, parked too long, ephemeral dropped near the rate limit, or store validation timed out. A message whose encoded size, with its RLN proof, is above the `MaxMessageSize` item of `logosdelivery_ctx_get_node_info` fails at its first attempt, before it spends rate-limit budget or an RLN message id. The limit is the one of this node, also for a send through a lightpush service.
 
 **JSON Structure:**
 ```json

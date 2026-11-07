@@ -57,6 +57,10 @@ const MaxSendsInFlight* = 50
   ## The number of sends that run at the same time. It bounds the open streams
   ## of this node independent of `sendQueueCapacity`.
 
+const MessageTooLargeReason* = "message too large"
+  ## The error of a task whose message is above `maxMessageSizeBytes`. The node
+  ## info item `MaxMessageSize` gives the limit.
+
 type SendService* = ref object of RootObj
   brokerCtx: BrokerContext
   deliveryTasks: OrderedTable[WakuMessageHash, DeliveryTask]
@@ -410,11 +414,37 @@ proc reportTaskQueued(self: SendService, task: DeliveryTask) =
   MessageQueuedEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
   task.queuedEventEmitted = true
 
+proc failIfTooLarge(self: SendService, task: DeliveryTask): bool =
+  ## Fails a task whose message, with the RLN proof that the send path attaches,
+  ## is larger than `maxMessageSizeBytes`. Returns true when it fails the task.
+  ## A backend with no valid proof size gets a check of the message without its
+  ## proof.
+  if task.sizeChecked:
+    return false
+  let message = self.waku.messageForSizeCheck(task.msg).valueOr:
+    debug "No proof size, checking the size of the message without its proof",
+      requestId = task.requestId, msgHash = task.msgHash.to0xHex(), error = $error
+    task.msg
+  let size = message.encode().len
+  let limit = self.waku.maxMessageSizeBytes()
+  if uint64(size) <= limit:
+    task.sizeChecked = true
+    return false
+  debug "Message too large, failing the task",
+    requestId = task.requestId, msgHash = task.msgHash.to0xHex(), size, limit
+  task.state = DeliveryState.FailedToDeliver
+  task.errorDesc = MessageTooLargeReason & ": the message has " & $size & " bytes"
+  return true
+
 proc admitAndProve(self: SendService, task: DeliveryTask): Future[bool] {.async.} =
-  ## Charges the epoch budget, then attaches the RLN proof, so a message over the
-  ## budget reserves no RLN message id. It charges a task once for each proof. Returns false
-  ## when the task waits for its next attempt or failed.
+  ## Checks the size of the message, then charges the epoch budget, then attaches
+  ## the RLN proof, so a message over the budget reserves no RLN message id. It
+  ## charges a task once for each proof. Returns false when the task waits for its
+  ## next attempt or failed.
   if not self.sendProcessor.checkBeforeAdmission(task):
+    return false
+  # A task that is too large fails here, before it spends budget or a message id.
+  if self.failIfTooLarge(task):
     return false
 
   if task.firstAdmittedTime.isNone():
