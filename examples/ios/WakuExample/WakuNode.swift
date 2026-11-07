@@ -364,7 +364,7 @@ actor WakuActor {
 
         // Register per-event listeners
         let eventNames = [
-            "onMessageSent", "onMessageError", "onMessagePropagated",
+            "onMessageSent", "onMessageError", "onMessageUnconfirmed", "onMessagePropagated",
             "onMessageReceived", "onConnectionStatusChange", "onTopicHealthChange",
             "onConnectionChange", "onReceivedMessage", "onChannelMessageReceived",
             "onChannelMessageSent", "onChannelMessageError",

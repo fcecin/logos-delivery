@@ -35,6 +35,7 @@ proc sendPushRequest(
     req: LightPushRequest,
     peer: PeerId | RemotePeerInfo,
     conn: Opt[Connection] = Opt.none(Connection),
+    requestLeft: Future[void] = nil,
 ): Future[WakuLightPushResult] {.async.} =
   let connection = conn.valueOr:
     (await wl.peerManager.dialPeer(peer, WakuLightPushCodec)).valueOr:
@@ -47,7 +48,16 @@ proc sendPushRequest(
   defer:
     await connection.closeWithEOF()
 
-  await connection.writeLP(req.encode())
+  try:
+    await connection.writeLP(req.encode())
+  except CancelledError as exc:
+    # The muxer can send the bytes after the cancel of the write, so the request
+    # counts as one that left.
+    if not requestLeft.isNil() and not requestLeft.finished():
+      requestLeft.complete()
+    raise exc
+  if not requestLeft.isNil() and not requestLeft.finished():
+    requestLeft.complete()
 
   var buffer: seq[byte]
   try:
@@ -83,6 +93,7 @@ proc publish*(
     pubSubTopic: Opt[PubsubTopic] = Opt.none(PubsubTopic),
     wakuMessage: WakuMessage,
     dest: Connection | PeerId | RemotePeerInfo,
+    requestLeft: Future[void] = nil,
 ): Future[WakuLightPushResult] {.async, gcsafe.} =
   let message = ensureTimestampSet(wakuMessage)
 
@@ -106,9 +117,9 @@ proc publish*(
 
   let relayPeerCount =
     when dest is Connection:
-      ?await wl.sendPushRequest(request, dest.peerId, Opt.some(dest))
+      ?await wl.sendPushRequest(request, dest.peerId, Opt.some(dest), requestLeft)
     else:
-      ?await wl.sendPushRequest(request, dest)
+      ?await wl.sendPushRequest(request, dest, requestLeft = requestLeft)
 
   return lightpushSuccessResult(relayPeerCount)
 

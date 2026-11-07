@@ -360,9 +360,22 @@ proc fail(self: SendService, task: DeliveryTask, errorDesc: string) =
   )
   self.finish(task)
 
+proc endUnconfirmed(self: SendService, task: DeliveryTask) =
+  ## Ends a task whose mix request left this node, with no confirmation in its
+  ## window, with `MessageUnconfirmedEvent`, its last event.
+  info "Message sent over mix with no confirmation", requestId = task.requestId
+  recordMixUnconfirmed()
+  MessageUnconfirmedEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+  self.finish(task)
+
 proc failExpired(self: SendService, task: DeliveryTask): bool =
-  ## Fails the task when its delivery window or its parked age ended.
-  if task.isDeliveryTimedOut(self.maxDeliveryTime):
+  ## Fails the task when its delivery window or its parked age ended. A task
+  ## with an unanswered mix request ends as unconfirmed instead.
+  let timedOut = task.isDeliveryTimedOut(self.maxDeliveryTime)
+  if task.mixUnanswered and (timedOut or task.isParkedExpired(self.maxParkedAge)):
+    self.endUnconfirmed(task)
+    return true
+  if timedOut:
     # A processor that leaves a task for a retry can write why in `errorDesc`,
     # as the mix processor does for a `Required` task that mix cannot attempt yet.
     # Report that reason if set.
@@ -513,6 +526,13 @@ proc sendUntilPropagated(
     if task.completeIfSeen():
       self.reportPropagated(task)
       return true
+    if task.state == DeliveryState.SuccessfullyPropagated:
+      # An attempt that a stop cut after its confirmation came.
+      self.reportPropagated(task)
+      return true
+    if task.mixUnanswered and self.failExpired(task):
+      # No resend after the end of the window.
+      return false
     if not self.needsAdmission(task) or await self.runAdmission(task):
       await self.sendSlots.acquire()
       # A copy can arrive during the admission or the wait for a slot, and the
@@ -550,7 +570,11 @@ proc sendUntilPropagated(
       self.reportPropagated(task)
       return true
     of DeliveryState.FailedToDeliver:
-      # A mix exit may have published the message even though its reply was lost.
+      if task.mixUnanswered:
+        # An earlier request can have delivered the message, as when the RLN
+        # proof of a resend cannot be made again.
+        self.endUnconfirmed(task)
+        return false
       error "Failed to send message",
         requestId = task.requestId, msgHash = task.loggedHash(), error = task.errorDesc
       self.fail(task, task.errorDesc)

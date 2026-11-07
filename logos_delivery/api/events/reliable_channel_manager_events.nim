@@ -12,7 +12,8 @@ EventBroker:
 
 EventBroker:
   ## Emitted when every segment of a channel-level `send()` reached
-  ## `Confirmed`. Channel-level analogue of `MessageSentEvent`; the
+  ## `Confirmed`, or went out over mix with no confirmation. Channel-level
+  ## analogue of `MessageSentEvent`; the
   ## `requestId` is the channel-layer parent returned by `send()`.
   type ChannelMessageSentEvent* = object
     channelId*: ChannelId

@@ -344,6 +344,7 @@ void Java_com_mobile_WakuModule_wakuSetEventCallback(JNIEnv *env, jobject thiz,
   c->env = env;
   static const char *kEventNames[] = {
       "onMessageSent",            "onMessageError",
+      "onMessageUnconfirmed",
       "onMessagePropagated",      "onMessageReceived",
       "onConnectionStatusChange", "onTopicHealthChange",
       "onConnectionChange",       "onReceivedMessage",

@@ -43,6 +43,9 @@ const MixReplyTimeout* = chronos.seconds(5)
   ## Time limit for one mix-routed lightpush, so a broken path costs one
   ## attempt.
 
+const MixTimedOutDesc* = "Waku lightpush over mix timed out"
+  ## The result of a mix publish with no answer within `replyTimeout`.
+
 const MixLightpushSurbs* = 1'u8
   ## The number of SURBs in a lightpush request over mix. One SURB, so the reply
   ## uses one path.
@@ -72,28 +75,30 @@ proc publishOverMix*(
     pubsubTopic: PubsubTopic,
     message: WakuMessage,
     replyTimeout: Duration = MixReplyTimeout,
+    requestLeft: Future[void] = nil,
 ): Future[lightpush_protocol.WakuLightPushResult] {.async.} =
   ## Publishes on a mix connection and returns within `replyTimeout`. The mix
   ## connection limits its wait for the reply, but not the first-hop dial.
+  ## `requestLeft` completes when the request is written to the first hop.
   let publishFut =
-    node.wakuLightpushClient.publish(Opt.some(pubsubTopic), message, conn)
+    node.wakuLightpushClient.publish(Opt.some(pubsubTopic), message, conn, requestLeft)
   let deadline = sleepAsync(replyTimeout)
   try:
     discard await race(FutureBase(publishFut), FutureBase(deadline))
   except CancelledError as exc:
-    # `race` does not cancel the futures that it waits for.
-    publishFut.cancelSoon()
+    # `race` does not cancel the futures that it waits for. The wait for the
+    # publish to end settles `requestLeft` before the caller reads it.
     deadline.cancelSoon()
     await noCancel conn.reset()
+    await noCancel publishFut.cancelAndWait()
     raise exc
 
   if not publishFut.finished():
     await conn.reset()
-    publishFut.cancelSoon()
+    await publishFut.cancelAndWait()
     debug "Mix lightpush timed out", pubsubTopic = pubsubTopic, timeout = replyTimeout
-    return lighpushErrorResult(
-      LightPushErrorCode.SERVICE_NOT_AVAILABLE, "Waku lightpush over mix timed out"
-    )
+    return
+      lighpushErrorResult(LightPushErrorCode.SERVICE_NOT_AVAILABLE, MixTimedOutDesc)
 
   await deadline.cancelAndWait()
   return await publishFut
@@ -279,6 +284,7 @@ proc lightpushPublishHandler(
     message: WakuMessage,
     peer: RemotePeerInfo | PeerInfo,
     mixify: bool = false,
+    requestLeft: Future[void] = nil,
 ): Future[lightpush_protocol.WakuLightPushResult] {.async.} =
   let msgHash = pubsubTopic.computeMessageHash(message).to0xHex()
   # The client is always mounted alongside the service, and it cannot dial
@@ -309,7 +315,9 @@ proc lightpushPublishHandler(
             "Waku lightpush with mix not available",
           )
 
-        return await node.publishOverMix(conn, pubsubTopic, message)
+        return await node.publishOverMix(
+          conn, pubsubTopic, message, requestLeft = requestLeft
+        )
       else:
         # Fail the build here, not every mixed send at runtime
         {.error: "mix sends need -d:libp2p_mix_experimental_exit_is_dest".}
@@ -339,7 +347,9 @@ proc lightpushPublish*(
     message: WakuMessage,
     peerOpt: Opt[RemotePeerInfo] = Opt.none(RemotePeerInfo),
     mixify: bool = false,
+    requestLeft: Future[void] = nil,
 ): Future[lightpush_protocol.WakuLightPushResult] {.async.} =
+  ## `requestLeft` completes when a mix request is written to the first hop.
   if node.wakuLightpushClient.isNil() and node.wakuLightPush.isNil():
     debug "Failed to publish message as lightpush not available"
     return lighpushErrorResult(
@@ -410,8 +420,9 @@ proc lightpushPublish*(
         LightPushErrorCode.OUT_OF_RLN_PROOF
     return lighpushErrorResult(code, "failed to attach RLN proof: " & $error)
 
-  let firstResult =
-    await lightpushPublishHandler(node, pubsubForPublish, msgWithProof, toPeer, mixify)
+  let firstResult = await lightpushPublishHandler(
+    node, pubsubForPublish, msgWithProof, toPeer, mixify, requestLeft
+  )
 
   # Gate the refresh on unambiguously RLN-related failures: 504
   # (OUT_OF_RLN_PROOF) is always RLN; 420 (INVALID_MESSAGE) also covers non-RLN

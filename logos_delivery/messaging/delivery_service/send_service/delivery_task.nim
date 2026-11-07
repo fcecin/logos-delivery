@@ -50,6 +50,16 @@ type DeliveryTask* = ref object
     ## attempted, whatever the attempt does. From then on a copy of the message
     ## from the network does not complete the task as a mix send. See
     ## `isAnonymous`.
+  mixUnanswered*: bool
+    ## Set when a mix request of the task left this node and no answer came. The
+    ## message can be on the network, so the task stays on mix, and it ends with
+    ## `MessageUnconfirmedEvent`, never with `MessageErrorEvent`.
+  mixResends*: int
+    ## How many mix requests of the task left this node after the first one that
+    ## got no answer.
+  lastMixRequestTime*: Opt[Moment]
+    ## When the last mix attempt of the task whose request left this node ended.
+    ## A resend comes `MixResendInterval` after it.
   seenWaiter*: Future[void]
     ## Completed by `markSeen` while an attempt runs, so that an attempt that
     ## waits for the reply of the exit ends at once. Nil between attempts.

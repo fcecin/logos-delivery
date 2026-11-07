@@ -11,6 +11,8 @@
 import metrics
 import logos_delivery/api/types
 
+declarePublicCounter logos_delivery_send_mix_unconfirmed,
+  "mix sends that ended with no confirmation in their window"
 declarePublicCounter logos_delivery_send_store_validation_timeouts,
   "messages propagated but failed without store-node validation within the retry window"
 declarePublicCounter logos_delivery_recv_messages,
@@ -24,6 +26,9 @@ declarePublicCounter logos_delivery_recv_message_bytes,
 for source in MessageSource:
   logos_delivery_recv_messages.inc(0, labelValues = [$source])
   logos_delivery_recv_message_bytes.inc(0, labelValues = [$source])
+
+proc recordMixUnconfirmed*() =
+  logos_delivery_send_mix_unconfirmed.inc()
 
 proc recordStoreValidationTimeout*() =
   logos_delivery_send_store_validation_timeouts.inc()

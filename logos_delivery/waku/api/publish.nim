@@ -154,12 +154,17 @@ proc mixLightpushSize*(
   return lightpush.mixLightpushSize(shard, message)
 
 proc lightpushPublishToAny*(
-    self: Waku, shard: PubsubTopic, message: WakuMessage, mixify: bool = false
+    self: Waku,
+    shard: PubsubTopic,
+    message: WakuMessage,
+    mixify: bool = false,
+    requestLeft: Future[void] = nil,
 ): Future[WakuLightPushResult] {.async.} =
   ## Selects a lightpush service peer for `shard` and publishes `message`
   ## through the node's lightpush flow. With RLN mounted the flow proves
   ## `message` only if it carries no proof, so an already-proven task reuses its
   ## nonce. Returns SERVICE_NOT_AVAILABLE when no peer is available.
+  ## `requestLeft` completes when a mix request is written to the first hop.
   let peerOpt =
     if mixify:
       self.selectMixLightpushPeer(shard)
@@ -172,8 +177,9 @@ proc lightpushPublishToAny*(
       )
     return lightpushResultServiceUnavailable("no lightpush peer available for shard")
   try:
-    return
-      await self.node.lightpushPublish(Opt.some(shard), message, Opt.some(peer), mixify)
+    return await self.node.lightpushPublish(
+      Opt.some(shard), message, Opt.some(peer), mixify, requestLeft
+    )
   except CancelledError as exc:
     # The send service cancelled this attempt during its stop. Raise the cancel
     # again, so that `deliver` ends with the cancel and counts no failed attempt.
