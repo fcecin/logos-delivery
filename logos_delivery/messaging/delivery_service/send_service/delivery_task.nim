@@ -37,6 +37,9 @@ type DeliveryTask* = ref object
   queuedEventEmitted*: bool
     ## Set once the task has reported itself queued for rate-limit budget, so
     ## the event fires on the first park only and not on every retry.
+  sizeChecked*: bool
+    ## Set when the message of the task passes the size check of the send
+    ## service. The size of the message does not change, so the check runs once.
   anonymized*: bool
     ## Set at the first anonymous send attempt and never cleared; from then on,
     ## the INFO and ERROR records of this task withhold the hash.

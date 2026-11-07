@@ -78,6 +78,7 @@ After a `sent` or `error` event, no more events come for that message.
 
 * The `sent` event needs reliability. A send without mix also needs a Store peer.
 * A message sent with `"ephemeral": true` gets no `sent` event, because Store nodes do not keep ephemeral messages.
+* A message whose encoded size, with its RLN proof, is above the max message size of the node (`--max-msg-size`, or the value of the preset) gets an `error` event at its first attempt, and spends no rate-limit budget. The limit is the one of this node, also for a send through a lightpush service.
 * Reliability is on by default, and off for the `twn` and `status.prod` presets. `--reliability` overrides that.
 * Without reliability, or for an ephemeral message, `propagated` is the last event.
 * Later versions can add new event types. A client must skip an event type that it does not know.
