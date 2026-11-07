@@ -325,7 +325,7 @@ int main(int argc, char **argv)
     auto onEvent = cify([&](const char *msg, size_t len)
                         { event_handler(msg, len); });
     for (const char *eventName :
-         {"onMessageSent", "onMessageError", "onMessagePropagated",
+         {"onMessageSent", "onMessageError", "onMessageUnconfirmed", "onMessagePropagated",
           "onMessageReceived", "onConnectionStatusChange", "onTopicHealthChange",
           "onConnectionChange", "onReceivedMessage", "onChannelMessageReceived",
           "onChannelMessageSent", "onChannelMessageError"})

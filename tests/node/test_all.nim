@@ -8,6 +8,7 @@ import
   ./test_wakunode_mix_e2e,
   ./test_wakunode_mix_seen,
   ./test_wakunode_mix_size,
+  ./test_wakunode_mix_unconfirmed,
   ./test_wakunode_peer_exchange,
   ./test_wakunode_store,
   ./test_wakunode_store_sync,

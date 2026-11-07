@@ -244,6 +244,7 @@ int main() {
     logosdelivery_add_event_listener(ctx->ptr, "onMessageSent", event_callback, NULL);
     logosdelivery_add_event_listener(ctx->ptr, "onMessagePropagated", event_callback, NULL);
     logosdelivery_add_event_listener(ctx->ptr, "onMessageError", event_callback, NULL);
+    logosdelivery_add_event_listener(ctx->ptr, "onMessageUnconfirmed", event_callback, NULL);
     logosdelivery_add_event_listener(ctx->ptr, "onChannelMessageReceived", event_callback, NULL);
     logosdelivery_add_event_listener(ctx->ptr, "onChannelMessageSent", event_callback, NULL);
     logosdelivery_add_event_listener(ctx->ptr, "onChannelMessageError", event_callback, NULL);

@@ -35,6 +35,15 @@ proc registerFFIEventListeners(self: LogosDelivery): Result[void, string] =
     chronicles.error "MessageSentEvent.listen failed", err = $error
     return err("MessageSentEvent.listen failed: " & $error)
 
+  MessageUnconfirmedEvent.listen(
+    self.waku.brokerCtx,
+    proc(event: MessageUnconfirmedEvent) {.async: (raises: []).} =
+      emitEvent("onMessageUnconfirmed"):
+        $newJsonEvent("message_unconfirmed", event),
+  ).isOkOr:
+    chronicles.error "MessageUnconfirmedEvent.listen failed", err = $error
+    return err("MessageUnconfirmedEvent.listen failed: " & $error)
+
   MessageErrorEvent.listen(
     self.waku.brokerCtx,
     proc(event: MessageErrorEvent) {.async: (raises: []).} =

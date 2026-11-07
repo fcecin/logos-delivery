@@ -304,6 +304,7 @@ static napi_value WakuSetEventCallback(napi_env env, napi_callback_info info) {
   // if there is a proper napi_function (ref_event_callback) being set.
   static const char *kEventNames[] = {
       "onMessageSent",            "onMessageError",
+      "onMessageUnconfirmed",
       "onMessagePropagated",      "onMessageReceived",
       "onConnectionStatusChange", "onTopicHealthChange",
       "onConnectionChange",       "onReceivedMessage",

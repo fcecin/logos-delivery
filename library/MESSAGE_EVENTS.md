@@ -2,12 +2,12 @@
 
 ## Overview
 
-The liblogosdelivery library emits four types of message delivery events and one message receipt event that clients can listen to by registering a per-event callback with `logosdelivery_add_event_listener()`. The events are delivered under the wire names `onMessageQueued`, `onMessageSent`, `onMessagePropagated`, `onMessageError` and `onMessageReceived` (the JSON `eventType` inside each payload is `message_queued` / `message_sent` / `message_propagated` / `message_error` / `message_received`).
+The liblogosdelivery library emits five types of message delivery events and one message receipt event that clients can listen to by registering a per-event callback with `logosdelivery_add_event_listener()`. The events are delivered under the wire names `onMessageQueued`, `onMessageSent`, `onMessageUnconfirmed`, `onMessagePropagated`, `onMessageError` and `onMessageReceived` (the JSON `eventType` inside each payload is `message_queued` / `message_sent` / `message_unconfirmed` / `message_propagated` / `message_error` / `message_received`).
 
 ## Event Types
 
 ### 1. message_sent
-Emitted when the node confirms the delivery of a message that is not ephemeral, with the `reliability` option on. For a normal send, a store node confirms the delivery. For a send over mix, the reply of the mix exit confirms it. A message is deanonymized from the moment that the node attempts to send it in the clear, and a store node confirms a deanonymized message as for a normal send. For an ephemeral message, or with the `reliability` option off, `message_sent` does not come, and a successful send ends at `message_propagated`.
+Emitted when the node confirms the delivery of a message that is not ephemeral, with the `reliability` option on. For a normal send, a store node confirms the delivery. For a send over mix, the answer of the mix exit confirms it, or a copy of the message that this node receives from the network. A message is deanonymized from the moment that the node attempts to send it in the clear, and a store node confirms a deanonymized message as for a normal send. For an ephemeral message, or with the `reliability` option off, `message_sent` does not come, and a successful send ends at `message_propagated`.
 
 **JSON Structure:**
 ```json
@@ -105,6 +105,24 @@ Emitted once for every message accepted on a subscribed content topic, whether i
 
 Duplicate suppression is best effort. The node remembers the hashes it has delivered for a few minutes, in memory only, so a live message that a Store check returns within that window is not reported again. After a restart, or when a Store recovery returns a message later than that, the same message can be reported a second time as `history`. Consumers that need exactly-once delivery should deduplicate by `messageHash`.
 
+
+### 6. message_unconfirmed
+Emitted when a send over mix ends with no confirmation in its window. The request left this node, and the message can be on the network. The node sent it again over mix, up to three times, and does not send it again. Like `message_sent` and `message_error`, it is the last event of the send. It comes also with the `reliability` option off and for an ephemeral message. A send over mix gets `message_propagated` only with its confirmation, so an unconfirmed send gets no `message_propagated`.
+
+**JSON Structure:**
+```json
+{
+  "eventType": "message_unconfirmed",
+  "requestId": "unique-request-id",
+  "messageHash": "0x..."
+}
+```
+
+**Fields:**
+- `eventType`: Always "message_unconfirmed"
+- `requestId`: Request ID from the send operation
+- `messageHash`: Hash of the message that was sent
+
 ## Usage
 
 ### 1. Define an Event Callback
@@ -127,6 +145,8 @@ void event_callback(int ret, const char *msg, size_t len, void *userData) {
         // Handle message propagated
     } else if (eventType == "message_error") {
         // Handle message error
+    } else if (eventType == "message_unconfirmed") {
+        // Handle a send over mix that ended with no confirmation
     } else if (eventType == "message_received") {
         // Handle message received; check "source" for "live" or "history"
     }
@@ -148,6 +168,7 @@ logosdelivery_add_event_listener(rawCtx, "onMessageQueued", event_callback, NULL
 logosdelivery_add_event_listener(rawCtx, "onMessageSent", event_callback, NULL);
 logosdelivery_add_event_listener(rawCtx, "onMessagePropagated", event_callback, NULL);
 logosdelivery_add_event_listener(rawCtx, "onMessageError", event_callback, NULL);
+logosdelivery_add_event_listener(rawCtx, "onMessageUnconfirmed", event_callback, NULL);
 logosdelivery_add_event_listener(rawCtx, "onMessageReceived", event_callback, NULL);
 ```
 
@@ -165,7 +186,12 @@ For a typical successful message send:
 
 1. **send** → Returns request ID
 2. **message_propagated** → Message delivered to peers
-3. **message_sent** → A store node or the mix exit confirms the message (only with the `reliability` option on)
+3. **message_sent** → A store node or the mix exit confirms the message, or this node receives a copy of a message that it sent over mix (only with the `reliability` option on)
+
+For a send over mix that gets no confirmation:
+
+1. **send** → Returns request ID
+2. **message_unconfirmed** → The request left this node, and no confirmation came in the window
 
 For a failed message send:
 

@@ -174,7 +174,7 @@ package main
 		// This technique is needed because cgo only allows to export Go functions and not methods.
 
 		static const char* eventNames[] = {
-			"onMessageSent", "onMessageError", "onMessagePropagated",
+			"onMessageSent", "onMessageError", "onMessageUnconfirmed", "onMessagePropagated",
 			"onMessageReceived", "onConnectionStatusChange", "onTopicHealthChange",
 			"onConnectionChange", "onReceivedMessage", "onChannelMessageReceived",
 			"onChannelMessageSent", "onChannelMessageError"};

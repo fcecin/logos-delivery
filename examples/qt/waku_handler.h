@@ -36,7 +36,7 @@ public:
         ctx = logosdelivery_create_node(&createReq, onCreated, userData);
 
         for (const char *eventName :
-             {"onMessageSent", "onMessageError", "onMessagePropagated",
+             {"onMessageSent", "onMessageError", "onMessageUnconfirmed", "onMessagePropagated",
               "onMessageReceived", "onConnectionStatusChange", "onTopicHealthChange",
               "onConnectionChange", "onReceivedMessage", "onChannelMessageReceived",
               "onChannelMessageSent", "onChannelMessageError"}) {

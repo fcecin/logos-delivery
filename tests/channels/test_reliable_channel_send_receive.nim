@@ -365,6 +365,70 @@ suite "Reliable Channel - send state machine":
 
     (await waku.stop()).expect("stop")
 
+  asyncTest "MessageUnconfirmedEvent finalises the channelReqId as Sent":
+    ## A segment sent over mix whose exit did not answer ends with
+    ## `MessageUnconfirmedEvent`. The channel counts it as sent, because the
+    ## message left this node and SDS carries the acknowledgements of the
+    ## channel, so the `channelReqId` is finalised and `ChannelMessageSentEvent`
+    ## comes.
+    const
+      channelId = ChannelId("sm-unconfirmed-channel")
+      contentTopic = ContentTopic("/reliable-channel/test/sm-unconfirmed")
+      fakeMsgReqId = RequestId("fake-msg-req-unconfirmed")
+
+    var waku: LogosDelivery
+    var manager: ReliableChannelManager
+    var brokerCtx: BrokerContext
+    lockNewGlobalBrokerContext:
+      brokerCtx = globalBrokerContext()
+      waku = (await LogosDelivery.new(createApiNodeConf())).expect("LogosDelivery.new")
+      manager = waku.reliableChannelManager
+
+    var sendCalls = 0
+    MessagingSend.replaceProvider(
+      brokerCtx,
+      proc(envelope: MessageEnvelope): Future[Result[RequestId, string]] {.async.} =
+        sendCalls.inc
+        return ok(fakeMsgReqId),
+    ).isOkOr:
+      raiseAssert "replaceProvider failed: " & error
+
+    discard manager
+      .createReliableChannel(channelId, contentTopic, SdsParticipantID("local"))
+      .expect("createReliableChannel")
+
+    let sentFut = newFuture[RequestId]("channel-sent")
+    discard ChannelMessageSentEvent
+      .listen(
+        brokerCtx,
+        proc(evt: ChannelMessageSentEvent) {.async: (raises: []).} =
+          if not sentFut.finished() and evt.channelId == channelId:
+            sentFut.complete(evt.requestId)
+        ,
+      )
+      .expect("listen ChannelMessageSentEvent")
+
+    let channelReqId = (await manager.send(channelId, "hello".toBytes())).expect("send")
+
+    let dispatchDeadline = Moment.now() + 1.seconds
+    while Moment.now() < dispatchDeadline and sendCalls == 0:
+      await sleepAsync(5.milliseconds)
+    check sendCalls == 1
+
+    waku_message_events.MessageUnconfirmedEvent.emit(
+      brokerCtx,
+      waku_message_events.MessageUnconfirmedEvent(
+        requestId: fakeMsgReqId, messageHash: ""
+      ),
+    )
+
+    let finalised = await sentFut.withTimeout(1.seconds)
+    check finalised
+    if finalised:
+      check sentFut.read() == channelReqId
+
+    (await waku.stop()).expect("stop")
+
   asyncTest "two independent channelReqIds are finalised independently":
     ## Two `send()` calls -> two independent `channelReqId`s, each a
     ## single segment because both payloads fit one chunk (the

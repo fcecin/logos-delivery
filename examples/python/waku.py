@@ -138,7 +138,7 @@ libwaku.logosdelivery_add_event_listener.argtypes = [ctypes.c_void_p,
                                                      callback_type,
                                                      ctypes.c_void_p]
 libwaku.logosdelivery_add_event_listener.restype = ctypes.c_uint64
-for event_name in [b"onMessageSent", b"onMessageError", b"onMessagePropagated",
+for event_name in [b"onMessageSent", b"onMessageError", b"onMessageUnconfirmed", b"onMessagePropagated",
                    b"onMessageReceived", b"onConnectionStatusChange",
                    b"onTopicHealthChange", b"onConnectionChange", b"onReceivedMessage",
                    b"onChannelMessageReceived", b"onChannelMessageSent",
