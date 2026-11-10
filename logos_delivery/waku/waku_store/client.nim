@@ -18,20 +18,35 @@ const DefaultPageSize*: uint = 20
 
 const MaxQueryRetries = 5 # Maximum number of store peers to try before giving up
 
-const FailedPeerBackoff* = chronos.minutes(5)
+const FailedPeerRankLastPeriod* = chronos.minutes(5)
   ## For this long after a query to a store peer failed, `queryToAny` asks the
   ## peer only after the store peers that did not fail.
+
+const FailedPeerStartingBackoff = chronos.seconds(2)
+  ## After a failed query, `queryToAny` does not ask the store peer for this long.
+  ## The backoff doubles with each failure in a row, up to `FailedPeerMaxBackoff`.
+
+const FailedPeerMaxBackoff = chronos.seconds(30)
+  ## The longest backoff of a store peer after its failed queries.
+
+type StorePeerFailure = object ## The failed queries to one store peer.
+  at: Moment ## the time of the failure that started the backoff
+  count: int ## the failures in a row
+  error: StoreError ## the error of that failure
+  noConnection: bool ## the peer had no connection at that failure
 
 type WakuStoreClient* = ref object
   peerManager: PeerManager
   rng: crypto.Rng
   storeMsgMetricsPerShard*: Table[string, float64]
   maxResponseSize*: int ## the largest response that the client reads
-  failedAt: Table[PeerId, Moment]
-    ## When a query to a store peer failed, for the peers in their
-    ## `failedPeerBackoff`. A success of a later query deletes the time.
-  failedPeerBackoff*: Duration = FailedPeerBackoff
-    ## see `FailedPeerBackoff`, shorter in tests
+  failures: Table[PeerId, StorePeerFailure]
+    ## The failures of the store peers in their `failedPeerRankLastPeriod`.
+    ## A success of a later query deletes the record of the peer.
+  failedPeerRankLastPeriod*: Duration = FailedPeerRankLastPeriod
+    ## see `FailedPeerRankLastPeriod`, shorter in tests
+  failedPeerStartingBackoff*: Duration = FailedPeerStartingBackoff
+    ## see `FailedPeerStartingBackoff`, shorter in tests
 
 proc new*(
     T: type WakuStoreClient,
@@ -108,6 +123,39 @@ proc timeLeft(timeout: Duration, start: Moment): Duration =
     return timeout
   return timeout - (Moment.now() - start)
 
+func backoffFor(self: WakuStoreClient, count: int): Duration =
+  ## The backoff after `count` failures in a row (see `FailedPeerStartingBackoff`).
+  var backoff = self.failedPeerStartingBackoff
+  for _ in 1 ..< count:
+    if backoff >= FailedPeerMaxBackoff:
+      break
+    backoff = backoff * 2
+  return min(backoff, FailedPeerMaxBackoff)
+
+proc inBackoff(self: WakuStoreClient, peerId: PeerId, now: Moment): bool =
+  ## True while a peer is in its backoff after a failed query.
+  ## A backoff that began with no connection does not apply while the peer has one.
+  let failure = self.failures.getOrDefault(peerId)
+  if failure.count == 0 or now >= failure.at + self.backoffFor(failure.count):
+    return false
+  return not failure.noConnection or not self.peerManager.switch.isConnected(peerId)
+
+proc recordFailure(self: WakuStoreClient, peerId: PeerId, error: StoreError) =
+  ## The peer gets one more failure.
+  ## A failure while the peer is in its backoff does not count.
+  let now = Moment.now()
+  if self.inBackoff(peerId, now):
+    return
+  let count = self.failures.getOrDefault(peerId).count + 1
+  self.failures[peerId] = StorePeerFailure(
+    at: now,
+    count: count,
+    error: error,
+    noConnection: not self.peerManager.switch.isConnected(peerId),
+  )
+  debug "Store peer starts a backoff",
+    peerId = peerId, failures = count, backoff = self.backoffFor(count), error = $error
+
 proc queryAndRecordFailure(
     self: WakuStoreClient,
     request: StoreQueryRequest,
@@ -120,12 +168,12 @@ proc queryAndRecordFailure(
   let query = self.query(request, peer)
   # A cancel by the caller that ends the query also ends this wait, with no failure.
   if not await query.withTimeout(timeout): # the timeout cancels the query
-    self.failedAt[peer.peerId] = Moment.now()
+    self.recordFailure(peer.peerId, timedOutError())
     return err(timedOutError())
   let response = query.read().valueOr:
-    self.failedAt[peer.peerId] = Moment.now()
+    self.recordFailure(peer.peerId, error)
     return err(error)
-  self.failedAt.del(peer.peerId)
+  self.failures.del(peer.peerId)
   return ok(response)
 
 proc queryInOrder(
@@ -135,12 +183,22 @@ proc queryInOrder(
     timeout: Duration,
 ): Future[StoreQueryResult] {.async.} =
   ## Asks `peers` in their order until one answers, for `timeout` at most.
+  ## It asks `MaxQueryRetries` peers at most, and no peer in its backoff.
   let start = Moment.now()
   var lastError: StoreError
+  var asked = 0
   for peer in peers:
+    if asked == MaxQueryRetries:
+      break
     let left = timeout.timeLeft(start)
     if left <= ZeroDuration:
       return err(timedOutError())
+    # A caller that tries again at once does not dial a peer in its backoff.
+    # A query at the same time can start the backoff after this query ranked the peers.
+    if self.inBackoff(peer.peerId, Moment.now()):
+      lastError = self.failures.getOrDefault(peer.peerId).error
+      continue
+    inc asked
     let response = (await self.queryAndRecordFailure(request, peer, left)).valueOr:
       debug "Store query failed, trying next peer", peerId = peer.peerId, error = $error
       lastError = error
@@ -183,18 +241,18 @@ type
     ## How soon a query asks a store peer. A query asks the peers of a rank
     ## before the peers of the next rank.
     Preferred
-      ## a connected peer that is not in its backoff, for a query that prefers
+      ## a connected peer that did not fail recently, for a query that prefers
       ## a connection
     Other
-    InBackoff ## a query to the peer failed less than `failedPeerBackoff` ago
+    RecentlyFailed ## a query to it failed less than `failedPeerRankLastPeriod` ago
 
   RankedStorePeer = tuple[peer: RemotePeerInfo, rank: StorePeerRank]
 
 proc clearExpiredFailures(self: WakuStoreClient) =
   let now = Moment.now()
-  for peerId in toSeq(self.failedAt.keys):
-    if now - self.failedAt.getOrDefault(peerId) >= self.failedPeerBackoff:
-      self.failedAt.del(peerId)
+  for peerId in toSeq(self.failures.keys):
+    if now - self.failures.getOrDefault(peerId).at >= self.failedPeerRankLastPeriod:
+      self.failures.del(peerId)
 
 proc rankStorePeers(
     self: WakuStoreClient, peers: seq[RemotePeerInfo], connectedFirst: bool
@@ -209,8 +267,8 @@ proc rankStorePeers(
   var byRank: array[StorePeerRank, seq[RankedStorePeer]]
   for peer in shuffled:
     let rank =
-      if peer.peerId in self.failedAt:
-        StorePeerRank.InBackoff
+      if peer.peerId in self.failures:
+        StorePeerRank.RecentlyFailed
       elif connectedFirst and switch.isConnected(peer.peerId):
         StorePeerRank.Preferred
       else:
@@ -218,7 +276,7 @@ proc rankStorePeers(
     byRank[rank].add((peer, rank))
   return
     byRank[StorePeerRank.Preferred] & byRank[StorePeerRank.Other] &
-    byRank[StorePeerRank.InBackoff]
+    byRank[StorePeerRank.RecentlyFailed]
 
 proc queryToAny*(
     self: WakuStoreClient,
@@ -233,6 +291,8 @@ proc queryToAny*(
   ## the default.
   ## `timeout` is the longest time of the query, for all the store peers it asks.
   ## A store peer that does not answer in this time counts as failed.
+  ## A store peer in its backoff after a failed query gets no query.
+  ## When each store peer is in its backoff, the query fails at once with their error.
 
   if request.paginationCursor.isSome() and request.paginationCursor.get() == EmptyCursor:
     return err(StoreError(kind: ErrorCode.BAD_REQUEST, cause: "invalid cursor"))
@@ -259,5 +319,4 @@ proc queryToAny*(
       canHaveShards = true
 
   let ranked = self.rankStorePeers(peers, connectedFirst = canHaveShards)
-  let peersToTry = ranked[0 ..< min(ranked.len, MaxQueryRetries)].mapIt(it.peer)
-  return await self.queryInOrder(request, peersToTry, timeout)
+  return await self.queryInOrder(request, ranked.mapIt(it.peer), timeout)
