@@ -64,6 +64,10 @@ proc subscribeShard(node: WakuNode, shard: PubsubTopic) =
 proc meshSize(node: WakuNode, shard: PubsubTopic): int =
   return node.wakuRelay.getNumPeersInMesh(shard).get(0)
 
+proc shardHealth(node: WakuNode, shard: PubsubTopic): TopicHealth =
+  ## The shard health that relay stores and reports.
+  return node.wakuRelay.topicsHealth.getOrDefault(shard, TopicHealth.UNHEALTHY)
+
 suite "Health Monitor - health state calculation":
   test "Disconnected, zero peers":
     let protocols = @[
@@ -438,6 +442,41 @@ suite "Health Monitor - events":
     checkUntilTimeout:
       nodeA.meshSize(DefaultPubsubTopic) == 1
       lastStatus == ConnectionStatus.PartiallyConnected
+
+  asyncTest "Core shard health follows a mesh peer that this node grafts in a heartbeat":
+    ## A peer sends no reply to a GRAFT that it accepts.
+    ## So the GRAFT of this node must make relay calculate the shard health again.
+    let nodeA = await startRelayNode()
+    let nodeB = await startRelayNode()
+    defer:
+      await nodeB.stop()
+      await nodeA.stop()
+
+    # Node B never sends a GRAFT, so no GRAFT comes in to node A.
+    nodeB.wakuRelay.parameters.d = 0
+    nodeB.wakuRelay.parameters.dLow = 0
+    nodeB.wakuRelay.parameters.dOut = 0
+    # Node A grafts no peer until the test lets it.
+    let d = nodeA.wakuRelay.parameters.d
+    nodeA.wakuRelay.parameters.d = 0
+
+    ## Given node B on the shard of node A, but not in its mesh
+    nodeA.subscribeShard(DefaultPubsubTopic)
+    nodeB.subscribeShard(DefaultPubsubTopic)
+    await nodeA.connectToNodes(@[nodeB.switch.peerInfo.toRemotePeerInfo()])
+    checkUntilTimeout:
+      nodeA.wakuRelay.getNumConnectedPeers(DefaultPubsubTopic).get(0) == 1
+    check:
+      nodeA.meshSize(DefaultPubsubTopic) == 0
+      nodeA.shardHealth(DefaultPubsubTopic) == TopicHealth.UNHEALTHY
+
+    ## When node A grafts node B in its next heartbeat
+    nodeA.wakuRelay.parameters.d = d
+
+    ## Then node A reports the shard with a mesh peer
+    checkUntilTimeout:
+      nodeA.meshSize(DefaultPubsubTopic) == 1
+      nodeA.shardHealth(DefaultPubsubTopic) == TopicHealth.MINIMALLY_HEALTHY
 
   asyncTest "Edge (light client) health update":
     var nodeA: WakuNode
