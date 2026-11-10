@@ -98,6 +98,11 @@ proc nodeConf(kernel: WakuNodeConf, messaging: MessagingClientConf): LogosDelive
     kernelConf: KernelConf(kernel), messagingConf: Opt.some(messaging)
   )
 
+proc disablePruneBackoff(node: WakuNode) =
+  ## The outage tests reconnect at once, and the mesh waits out the prune backoff.
+  if not node.wakuRelay.isNil():
+    node.wakuRelay.parameters.pruneBackoff = ZeroDuration
+
 type TestNetwork = ref object
   storeNode: WakuNode
   archiveDriver: ArchiveDriver
@@ -155,6 +160,7 @@ proc setupNetwork(
       "Failed to mount metadata on storeNode"
     )
     (await storeNode.mountRelay()).expect("Failed to mount relay on storeNode")
+    storeNode.disablePruneBackoff()
     archiveDriver = newSqliteArchiveDriver()
     storeNode.mountArchive(archiveDriver).expect("Failed to mount archive")
     await storeNode.mountStore()
@@ -176,6 +182,7 @@ proc setupNetwork(
       "Failed to mount metadata on publisher"
     )
     (await publisher.mountRelay()).expect("Failed to mount relay on publisher")
+    publisher.disablePruneBackoff()
     await publisher.mountLibp2pPing()
     await publisher.start()
   publisher.subscribe((kind: PubsubSub, topic: shard), dummyHandler).expect(
@@ -202,6 +209,7 @@ proc setupNetwork(
       "Failed to create subscriber"
     )
     subscriber.shortenIntervals()
+    subscriber.waku.node.disablePruneBackoff()
     (await subscriber.start()).expect("Failed to start subscriber")
 
   # Before the subscription by more than the variance of the timestamps, so it
@@ -446,21 +454,23 @@ proc waitForProtocolHealth(
 proc noopRelayHandler(topic: PubsubTopic, msg: WakuMessage) {.async, gcsafe.} =
   discard
 
-proc newFilterServiceNode(shardId: uint16): Future[WakuNode] {.async.} =
-  ## A started relay and filter service node that advertises shard `shardId` only.
+proc newRelayNode(shardId: uint16, filter = false): Future[WakuNode] {.async.} =
+  ## A started relay node on shard `shardId` that advertises that shard only.
+  ## With `filter` it is a filter service node too.
   let shard = PubsubTopic("/waku/2/rs/" & $TestClusterId & "/" & $shardId)
   var node: WakuNode
   lockNewGlobalBrokerContext:
     node = newTestWakuNode(generateSecp256k1Key())
     node.mountMetadata(TestClusterId, @[shardId]).expect("mount metadata")
     (await node.mountRelay()).expect("mount relay")
-    await node.mountFilter()
+    if filter:
+      await node.mountFilter()
     await node.mountLibp2pPing()
     await node.start()
   let subscribed = node.subscribe((kind: PubsubSub, topic: shard), noopRelayHandler)
   if subscribed.isErr():
     await node.stop()
-    raiseAssert "filter service node subscribe: " & subscribed.error
+    raiseAssert "relay node subscribe: " & subscribed.error
   return node
 
 proc filterSubscriptionHealthy(net: TestNetwork, shard = TestShard): bool =
@@ -866,6 +876,52 @@ suite "Messaging API, Receive Service (backfill)":
       (await root.storedRecords()).getOrDefault((TestShard, topic)).timestamp >
         subscribedAt - net.variance
 
+  asyncTest "a message after a subscribe on a shard with no mesh comes from Store":
+    ## With two shards, `/recv-a/1` maps to shard 0 and `/recv-b/1` to shard 1.
+    ## Only shard 0 has a relay peer, so shard 1 has no mesh.
+    ## The node is in an outage until shard 1 gets a relay peer.
+    let topicA = ContentTopic("/recv-a/1/core-two-shards/proto")
+    let topicB = ContentTopic("/recv-b/1/core-two-shards/proto")
+    let root = createTempDir("recv-api-core-two-shards-", "")
+    defer:
+      removeDir(root)
+    let net =
+      await setupNetwork(topicA, root, numShards = 2, storeNodeShards = @[0'u16])
+    defer:
+      await net.teardown()
+    let events = net.events
+    await net.joinMesh()
+    discard await root.waitForRecord(
+      topicA,
+      present = true,
+      state = Opt.some(TopicRecordState.Online),
+      within = IdleTimeout,
+    )
+    check await events.nothingMore(0)
+    # The subscribe of B starts an outage, so B is a gap from its subscribe.
+    (await net.subscriber.messagingClient.subscribe(topicB)).expect("subscribe B")
+    let recordB = await root.waitForRecord(topicB, present = true, SecondShard)
+    check:
+      recordB.get().state == TopicRecordState.Offline
+      net.subscriber.waku.node.wakuRelay.getNumPeersInMesh(SecondShard).valueOr(0) == 0
+    # Relay misses a message on a shard with no mesh, so only Store has it.
+    let gapMsg = await net.archiveAt(
+      topicB, now(), "archived before a mesh on its shard", SecondShard
+    )
+    # Shard 1 gets a relay peer, and the worker fills the gap of B.
+    let relayNode = await newRelayNode(1'u16)
+    defer:
+      await relayNode.stop()
+    await net.subscriber.waku.node.connectToNodes(
+      @[relayNode.peerInfo.toRemotePeerInfo()]
+    )
+    check await events.waitForEvents(TestTimeout)
+    check events.receivedMessages.len == 1 and
+      events.receivedMessages[0].payload == gapMsg.payload
+    check events.receivedSources == @[MessageSource.History]
+    check await net.caughtUp()
+    check await events.nothingMore(1)
+
   asyncTest "Edge: a lost filter subscription is an outage, and its gap is filled":
     ## The filter service drops the subscription while the connection stays.
     ## The subscription manager notices on its next ping and subscribes
@@ -934,7 +990,7 @@ suite "Messaging API, Receive Service (backfill)":
       topicB, now(), "archived before a filter service for its shard", SecondShard
     )
     # Shard 1 gets its filter service. The worker fills the gap of B.
-    let filterNode = await newFilterServiceNode(1'u16)
+    let filterNode = await newRelayNode(1'u16, filter = true)
     defer:
       await filterNode.stop()
     let healthyB = net.waitForFilterSubscriptionHealth(healthy = true, SecondShard)

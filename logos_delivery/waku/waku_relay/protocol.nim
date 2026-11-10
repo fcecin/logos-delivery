@@ -290,6 +290,16 @@ proc recalculateTopicHealth*(w: WakuRelay, topic: PubsubTopic) =
   w.topicHealthDirty.incl(topic)
   w.topicHealthUpdateEvent.fire()
 
+proc recalculateTopicHealth(w: WakuRelay, ctrl: ControlMessage) =
+  ## Makes `topicsHealthLoop` calculate the health of each GRAFT and PRUNE topic again.
+  ## A GRAFT or a PRUNE changes the mesh of its topic.
+  for graft in ctrl.graft:
+    if graft.topicID.len > 0:
+      w.recalculateTopicHealth(graft.topicID)
+  for prune in ctrl.prune:
+    if prune.topicID.len > 0:
+      w.recalculateTopicHealth(prune.topicID)
+
 proc initRelayObservers(w: WakuRelay) =
   proc decodeRpcMessageInfo(
       peer: PubSubPeer, msg: Message
@@ -338,15 +348,7 @@ proc initRelayObservers(w: WakuRelay) =
 
   proc onRecv(peer: PubSubPeer, msgs: var RPCMsg) =
     if msgs.control.isSome():
-      let ctrl = msgs.control.get()
-
-      for graft in ctrl.graft:
-        if graft.topicID.len > 0:
-          w.recalculateTopicHealth(graft.topicID)
-
-      for prune in ctrl.prune:
-        if prune.topicID.len > 0:
-          w.recalculateTopicHealth(prune.topicID)
+      w.recalculateTopicHealth(msgs.control.get())
 
     for msg in msgs.messages:
       let (msg_id_short, topic, wakuMessage, msgSize) = decodeRpcMessageInfo(peer, msg).valueOr:
@@ -371,6 +373,11 @@ proc initRelayObservers(w: WakuRelay) =
     )
 
   proc onSend(peer: PubSubPeer, msgs: var RPCMsg) =
+    # This node sends a GRAFT or a PRUNE when it changes its own mesh.
+    # A peer sends no reply to a GRAFT that it accepts.
+    if msgs.control.isSome():
+      w.recalculateTopicHealth(msgs.control.get())
+
     for msg in msgs.messages:
       let (msg_id_short, topic, wakuMessage, msgSize) = decodeRpcMessageInfo(peer, msg).valueOr:
         debug "onSend: failed decoding RPC info",

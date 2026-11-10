@@ -3,11 +3,11 @@
 ## live delivery did not deliver them.
 ##
 ## Each subscribed (shard, content topic) has one backfill record (see
-## `backfill.nim`). An outage of live delivery (relay not READY on Core, or a
-## shard without a healthy filter subscription on Edge) turns each record
-## into a gap. One worker fills the gaps from Store when live delivery is
-## back. With `backfill-enabled`, the records survive a restart, and a
-## restart is an outage too. An unsubscribe deletes the record.
+## `backfill.nim`). An outage of live delivery (relay not READY or a shard
+## without a mesh on Core, or a shard without a healthy filter subscription on
+## Edge) turns each record into a gap. One worker fills the gaps from Store when
+## live delivery is back. With `backfill-enabled`, the records survive a
+## restart, and a restart is an outage too. An unsubscribe deletes the record.
 
 import results, std/[algorithm, tables]
 import chronos, chronicles
@@ -159,11 +159,29 @@ proc hasHealthyFilterSubscription(self: RecvService): bool =
       return false
   return shards > 0
 
+proc hasRelayMesh(self: RecvService): bool =
+  ## Every subscribed shard has a relay mesh (true with none).
+  ## A shard that relay just joined is UNHEALTHY until relay calculates its health.
+  var shards: seq[PubsubTopic]
+  for (shard, _) in self.waku.subscribedContentTopics():
+    shards.add(shard)
+  if shards.len == 0:
+    return true
+  let report = RequestShardTopicsHealth.request(self.brokerCtx, shards).valueOr:
+    debug "Failed to read the relay health of the subscribed shards", error = error
+    return false
+  for (_, health) in report.topicHealth:
+    if health notin {TopicHealth.MINIMALLY_HEALTHY, TopicHealth.SUFFICIENTLY_HEALTHY}:
+      return false
+  return true
+
 proc hasLiveDelivery(self: RecvService): bool =
-  ## Relay READY, or a healthy filter subscription on every subscribed shard.
-  return
+  ## On Core, relay READY and a mesh on every subscribed shard.
+  ## On Edge, a healthy filter subscription on every subscribed shard.
+  let relayReady =
     self.waku.reportedProtocolHealth(WakuProtocol.RelayProtocol).health ==
-    HealthStatus.READY or self.hasHealthyFilterSubscription()
+    HealthStatus.READY
+  return (relayReady and self.hasRelayMesh()) or self.hasHealthyFilterSubscription()
 
 proc backfillWriteRecords(self: RecvService, ops: seq[TxOp]) {.async: (raises: []).} =
   ## Writes the changes of one event as one transaction, when the records
@@ -465,8 +483,8 @@ proc updateLive(self: RecvService) {.async: (raises: []).} =
 proc onSubscribed(
     self: RecvService, shard: PubsubTopic, contentTopic: ContentTopic
 ) {.async: (raises: []).} =
-  ## The subscribed shards are an input of live delivery. On Edge, a topic on
-  ## a new shard has no filter subscription yet, so the node is in an outage
+  ## The subscribed shards are an input of live delivery. A topic on a shard with
+  ## no filter subscription on Edge, or no mesh on Core, puts the node in an outage
   ## until the shard is healthy, and the record of the topic is a gap.
   await self.updateLive()
   await self.backfillSubscriptionChanged(
