@@ -531,6 +531,17 @@ suite "SendService - Store validation loop":
       await stopping.join().withTimeout(chronos.seconds(3))
       not waku.node.peerManager.hasActiveStoreRequest(storeNode.peerInfo.peerId)
 
+  asyncTest "a Store query with no answer ends at its timeout":
+    ## A Store node that does not answer must not stop the Store rounds.
+    let service = startedService()
+    service.storeValidationQueryTimeout = chronos.milliseconds(100)
+    defer:
+      await service.stopSendService()
+    discard await service.sendAged("no-store-answer")
+    check await queryStarted.withTimeout(chronos.seconds(5))
+    checkUntilTimeout:
+      not waku.node.peerManager.hasActiveStoreRequest(storeNode.peerInfo.peerId)
+
   asyncTest "a restart during the Store wait sends nothing again, and the Store confirms the send":
     let processor = ScriptedProc()
     let service = startedService(processor)
