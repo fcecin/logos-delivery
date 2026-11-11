@@ -17,6 +17,10 @@ method isValidProcessor*(
 ): bool {.base, gcsafe.} =
   return false
 
+method deanonymizes*(self: BaseSendProcessor): bool {.base, gcsafe.} =
+  ## True for a processor that sends in the clear and so can show this node's address.
+  return true
+
 method checkBeforeAdmission*(
     self: BaseSendProcessor, task: DeliveryTask
 ): bool {.base, gcsafe, raises: [].} =
@@ -47,6 +51,8 @@ proc resend*(
   var currentProcessor: BaseSendProcessor = self
   while not currentProcessor.isNil():
     if currentProcessor.canResend(task):
+      if currentProcessor.deanonymizes():
+        task.deanonymized = true
       await currentProcessor.resendImpl(task)
       return
     currentProcessor = currentProcessor.fallbackProcessor
@@ -74,6 +80,8 @@ method process*(
   var keepTrying = true
   while not currentProcessor.isNil() and keepTrying:
     if currentProcessor.isValidProcessor(task):
+      if currentProcessor.deanonymizes():
+        task.deanonymized = true
       await currentProcessor.sendImpl(task)
     currentProcessor = currentProcessor.fallbackProcessor
     keepTrying = task.state == DeliveryState.FallbackRetry

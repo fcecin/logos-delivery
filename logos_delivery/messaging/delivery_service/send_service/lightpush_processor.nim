@@ -68,6 +68,12 @@ method sendImpl*(
   let numLightpushServers = (
     await self.waku.lightpushPublishToAny(task.pubsubTopic, task.msg)
   ).valueOr:
+    if error.isAlreadySeenRejection():
+      # The refusal of the service means what its success answer means.
+      debug "The lightpush service already has the message",
+        requestId = task.requestId, msgHash = task.msgHash.to0xHex()
+      task.setPropagated()
+      return
     error "LightpushSendProcessor.sendImpl failed",
       requestId = task.requestId,
       msgHash = task.msgHash.to0xHex(),

@@ -71,19 +71,19 @@ A send is asynchronous. `200` means that the node accepted the message. The resu
 
 * `queued`: the send waits for rate-limit budget (only when rate limiting is on)
 * `propagated`: the message reached at least one peer
-* `sent`: a Store peer confirmed that it holds the message, or, for a send over mix, the mix exit replied
+* `sent`: a Store peer confirmed that it holds the message, or, for a send over mix, the mix exit replied, the exit refused a later copy as already seen, or the node received a copy of the message. A deanonymized message, which the node attempted to send in the clear, waits for a Store peer.
 * `error`: the send failed (rejected message, no peer within the retry window, no Store confirmation within about 60 s of propagation, ...)
 
 After a `sent` or `error` event, no more events come for that message.
 
-* The `sent` event needs reliability. A send without mix also needs a Store peer.
+* The `sent` event needs reliability. A send in the clear, or a deanonymized send over mix, also needs a Store peer.
 * A message sent with `"ephemeral": true` gets no `sent` event, because Store nodes do not keep ephemeral messages.
 * Reliability is on by default, and off for the `twn` and `status.prod` presets. `--reliability` overrides that.
 * Without reliability, or for an ephemeral message, `propagated` is the last event.
 * Later versions can add new event types. A client must skip an event type that it does not know.
 * `GET /messaging/v1/events/send/{requestId}` answers `404` while the node has no event for that request: the request id is unknown, a client already read its events, or no event came yet. Call it again until the last event comes.
 
-The receivers can have the message after an `error` event. While a message waits for its `sent` event, the node sends it again, up to 3 times, each time a Store peer does not report it.
+The receivers can have the message after an `error` event. While a message waits for its `sent` event, the node sends it again in the clear, up to 3 times, each time a Store peer does not report it. A deanonymized message can be sent again in the clear also when it went out over mix.
 
 * Each received message comes as a JSON object with:
   * the message hash
@@ -91,7 +91,7 @@ The receivers can have the message after an `error` event. While a message waits
   * a `source`: `live` for a message that arrived when it was published, or `history` for a message that a Store peer returned at startup or after the node came back online
 * The node keeps messages only for the content topics subscribed through `/messaging/v1/subscriptions`. A relay subscription to the shard is not enough.
 * With `--anonymity-level=None` (the default), a send subscribes the node to its content topic, so the sender also receives its own messages.
-* With `--anonymity-level=Preferred` or `Required`, a send makes no subscription. A client that wants to receive its own messages must subscribe to their content topics.
+* With `--anonymity-level=Preferred` or `Required`, a send makes no subscription. A client that wants to receive its own messages must subscribe to their content topics. A subscription to the content topic, or a relay subscription to its shard, also lets a copy of the message confirm a send over mix when the answer of the exit is lost.
 
 A content topic that the client subscribes for the first time gets no earlier messages. From then on, the node fills the gaps of the topic from Store. When live delivery goes down and comes back, the node fetches the messages of the topic from a few minutes before it noticed the outage up to the recovery, and delivers them with the `source` `history`. The fetch can include a message that the node already delivered live; the node drops such a message when it still has it in its duplicate filter, and the `source` tells the client the rest.
 

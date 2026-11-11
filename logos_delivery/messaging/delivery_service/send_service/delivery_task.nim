@@ -40,9 +40,16 @@ type DeliveryTask* = ref object
   anonymized*: bool
     ## Set at the first anonymous send attempt and never cleared; from then on,
     ## the INFO and ERROR records of this task withhold the hash.
-  propagatedAnonymously*: bool
-    ## Set when an anonymous path propagated the message. No store node confirms
-    ## it: the query would name the message from this node's own address.
+    ## `isAnonymous` and `hadSendAttempt` read it too.
+  deanonymized*: bool
+    ## Set before the first plain send attempt of the task and never cleared.
+    ## A plain send attempt deanonymizes the message, whatever the attempt does.
+    ## See `isAnonymous`.
+  networkHasMessageFuture: Future[void]
+    ## Completes once a copy of the message comes to this node from the network.
+    ## Relay or filter delivers such a copy.
+    ## A send is not a copy, and neither is the answer or the refusal of a relay.
+    ## It is never reset, and it is nil until it completes or a send waits for it.
   lastStoreQueryTime*: Opt[Moment]
     ## When a Store peer was last asked about this task, none before the first query.
   storeValidationWaited*: timer.Duration
@@ -125,6 +132,44 @@ proc isParkedExpired*(self: DeliveryTask, maxAge: timer.Duration): bool =
   ## measured from the message timestamp, so parking cannot grow the backlog
   ## and deliver arbitrarily late.
   return self.firstAdmittedTime.isNone() and self.messageAge() > maxAge
+
+proc getOrCreateNetworkHasMessageFuture(self: DeliveryTask): Future[void] =
+  if self.networkHasMessageFuture.isNil():
+    self.networkHasMessageFuture = newFuture[void]("the network has the message")
+  return self.networkHasMessageFuture
+
+proc setNetworkHasMessage*(self: DeliveryTask) =
+  ## Sets `networkHasMessage`, whatever path sent the message.
+  ## A second call changes nothing.
+  let future = self.getOrCreateNetworkHasMessageFuture()
+  if not future.finished():
+    future.complete()
+
+func networkHasMessage*(self: DeliveryTask): bool =
+  ## True once a copy of the message came to this node from the network.
+  return
+    not self.networkHasMessageFuture.isNil() and self.networkHasMessageFuture.completed()
+
+proc waitForNetworkHasMessage*(self: DeliveryTask): Future[void] =
+  ## Completes once a copy of the message comes to this node from the network.
+  ## A cancel of the returned future leaves `networkHasMessage` as it is.
+  return self.getOrCreateNetworkHasMessageFuture().join()
+
+func hadSendAttempt*(self: DeliveryTask): bool =
+  ## True once the node attempted to send the message, over mix or in the clear.
+  self.anonymized or self.deanonymized
+
+proc setPropagated*(self: DeliveryTask) =
+  ## Moves the task to `SuccessfullyPropagated`, and keeps its first propagation time.
+  self.state = DeliveryState.SuccessfullyPropagated
+  if self.firstPropagatedTime.isNone():
+    self.firstPropagatedTime = Opt.some(Moment.now())
+
+func isAnonymous*(self: DeliveryTask): bool =
+  ## True when the node attempted to send the message over mix, and never in the clear.
+  ## A propagated anonymous task went out over mix, so no store node confirms it.
+  ## The query would name the message from the address of this node.
+  self.anonymized and not self.deanonymized
 
 proc isEphemeral*(self: DeliveryTask): bool =
   return self.msg.ephemeral

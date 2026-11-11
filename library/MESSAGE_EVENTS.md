@@ -7,7 +7,7 @@ The liblogosdelivery library emits four types of message delivery events and one
 ## Event Types
 
 ### 1. message_sent
-Emitted when the node confirms the delivery of a message that is not ephemeral, with the `reliability` option on. For a normal send, a store node confirms the delivery. For a send over mix, the reply of the mix exit confirms it. For an ephemeral message, or with the `reliability` option off, `message_sent` does not come, and a successful send ends at `message_propagated`.
+Emitted when the node confirms the delivery of a message that is not ephemeral, with the `reliability` option on. For a normal send, a store node confirms the delivery. For a send over mix, the reply of the mix exit confirms it. In that case, `message_sent` means that the network has the message, not that a store node has it. A copy of the message that this node receives also confirms it, and so does the refusal of a later copy as already seen. A message is deanonymized from the moment that the node attempts to send it in the clear, and a store node confirms a deanonymized message as for a normal send. For an ephemeral message, or with the `reliability` option off, `message_sent` does not come, and a successful send ends at `message_propagated`.
 
 **JSON Structure:**
 ```json
@@ -165,7 +165,7 @@ For a typical successful message send:
 
 1. **send** → Returns request ID
 2. **message_propagated** → Message delivered to peers
-3. **message_sent** → A store node or the mix exit confirms the message (only with the `reliability` option on)
+3. **message_sent** → A store node confirms the message, or, for a send over mix, the exit, a copy of the message or an already-seen refusal confirms it (only with the `reliability` option on)
 
 For a failed message send:
 

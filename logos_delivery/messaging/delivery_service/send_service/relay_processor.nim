@@ -61,6 +61,12 @@ method sendImpl*(self: RelaySendProcessor, task: DeliveryTask) {.async.} =
     tryCount = task.tryCount
 
   let noOfPublishedPeers = (await self.publishProc(task.pubsubTopic, task.msg)).valueOr:
+    if error.isAlreadySeenRejection():
+      # The refusal of the relay means what a publish to a peer means.
+      debug "Relay already has the message",
+        requestId = task.requestId, msgHash = task.msgHash.to0xHex()
+      task.setPropagated()
+      return
     let errorMessage = error.desc.get($error.code)
     error "Failed to publish message with relay",
       requestId = task.requestId, msgHash = task.msgHash.to0xHex(), error = errorMessage

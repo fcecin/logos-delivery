@@ -32,6 +32,9 @@ const MinMixPoolSize* = 4
 const PublicHopAddressClasses = {MixAddressClass.Public, MixAddressClass.Relayed}
   ## The classes of hop address that each node of the public network can dial.
 
+const MixReplyTimeout* = chronos.seconds(5)
+  ## Time limit for one mix-routed lightpush, so a broken path costs one attempt.
+
 type
   WakuMix* = ref object of MixProtocol
     peerManager*: PeerManager
@@ -41,6 +44,8 @@ type
       ## `true` when the last hop derivation found no address the encoder accepts.
       ## The hop that mix still holds is then a leftover, unusable even if it
       ## encodes.
+    replyTimeout*: Duration
+      ## The time limit for one lightpush over mix, `MixReplyTimeout` by default.
 
   WakuMixResult*[T] = Result[T, string]
 
@@ -191,7 +196,12 @@ proc new*(
     peermgr.switch.peerInfo.publicKey.skkey, peermgr.switch.peerInfo.privateKey.skkey,
   )
 
-  var m = WakuMix(peerManager: peermgr, clusterId: clusterId, pubKey: mixPubKey)
+  var m = WakuMix(
+    peerManager: peermgr,
+    clusterId: clusterId,
+    pubKey: mixPubKey,
+    replyTimeout: MixReplyTimeout,
+  )
   procCall MixProtocol(m).init(
     localMixNodeInfo,
     peermgr.switch,

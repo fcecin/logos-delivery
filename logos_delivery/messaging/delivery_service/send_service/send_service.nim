@@ -11,7 +11,7 @@ import
   logos_delivery/waku/waku,
   logos_delivery/waku/api/[store, publish],
   logos_delivery/messaging/rate_limit_manager/rate_limit_manager
-import logos_delivery/api/events/messaging_client_events
+import logos_delivery/api/events/[kernel_events, messaging_client_events]
 import logos_delivery/api/conf/modes
 import logos_delivery/messaging/messaging_metrics
 
@@ -75,6 +75,8 @@ type SendService* = ref object of RootObj
     ## Chronos wakes the waiters in the order that they started to wait, so the
     ## parked tasks reach `admissionLock` in the order that they parked.
   retryLoopHandle: Future[void] ## The `retryLoop`, nil while the service does not run.
+  networkHasMessageListener: MessageSeenEventListener
+    ## Sets `networkHasMessage` on the task of each message that this node receives.
   attempts: int
     ## The number of attempts that ended, in admission or in a send. Only tests
     ## read it.
@@ -203,12 +205,11 @@ proc storeConfirmationExpected(self: SendService, task: DeliveryTask): bool =
   return self.checkStoreForMessages and not task.isEphemeral()
 
 proc awaitsStoreValidation*(self: SendService, task: DeliveryTask): bool =
-  ## True while a propagated task still needs a store node to confirm it. A task
-  ## that went out over mix never does: the store query would carry its hash in
-  ## clear from this node's own address.
+  ## True while a propagated task still needs a store node to confirm it.
+  ## An anonymous task never does, so that no query ties this node to its message.
   return
     self.storeConfirmationExpected(task) and
-    task.state == DeliveryState.SuccessfullyPropagated and not task.propagatedAnonymously
+    task.state == DeliveryState.SuccessfullyPropagated and not task.isAnonymous()
 
 func storeValidationKey(task: DeliveryTask): Moment =
   ## The last Store query time, or the first propagation for a task never asked.
@@ -292,10 +293,8 @@ proc queryStoreForTasks(
       messageCount = tasks.len, error = $error
     return
 
-  # The Store peer decides which hashes its answer lists, and it can list hashes
-  # that this node did not ask about. Only a task whose `deliver` waits for a Store
-  # confirmation takes a hash from the answer, so a message sent over mix is never
-  # confirmed.
+  # The answer of the Store peer can list hashes that are not in `batch`.
+  # Only a task that waits for a Store confirmation takes a hash from it.
   var reported: HashSet[WakuMessageHash]
   for item in storeResp.messages:
     reported.incl(item.messageHash)
@@ -412,18 +411,17 @@ proc failExpired(self: SendService, task: DeliveryTask): bool =
   return false
 
 proc reportPropagated(self: SendService, task: DeliveryTask) =
-  ## Emits `MessagePropagatedEvent`, and `MessageSentEvent` for a mixed send that
-  ## a plain send would confirm in Store.
+  ## Emits `MessagePropagatedEvent`.
+  ## An anonymous send also gets `MessageSentEvent`, in place of the Store confirmation.
   # INFO lines reach log collectors, where a hash would tie this node to an
   # anonymized message; `MixSendProcessor` still logs it at DEBUG.
   info "Message successfully propagated",
     requestId = task.requestId, msgHash = task.loggedHash()
   MessagePropagatedEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
   task.propagatedEventEmitted = true
-  if task.propagatedAnonymously and self.storeConfirmationExpected(task):
-    # The exit's reply completes a mixed send when a plain send would wait for
-    # a store confirmation, so both paths end with the same event. The INFO line
-    # omits the hash.
+  if task.isAnonymous() and self.storeConfirmationExpected(task):
+    # An anonymous task propagates when the exit answers or the network has the message.
+    # It gets `sent` here, where a plain send waits for a Store confirmation.
     info "Message successfully sent over mix", requestId = task.requestId
     MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
 
@@ -513,16 +511,36 @@ proc retryLoop(self: SendService) {.async: (raises: [CancelledError]).} =
     await sleepAsync(self.retryInterval)
     self.retryNow()
 
+proc setPropagatedIfNetworkHasMessage(task: DeliveryTask): bool =
+  ## Marks the task propagated when an attempt sent the message and the network has it.
+  ## Returns true when the task is propagated.
+  ## This is the mix counterpart of the Store confirmation of a plain send.
+  ## Mix never asks Store, because the query would name the message from this node.
+  ## Call it after each wait, because the network can have the message by then.
+  if task.state == DeliveryState.SuccessfullyPropagated:
+    return true
+  if not (task.hadSendAttempt() and task.networkHasMessage()):
+    return false
+  debug "The network has the message, the send is complete",
+    requestId = task.requestId, msgHash = task.msgHash.to0xHex()
+  task.setPropagated()
+  return true
+
 proc sendUntilPropagated(
     self: SendService, task: DeliveryTask
 ): Future[bool] {.async: (raises: [CancelledError]).} =
   ## Makes the first attempt at once, then one attempt at each tick of
   ## `retryLoop`, until the task propagates. Returns false when the task failed.
   while true:
+    if task.setPropagatedIfNetworkHasMessage():
+      # An earlier attempt can have sent the message, also one that a stop cut.
+      self.reportPropagated(task)
+      return true
     if not self.needsAdmission(task) or await self.runAdmission(task):
       await self.sendSlots.acquire()
       try:
-        await self.sendProcessor.process(task)
+        if not task.setPropagatedIfNetworkHasMessage():
+          await self.sendProcessor.process(task)
       except CancelledError as exc:
         raise exc
       except CatchableError as exc:
@@ -533,6 +551,8 @@ proc sendUntilPropagated(
       finally:
         self.sendSlots.release2()
     self.attempts.inc()
+    # Also when the admission or the attempt failed.
+    discard task.setPropagatedIfNetworkHasMessage()
     case task.state
     of DeliveryState.SuccessfullyPropagated:
       self.reportPropagated(task)
@@ -563,8 +583,7 @@ proc waitForStoreValidation(
   try:
     if left > ZeroDuration and await task.storeAnswer.withTimeout(left):
       task.state = DeliveryState.SuccessfullyValidated
-      # An anonymized task gets here only through the clear republish of a
-      # `Preferred` send whose mix reply was lost.
+      # An anonymized task gets here only when it is deanonymized.
       info "Message successfully sent",
         requestId = task.requestId, msgHash = task.loggedHash()
       MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
@@ -572,7 +591,7 @@ proc waitForStoreValidation(
     else:
       info "Message propagated but not validated by a store node within time window; stop trying.",
         requestId = task.requestId,
-        msgHash = task.msgHash.to0xHex(),
+        msgHash = task.loggedHash(),
         waited = task.storeValidationWaited + (Moment.now() - started)
       recordStoreValidationTimeout()
       self.fail(
@@ -640,6 +659,17 @@ proc enqueue*(self: SendService, task: DeliveryTask): Result[RequestId, string] 
   self.startDeliverSoon(task)
   return ok(task.requestId)
 
+proc setNetworkHasMessage(
+    self: SendService, pubsubTopic: PubsubTopic, msg: WakuMessage
+) =
+  ## Sets `networkHasMessage` on the queued task of `msg`, a message from the network.
+  ## The send loop and the mix attempt read it.
+  if self.deliveryTasks.len == 0:
+    return
+  let task = self.deliveryTasks.getOrDefault(computeMessageHash(pubsubTopic, msg))
+  if not task.isNil():
+    task.setNetworkHasMessage()
+
 proc startSendService*(self: SendService) =
   ## Starts each task. Call it after `stopSendService` ends. A call while the
   ## service runs does nothing.
@@ -649,6 +679,14 @@ proc startSendService*(self: SendService) =
   for task in self.deliveryTasks.values:
     self.startDeliverSoon(task)
   self.retryLoopHandle = self.retryLoop()
+  self.networkHasMessageListener = MessageSeenEvent.listen(
+    self.brokerCtx,
+    proc(event: MessageSeenEvent) {.async: (raises: []).} =
+      self.setNetworkHasMessage(event.topic, event.message),
+  ).valueOr:
+    # Without the listener, a copy of the message does not set `networkHasMessage`.
+    error "Failed to set MessageSeenEvent listener", error = error
+    MessageSeenEventListener()
   if self.checkStoreForMessages:
     self.storeValidationHandle = self.storeValidationLoop()
 
@@ -656,7 +694,10 @@ proc stopSendService*(self: SendService) {.async: (raises: []).} =
   ## Cancels each `deliver`, `retryLoop`, the Store validation loop and each
   ## resend. The tasks stay in the send queue with no event, and
   ## `startSendService` starts them again.
+  ## A stop also drops the `MessageSeenEvent` listener.
   self.running = false
+  await MessageSeenEvent.dropListener(self.brokerCtx, self.networkHasMessageListener)
+  self.networkHasMessageListener = MessageSeenEventListener()
   var handles: seq[Future[void]]
   for handle in [self.retryLoopHandle, self.storeValidationHandle]:
     if not handle.isNil():

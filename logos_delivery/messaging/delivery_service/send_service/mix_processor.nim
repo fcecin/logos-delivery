@@ -69,6 +69,9 @@ proc new*(
     mixWindow: mixWindow,
   )
 
+method deanonymizes*(self: MixSendProcessor): bool {.gcsafe.} =
+  return false
+
 method isValidProcessor*(self: MixSendProcessor, task: DeliveryTask): bool {.gcsafe.} =
   return true
 
@@ -150,6 +153,30 @@ method checkBeforeAdmission*(
     return false
   return true
 
+proc publishUntilAnswered(
+    self: MixSendProcessor, task: DeliveryTask
+): Future[Opt[WakuLightPushResult]] {.async.} =
+  ## Publishes the message over mix until the exit answers or the network has it.
+  ## Returns the answer of the exit, or none when the network had the message first.
+  if task.networkHasMessage():
+    # A copy came before the attempt, so the attempt starts no publish.
+    return Opt.none(WakuLightPushResult)
+  let publish =
+    self.waku.lightpushPublishToAny(task.pubsubTopic, task.msg, mixify = true)
+  let networkHasMessageWait = task.waitForNetworkHasMessage()
+  try:
+    # The exit publishes before it answers, so a copy from the network also answers.
+    discard await race(FutureBase(publish), FutureBase(networkHasMessageWait))
+  except CancelledError as exc:
+    await publish.cancelAndWait()
+    raise exc
+  finally:
+    networkHasMessageWait.cancelSoon()
+  if not publish.finished():
+    await publish.cancelAndWait()
+    return Opt.none(WakuLightPushResult)
+  return Opt.some(await publish)
+
 method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.async.} =
   # No wait can make the message fit, so check the size before the reasons that
   # a wait can clear. A task that is too large has no mix attempt, so it must not
@@ -191,9 +218,20 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
     msgHash = task.msgHash.to0xHex(),
     tryCount = task.tryCount
 
-  let numLightpushServers = (
-    await self.waku.lightpushPublishToAny(task.pubsubTopic, task.msg, mixify = true)
-  ).valueOr:
+  let answer = await self.publishUntilAnswered(task)
+  if answer.isNone() or task.networkHasMessage():
+    debug "The network has the message, the mix send is complete",
+      requestId = task.requestId, msgHash = task.msgHash.to0xHex()
+    task.setPropagated()
+    return
+
+  let numLightpushServers = answer.get().valueOr:
+    if error.isAlreadySeenRejection():
+      # The refusal of the exit means what its success answer means.
+      debug "The mix exit already has the message",
+        requestId = task.requestId, msgHash = task.msgHash.to0xHex()
+      task.setPropagated()
+      return
     debug "MixSendProcessor.sendImpl failed", error = error.desc.get($error.code)
 
     if error.isRlnRejection():
@@ -213,10 +251,7 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
   if numLightpushServers > 0:
     debug "Message propagated via Mix",
       requestId = task.requestId, msgHash = task.msgHash.to0xHex()
-    task.state = DeliveryState.SuccessfullyPropagated
-    task.propagatedAnonymously = true
-    if task.firstPropagatedTime.isNone():
-      task.firstPropagatedTime = Opt.some(Moment.now())
+    task.setPropagated()
   else:
     debug "Mix publish returned zero peers, the task waits for a retry",
       requestId = task.requestId
