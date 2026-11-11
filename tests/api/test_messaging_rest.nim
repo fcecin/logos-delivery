@@ -1,12 +1,14 @@
 {.used.}
 
 import
-  std/[json, net, sequtils, strutils],
+  std/[algorithm, json, net, sequtils, strutils],
   chronos,
   metrics,
   testutils/unittests,
   presto,
   presto/client as presto_client,
+  stew/byteutils,
+  json_serialization,
   libp2p/crypto/crypto
 import brokers/broker_context
 import logos_delivery
@@ -14,6 +16,7 @@ import
   logos_delivery/api/conf/logos_delivery_conf,
   rest/messaging_api/client as messaging_rest_client,
   rest/messaging_api/event_cache,
+  rest/serdes,
   rest/client,
   logos_delivery/waku/common/base64
 import tools/confutils/cli_args
@@ -200,6 +203,78 @@ suite "Messaging REST API":
     check:
       records.len == 1
       records[0]["kind"].getStr() == $SendEventKind.Unconfirmed
+
+    await rest.stop(node)
+
+    (await node.stop()).isOkOr:
+      raiseAssert "Failed to stop node: " & error
+
+  asyncTest "each send record carries anonymous also when it is false":
+    ## An app reads `anonymous` to learn if the node sent the message only over mix.
+    var node: LogosDelivery
+    var rest: RestService
+    lockNewGlobalBrokerContext:
+      node = (await LogosDelivery.new(restNodeConf())).valueOr:
+        raiseAssert error
+      rest = (await node.startWithRest()).valueOr:
+        raiseAssert "Failed to start node: " & error
+    let brokerCtx = node.waku.brokerCtx
+    # For each kind, one send that went out over mix only and one with no guarantee.
+    for anonymous in [true, false]:
+      let id = if anonymous: "mix" else: "clear"
+      MessagePropagatedEvent.emit(
+        brokerCtx,
+        MessagePropagatedEvent(
+          requestId: RequestId(id & "-sent"), messageHash: "0x1", anonymous: anonymous
+        ),
+      )
+      MessageSentEvent.emit(
+        brokerCtx,
+        MessageSentEvent(
+          requestId: RequestId(id & "-sent"), messageHash: "0x1", anonymous: anonymous
+        ),
+      )
+      MessageUnconfirmedEvent.emit(
+        brokerCtx,
+        MessageUnconfirmedEvent(
+          requestId: RequestId(id & "-unconfirmed"),
+          messageHash: "0x2",
+          anonymous: anonymous,
+        ),
+      )
+      MessageQueuedEvent.emit(
+        brokerCtx,
+        MessageQueuedEvent(
+          requestId: RequestId(id & "-error"), messageHash: "0x3", anonymous: anonymous
+        ),
+      )
+      MessageErrorEvent.emit(
+        brokerCtx,
+        MessageErrorEvent(
+          requestId: RequestId(id & "-error"),
+          messageHash: "0x3",
+          error: "late",
+          anonymous: anonymous,
+        ),
+      )
+
+    for anonymous in [true, false]:
+      let id = if anonymous: "mix" else: "clear"
+      for (suffix, kinds) in [
+        ("-sent", @["propagated", "sent"]),
+        ("-unconfirmed", @["unconfirmed"]),
+        ("-error", @["error", "queued"]),
+      ]:
+        let records = await rest.server.waitForSendRecords(id & suffix, kinds.len)
+        check records.mapIt(it["kind"].getStr()).sorted() == kinds
+        for record in records:
+          # The wire has the key, also for `false`, and the typed reader reads it.
+          let typed = decodeFromJsonBytes(SendEventRecord, ($record).toBytes())
+          check:
+            record.hasKey("anonymous")
+            record["anonymous"].getBool() == anonymous
+            typed.isOk()
+            typed.get().anonymous == anonymous
 
     await rest.stop(node)
 

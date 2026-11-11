@@ -8,6 +8,7 @@ import
   ./test_send_service_scheduler,
   ./test_send_service_mix,
   ./test_send_service_seen,
+  ./test_send_service_anonymous,
   ./test_send_service_store_validation,
   ./test_send_service_unconfirmed,
   ./test_send_service_send_loop

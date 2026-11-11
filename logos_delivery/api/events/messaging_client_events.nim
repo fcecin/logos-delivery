@@ -8,37 +8,52 @@ EventBroker:
   # Event emitted when a store node, or the mix exit or a copy from the network for a
   # send over mix, confirms a message. Only with the `reliability` option on, and
   # never for an ephemeral message.
+  # `anonymous` is true when the node attempted to send the message only over mix.
+  # False gives no guarantee.
   type MessageSentEvent* = object
     requestId*: RequestId
     messageHash*: string
+    anonymous*: bool
 
 EventBroker:
   # Event emitted when a send over mix ends with no confirmation.
   # The node sent the message over mix, and the message can be on the network.
   # The node does not send it again.
+  # `anonymous` is true when the node attempted to send the message only over mix.
+  # It is always true here, because the node never sends such a message in the clear.
   type MessageUnconfirmedEvent* = object
     requestId*: RequestId
     messageHash*: string
+    anonymous*: bool
 
 EventBroker:
-  # Event emitted when a message send operation fails
+  # Event emitted when a message send operation fails.
+  # `anonymous` is true when the node attempted to send the message only over mix.
+  # False gives no guarantee.
   type MessageErrorEvent* = object
     requestId*: RequestId
     messageHash*: string
     error*: string
+    anonymous*: bool
 
 EventBroker:
   # Event emitted when a send is held back because the epoch's rate-limit budget
   # is spent. The message stays queued and is sent once the budget refills.
+  # `anonymous` is true when the node attempted to send the message only over mix.
+  # False gives no guarantee.
   type MessageQueuedEvent* = object
     requestId*: RequestId
     messageHash*: string
+    anonymous*: bool
 
 EventBroker:
   # Confirmation that a message has been correctly delivered to some neighbouring nodes.
+  # `anonymous` is true when the node attempted to send the message only over mix.
+  # False gives no guarantee.
   type MessagePropagatedEvent* = object
     requestId*: RequestId
     messageHash*: string
+    anonymous*: bool
 
 EventBroker:
   # Event emitted when either a message belongs to Live communication or

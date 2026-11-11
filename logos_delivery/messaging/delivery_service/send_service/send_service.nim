@@ -377,7 +377,11 @@ proc fail(self: SendService, task: DeliveryTask, errorDesc: string) =
   task.state = DeliveryState.FailedToDeliver
   task.errorDesc = errorDesc
   MessageErrorEvent.emit(
-    self.brokerCtx, task.requestId, task.msgHash.to0xHex(), errorDesc
+    self.brokerCtx,
+    task.requestId,
+    task.msgHash.to0xHex(),
+    errorDesc,
+    task.isAnonymous(),
   )
   self.finish(task)
 
@@ -386,7 +390,9 @@ proc reportUnconfirmed(self: SendService, task: DeliveryTask) =
   task.state = DeliveryState.Unconfirmed
   info "Message sent with no confirmation", requestId = task.requestId
   recordUnconfirmed()
-  MessageUnconfirmedEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+  MessageUnconfirmedEvent.emit(
+    self.brokerCtx, task.requestId, task.msgHash.to0xHex(), task.isAnonymous()
+  )
   self.finish(task)
 
 proc failExpired(self: SendService, task: DeliveryTask): bool =
@@ -431,13 +437,17 @@ proc reportPropagated(self: SendService, task: DeliveryTask) =
   # anonymized message; `MixSendProcessor` still logs it at DEBUG.
   info "Message successfully propagated",
     requestId = task.requestId, msgHash = task.loggedHash()
-  MessagePropagatedEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+  MessagePropagatedEvent.emit(
+    self.brokerCtx, task.requestId, task.msgHash.to0xHex(), task.isAnonymous()
+  )
   task.propagatedEventEmitted = true
   if task.isAnonymous() and self.storeConfirmationExpected(task):
     # An anonymous task propagates when the exit answers or the network has the message.
     # It gets `sent` here, where a plain send waits for a Store confirmation.
     info "Message successfully sent over mix", requestId = task.requestId
-    MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+    MessageSentEvent.emit(
+      self.brokerCtx, task.requestId, task.msgHash.to0xHex(), task.isAnonymous()
+    )
 
 proc reportTaskQueued(self: SendService, task: DeliveryTask) =
   ## Emits `MessageQueuedEvent` once for a task that waits for epoch budget.
@@ -446,7 +456,9 @@ proc reportTaskQueued(self: SendService, task: DeliveryTask) =
 
   info "Message queued for rate-limit budget",
     requestId = task.requestId, msgHash = task.loggedHash()
-  MessageQueuedEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+  MessageQueuedEvent.emit(
+    self.brokerCtx, task.requestId, task.msgHash.to0xHex(), task.isAnonymous()
+  )
   task.queuedEventEmitted = true
 
 proc admitAndProve(self: SendService, task: DeliveryTask): Future[bool] {.async.} =
@@ -605,7 +617,9 @@ proc waitForStoreValidation(
       # An anonymized task gets here only when it is deanonymized.
       info "Message successfully sent",
         requestId = task.requestId, msgHash = task.loggedHash()
-      MessageSentEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+      MessageSentEvent.emit(
+        self.brokerCtx, task.requestId, task.msgHash.to0xHex(), task.isAnonymous()
+      )
       self.finish(task)
     else:
       info "Message propagated but not validated by a store node within time window; stop trying.",

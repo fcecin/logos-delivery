@@ -77,6 +77,8 @@ A send is asynchronous. `200` means that the node accepted the message. The resu
 
 After a `sent`, `unconfirmed` or `error` event, no more events come for that message.
 
+Each send record has `anonymous`, with its value at the time of the event. `true` is a guarantee. The node attempted to send the message over mix, and it never attempted to send the message in the clear. `false` gives no guarantee. The node attempted to send the message in the clear, also when that attempt sent nothing, or it attempted no send yet. With `--anonymity-level=Preferred`, the node sends a message in the clear when mix cannot carry it, when it is too large for mix, or when its time for mix ends. A message that the node already sent over mix with no answer stays on mix. The records of that message after the attempt in the clear have `anonymous: false`. An `error` record can come after the node sent the message in the clear.
+
 * The `sent` event needs reliability. A send in the clear, or a deanonymized send over mix, also needs a Store peer.
 * A message sent with `"ephemeral": true` gets no `sent` event, because Store nodes do not keep ephemeral messages.
 * Reliability is on by default, and off for the `twn` and `status.prod` presets. `--reliability` overrides that.
