@@ -120,9 +120,7 @@ proc updatePoolSize*(size: int) =
   ## TTL runs out.
   mix_pool_size.set(size)
 
-proc processBootNodes(
-    bootnodes: seq[MixNodePubInfo], peermgr: PeerManager, mix: WakuMix
-) =
+proc processBootNodes(bootnodes: seq[MixNodePubInfo], mix: WakuMix) =
   var count = 0
   var added: seq[(PeerId, string)]
   for node in bootnodes:
@@ -131,12 +129,6 @@ proc processBootNodes(
         error = error, multiAddr = $node.multiAddr
       continue
     let peerId = pInfo.peerId
-
-    # A fleet node finds itself in its own preset. Skip that entry, or mix could
-    # draw this node as a hop or an exit and route a packet to itself.
-    if peerId == peermgr.switch.peerInfo.peerId:
-      debug "Skipping a mix bootstrap node that is this node itself", peerId = peerId
-      continue
 
     var peerPubKey: crypto.PublicKey
     if not peerId.extractPublicKey(peerPubKey):
@@ -152,18 +144,14 @@ proc processBootNodes(
     # addresses with its transport patterns, and the suffix stops the match.
     let multiAddr = pInfo.addrs[0]
 
-    # The pool entry comes first: `nodePool.add` writes `Infinite` confidence,
-    # and libp2p does not lower a confidence that it holds.
-    let mixPubInfo = MixPubInfo.init(peerId, multiAddr, node.pubKey, peerPubKey.skkey)
-    mix.nodePool.add(mixPubInfo)
+    let peer = RemotePeerInfo.init(
+      peerId, @[multiAddr], publicKey = peerPubKey, mixPubKey = Opt.some(node.pubKey)
+    )
+    mix.peerManager.addConfiguredMixNode(peer).isOkOr:
+      debug "Skipping a mix bootstrap node", peerId = peerId, error = error
+      continue
     count.inc()
     added.add((peerId, node.multiAddr))
-
-    peermgr.addPeer(
-      RemotePeerInfo.init(
-        peerId, @[multiAddr], publicKey = peerPubKey, mixPubKey = Opt.some(node.pubKey)
-      )
-    )
   # One mix node can have many entries, and one usable address is enough. So
   # check each mix node only now, with all its addresses in the pool.
   let unused = added.filterIt(mix.nodePool.get(it[0]).isNone()).mapIt(it[1])
@@ -177,7 +165,7 @@ proc processBootNodes(
 
 proc addBootNodes*(mix: WakuMix, bootnodes: seq[MixNodePubInfo]) =
   ## Adds bootstrap nodes resolved after the mount, and publishes the pool size.
-  processBootNodes(bootnodes, mix.peerManager, mix)
+  processBootNodes(bootnodes, mix)
   updatePoolSize(mix.poolSize())
 
 proc new*(
@@ -220,7 +208,7 @@ proc new*(
       if allowAllAddresses: AllMixAddressClasses else: PublicHopAddressClasses,
   )
 
-  processBootNodes(bootnodes, peermgr, m)
+  processBootNodes(bootnodes, m)
 
   let usable = m.poolSize()
   updatePoolSize(usable)
