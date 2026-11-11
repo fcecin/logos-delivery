@@ -6,6 +6,7 @@ from src.steps.common import StepsCommon
 from src.libs.common import to_base64
 from src.node.wrappers_manager import WrapperManager
 from src.node.wrapper_helpers import (
+    send_when_connected,
     EventCollector,
     assert_event_invariants,
     create_message_bindings,
@@ -28,7 +29,7 @@ SEND_AFTER_DESTROY_SUBPROCESS_TIMEOUT_S = 60
 S01_INVALID_HANDLE_HELPER = "tests.c_abi.helpers.send_invalid_handle"
 
 # S05: malformed content topics
-S05_EXPECTED_ERROR_FRAGMENT = "Failed to auto-subscribe"
+S05_EXPECTED_ERROR_FRAGMENT = "Failed to create delivery task"
 S05_MALFORMED_CONTENT_TOPICS = [
     # No leading slash — parser rejects with "must start with slash".
     ("s05-invalid-no-leading-slash", "no-leading-slash"),
@@ -153,7 +154,7 @@ class TestS03SendOnAlreadySubscribedTopic(StepsCommon):
                     contentTopic=content_topic,
                 )
 
-                send_result = sender.send_message(message=message)
+                send_result = send_when_connected(sender, message)
                 assert send_result.is_ok(), f"send() failed: {send_result.err()}"
 
                 request_id = send_result.ok_value
@@ -167,7 +168,7 @@ class TestS03SendOnAlreadySubscribedTopic(StepsCommon):
                 assert propagated is not None, (
                     f"No message_propagated event within {PROPAGATED_TIMEOUT_S}s. " f"Collected events: {sender_collector.events}"
                 )
-                assert propagated["requestId"] == request_id
+                assert propagated["messageHash"] == request_id
 
                 error = wait_for_error(sender_collector, request_id, timeout_s=0)
                 assert error is None, f"Unexpected message_error event: {error}"
@@ -236,7 +237,7 @@ class TestS04UnsubscribeThenSendSameTopic(StepsCommon):
                     contentTopic=content_topic,
                 )
 
-                send_result = sender.send_message(message=message)
+                send_result = send_when_connected(sender, message)
                 assert send_result.is_ok(), f"send() failed after unsubscribe: {send_result.err()}"
 
                 request_id = send_result.ok_value
@@ -251,7 +252,7 @@ class TestS04UnsubscribeThenSendSameTopic(StepsCommon):
                     f"No message_propagated event within {PROPAGATED_TIMEOUT_S}s "
                     f"after unsubscribe + send. Collected events: {sender_collector.events}"
                 )
-                assert propagated["requestId"] == request_id
+                assert propagated["messageHash"] == request_id
 
                 error = wait_for_error(sender_collector, request_id, timeout_s=0)
                 assert error is None, f"Unexpected message_error event: {error}"
@@ -264,11 +265,11 @@ class TestS04UnsubscribeThenSendSameTopic(StepsCommon):
 
 class TestS05AutoSubscribeFailureBeforeTaskCreation(StepsCommon):
     """
-    S05 — Auto-subscribe failure before task creation.
-    Sender is initialized but auto-subscription is forced to fail by using a
-    malformed content topic that breaks shard resolution inside
-    SubscriptionManager.subscribe().
-    Expected: send() returns Err with an "auto-subscribe" message, no events.
+    S05 — Shard resolution failure at task creation.
+    Sender is initialized but the send is forced to fail by using a
+    malformed content topic that breaks shard resolution when send()
+    creates the delivery task, before the auto-subscribe.
+    Expected: send() returns Err with a "delivery task" message, no events.
     Purpose: covers the last synchronous error path before request ID creation,
     across several distinct validator branches.
     """
@@ -295,8 +296,8 @@ class TestS05AutoSubscribeFailureBeforeTaskCreation(StepsCommon):
         assert sender_result.is_ok(), f"Failed to start sender: {sender_result.err()}"
 
         with sender_result.ok_value as sender:
-            # Malformed content topic — SubscriptionManager.subscribe() cannot
-            # resolve it to a shard, so auto-subscribe inside send() fails.
+            # Malformed content topic — send() cannot resolve it to a shard,
+            # so the creation of the delivery task fails.
             message = create_message_bindings(
                 payload=to_base64("S05 auto-subscribe failure payload"),
                 contentTopic=content_topic,
@@ -305,7 +306,7 @@ class TestS05AutoSubscribeFailureBeforeTaskCreation(StepsCommon):
             send_result = sender.send_message(message=message)
 
             assert send_result.is_err(), (
-                f"send() must return Err when auto-subscribe fails for " f"content_topic={content_topic!r}, got Ok({send_result.ok_value!r})"
+                f"send() must return Err when shard resolution fails for " f"content_topic={content_topic!r}, got Ok({send_result.ok_value!r})"
             )
 
             error_message = send_result.err() or ""

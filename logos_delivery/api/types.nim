@@ -1,11 +1,13 @@
 {.push raises: [].}
 
-import libp2p/crypto/crypto, chronos
+import libp2p/crypto/crypto, chronos, results
 import stew/byteutils
 import logos_delivery/waku/utils/requests as request_utils
-import logos_delivery/waku/waku_core/[topics/content_topic, message/message, time]
+import
+  logos_delivery/waku/waku_core/
+    [topics/content_topic, message/message, message/digest, time]
 
-export content_topic, message
+export content_topic, message, digest
 
 type
   MessageEnvelope* = object
@@ -17,7 +19,27 @@ type
       ## Higher layers (e.g. Reliable Channel) stamp this so peers can route
       ## ingress traffic to their corresponding layer. Empty by default.
 
-  RequestId* = distinct string
+  RequestId* = distinct string ## Identifies one send of a reliable channel.
+
+  SendErrorKind* {.pure.} = enum
+    RateLimited ## The rate-limit budget of the epoch is spent.
+    NotConnected ## The node has no peer that it can send through.
+    TooLarge ## The message is above a size limit of the node.
+    Duplicate ## The node already sends a message with this hash.
+    Other
+
+  SendError* = object ## Why `send` refused a message.
+    kind*: SendErrorKind
+    retryAfter*: Duration
+      ## For `RateLimited`, the time until the rate-limit budget refills.
+    desc*: string
+
+  SendResult* = Result[WakuMessageHash, SendError]
+
+  MessageErrorKind* {.pure.} = enum
+    NotPropagated
+      ## The one send of the message failed, or gave no result in the delivery window.
+    NotStored ## The message propagated, and no Store node confirmed it.
 
   ConnectionStatus* {.pure.} = enum
     Disconnected
@@ -42,6 +64,20 @@ proc `$`*(r: RequestId): string {.inline.} =
 
 proc `==`*(a, b: RequestId): bool {.inline.} =
   string(a) == string(b)
+
+func init*(
+    T: type SendError,
+    kind: SendErrorKind,
+    desc: string,
+    retryAfter: Duration = ZeroDuration,
+): T =
+  SendError(kind: kind, retryAfter: retryAfter, desc: desc)
+
+func `$`*(error: SendError): string =
+  ## An `Other` error gives only its description.
+  if error.kind == SendErrorKind.Other:
+    return error.desc
+  return $error.kind & ": " & error.desc
 
 proc init*(
     T: type MessageEnvelope,

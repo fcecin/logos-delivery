@@ -4,7 +4,9 @@ import results, std/[sequtils, net, sets, tables]
 import chronos, metrics, testutils/unittests, stew/byteutils
 import libp2p/[peerid, peerinfo, peerstore, multiaddress, crypto/crypto]
 import brokers/broker_context
-import ../testlib/[wakucore, wakunode, wakunodeconf, testasync, short_intervals]
+import
+  ../testlib/
+    [wakucore, wakunode, wakunodeconf, testasync, short_intervals, messaging_send]
 import logos_delivery/messaging/messaging_client
 import logos_delivery/messaging/messaging_metrics
 
@@ -1395,26 +1397,27 @@ suite "Subscription API - the subscription of a send":
     defer:
       await net.teardown()
     let ctx = net.edge.waku.brokerCtx
-    var failed: seq[RequestId]
+    var failed: seq[string]
     let listener = MessageErrorEvent
       .listen(
         ctx,
         proc(event: MessageErrorEvent) {.async: (raises: []).} =
-          failed.add(event.requestId),
+          failed.add(event.messageHash),
       )
       .expect("listen to send errors")
     defer:
       await MessageErrorEvent.dropListener(ctx, listener)
 
-    let requestId = (
+    # Mix is not mounted, so `send` refuses the message.
+    # The API send made no subscription.
+    let refused =
       await net.edge.messagingClient.send(MessageEnvelope.init(Sent, "anonymous"))
-    ).expect("send")
-    check not net.subscribed(Sent)
-    # Mix is not mounted, so the queued send fails. The API send made no
-    # subscription.
-    checkUntilTimeout:
-      requestId in failed
-    check not net.subscribed(Sent)
+    check refused.isErr()
+    if refused.isErr():
+      check refused.error.kind == SendErrorKind.NotConnected
+    check:
+      not net.subscribed(Sent)
+      failed.len == 0 # a refused send gets no event
 
     # A subscribe to a new filter peer carries the full interest set.
     (await net.edge.messagingClient.subscribe(App)).expect("subscribe")
@@ -1428,7 +1431,9 @@ suite "Subscription API - the subscription of a send":
     defer:
       await net.teardown()
 
-    # No lightpush peer, so the send does not go out.
+    # The lightpush peer is not reachable.
+    # So `send` accepts the message, and the message does not go out.
+    net.edge.addUnreachableLightpushPeer()
     discard (await net.edge.messagingClient.send(MessageEnvelope.init(Sent, "plain"))).expect(
       "send"
     )
