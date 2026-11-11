@@ -36,6 +36,7 @@ proc testConf(): WakuConf =
 
 type SendEvents = ref object
   propagated, unconfirmed, errors: int
+  unconfirmedAnonymous: seq[bool]
   propagatedListener: MessagePropagatedEventListener
   unconfirmedListener: MessageUnconfirmedEventListener
   errorListener: MessageErrorEventListener
@@ -58,7 +59,8 @@ suite "SendService - a task sent with no answer":
       .listen(
         waku.brokerCtx,
         proc(event: MessageUnconfirmedEvent) {.async: (raises: []).} =
-          sendEvents.unconfirmed.inc(),
+          sendEvents.unconfirmed.inc()
+          sendEvents.unconfirmedAnonymous.add(event.anonymous),
       )
       .expect("listen")
     events.errorListener = MessageErrorEvent
@@ -143,6 +145,31 @@ suite "SendService - a task sent with no answer":
     checkUntilTimeout:
       events.unconfirmed == 1
     check mix.others == 0
+
+  asyncTest "the unconfirmed event carries the anonymity of the task":
+    ## Mix never attempts a deanonymized task, so only a test makes the second task.
+    ## The test fails when the event does not read `isAnonymous`.
+    let processor = CountingProcessor()
+    let service = newService(processor)
+    defer:
+      await service.stopSendService()
+    let mixOnly = buildTask("mix-only", Moment.now() - service.maxDeliveryTime * 2)
+    let plainFirst =
+      buildTask("plain-first", Moment.now() - service.maxDeliveryTime * 2)
+    for task in [mixOnly, plainFirst]:
+      task.anonymized = true
+      task.markSendFinished(unanswered = true)
+    plainFirst.deanonymized = true
+
+    check service.enqueue(mixOnly).isOk()
+    checkUntilTimeout:
+      events.unconfirmed == 1
+    check service.enqueue(plainFirst).isOk()
+    checkUntilTimeout:
+      events.unconfirmed == 2
+    check:
+      events.unconfirmedAnonymous == @[true, false]
+      processor.calls == 0 # each window ended before the service attempted the task
 
   asyncTest "a copy during the wait for a send slot at the end of the window completes the send":
     ## The copy comes before the window ends, so the send propagates.

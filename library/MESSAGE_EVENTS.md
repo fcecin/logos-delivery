@@ -4,6 +4,15 @@
 
 The liblogosdelivery library emits five types of message delivery events and one message receipt event that clients can listen to by registering a per-event callback with `logosdelivery_add_event_listener()`. The events are delivered under the wire names `onMessageQueued`, `onMessageSent`, `onMessageUnconfirmed`, `onMessagePropagated`, `onMessageError` and `onMessageReceived` (the JSON `eventType` inside each payload is `message_queued` / `message_sent` / `message_unconfirmed` / `message_propagated` / `message_error` / `message_received`).
 
+## The `anonymous` field
+
+Each send event (`message_queued`, `message_propagated`, `message_sent`, `message_unconfirmed` and `message_error`) has the field `anonymous`, with its value at the time of the event:
+
+- `true`: the node attempted to send the message over mix, and it never attempted to send the message in the clear. This is a guarantee.
+- `false`: no guarantee. The node attempted to send the message in the clear, also when that attempt sent nothing, or it attempted no send yet.
+
+At the `Preferred` anonymity level, the node sends the message in the clear when mix cannot carry it, when it is too large for mix, or when its time for mix ends. A message that the node already sent over mix with no answer stays on mix. The field is `false` before the first send attempt, and it becomes `true` when the node attempts to send the message over mix. When an attempt in the clear starts, the field becomes `false` and stays `false`. A `message_error` can come after the node sent the message in the clear, and receivers can have that message.
+
 ## Event Types
 
 ### 1. message_sent
@@ -14,7 +23,8 @@ Emitted when the node confirms the delivery of a message that is not ephemeral, 
 {
   "eventType": "message_sent",
   "requestId": "unique-request-id",
-  "messageHash": "0x..."
+  "messageHash": "0x...",
+  "anonymous": false
 }
 ```
 
@@ -22,6 +32,7 @@ Emitted when the node confirms the delivery of a message that is not ephemeral, 
 - `eventType`: Always "message_sent"
 - `requestId`: Request ID returned from the send operation
 - `messageHash`: Hash of the message that was sent
+- `anonymous`: see [The `anonymous` field](#the-anonymous-field)
 
 ### 2. message_propagated
 Emitted when a message has been successfully propagated to neighboring nodes on the network.
@@ -31,7 +42,8 @@ Emitted when a message has been successfully propagated to neighboring nodes on 
 {
   "eventType": "message_propagated",
   "requestId": "unique-request-id",
-  "messageHash": "0x..."
+  "messageHash": "0x...",
+  "anonymous": false
 }
 ```
 
@@ -39,6 +51,7 @@ Emitted when a message has been successfully propagated to neighboring nodes on 
 - `eventType`: Always "message_propagated"
 - `requestId`: Request ID from the send operation
 - `messageHash`: Hash of the message that was propagated
+- `anonymous`: see [The `anonymous` field](#the-anonymous-field)
 
 ### 3. message_error
 Emitted when a send fails: rejected, retry window elapsed, parked too long, ephemeral dropped near the rate limit, or store validation timed out. A send over mix that got no answer ends with `message_unconfirmed` instead.
@@ -49,7 +62,8 @@ Emitted when a send fails: rejected, retry window elapsed, parked too long, ephe
   "eventType": "message_error",
   "requestId": "unique-request-id",
   "messageHash": "0x...",
-  "error": "error description"
+  "error": "error description",
+  "anonymous": false
 }
 ```
 
@@ -58,6 +72,7 @@ Emitted when a send fails: rejected, retry window elapsed, parked too long, ephe
 - `requestId`: Request ID from the send operation
 - `messageHash`: Hash of the message that failed
 - `error`: Description of what went wrong
+- `anonymous`: see [The `anonymous` field](#the-anonymous-field)
 
 ### 4. message_queued
 Emitted when a send is held back because the current epoch's rate-limit budget is spent. The message is not rejected: it stays queued and goes out once the budget refills. Emitted at most once per send, on the first time the message is held back.
@@ -67,7 +82,8 @@ Emitted when a send is held back because the current epoch's rate-limit budget i
 {
   "eventType": "message_queued",
   "requestId": "unique-request-id",
-  "messageHash": "0x..."
+  "messageHash": "0x...",
+  "anonymous": false
 }
 ```
 
@@ -75,6 +91,7 @@ Emitted when a send is held back because the current epoch's rate-limit budget i
 - `eventType`: Always "message_queued"
 - `requestId`: Request ID from the send operation
 - `messageHash`: Hash of the message that was held back
+- `anonymous`: see [The `anonymous` field](#the-anonymous-field)
 
 ### 5. message_received
 Emitted once for every message accepted on a subscribed content topic, whether it arrived live from the network or was recovered from a Store peer (at startup, or after a connectivity gap). The `source` field tells the two apart.
@@ -113,7 +130,8 @@ Emitted when a send over mix ends with no confirmation. The node sent the messag
 {
   "eventType": "message_unconfirmed",
   "requestId": "unique-request-id",
-  "messageHash": "0x..."
+  "messageHash": "0x...",
+  "anonymous": true
 }
 ```
 
@@ -121,6 +139,7 @@ Emitted when a send over mix ends with no confirmation. The node sent the messag
 - `eventType`: Always "message_unconfirmed"
 - `requestId`: Request ID from the send operation
 - `messageHash`: Hash of the message that was sent
+- `anonymous`: see [The `anonymous` field](#the-anonymous-field)
 
 ## Usage
 

@@ -60,31 +60,51 @@ proc start*(self: MessagingRestEvents, ctx: BrokerContext): Result[void, string]
 
   if self.sent.isNone():
     let listener = MessageSentEvent.listenIt(ctx):
-      cache.recordSend($it.requestId, it.messageHash, SendEventKind.Sent)
+      cache.recordSend(
+        $it.requestId, it.messageHash, SendEventKind.Sent, anonymous = it.anonymous
+      )
     let registered = listener.valueOr:
       return err(listenFailed("MessageSentEvent", error))
     self.sent = Opt.some(registered)
   if self.unconfirmed.isNone():
     let listener = MessageUnconfirmedEvent.listenIt(ctx):
-      cache.recordSend($it.requestId, it.messageHash, SendEventKind.Unconfirmed)
+      cache.recordSend(
+        $it.requestId,
+        it.messageHash,
+        SendEventKind.Unconfirmed,
+        anonymous = it.anonymous,
+      )
     let registered = listener.valueOr:
       return err(listenFailed("MessageUnconfirmedEvent", error))
     self.unconfirmed = Opt.some(registered)
   if self.queued.isNone():
     let listener = MessageQueuedEvent.listenIt(ctx):
-      cache.recordSend($it.requestId, it.messageHash, SendEventKind.Queued)
+      cache.recordSend(
+        $it.requestId, it.messageHash, SendEventKind.Queued, anonymous = it.anonymous
+      )
     let registered = listener.valueOr:
       return err(listenFailed("MessageQueuedEvent", error))
     self.queued = Opt.some(registered)
   if self.propagated.isNone():
     let listener = MessagePropagatedEvent.listenIt(ctx):
-      cache.recordSend($it.requestId, it.messageHash, SendEventKind.Propagated)
+      cache.recordSend(
+        $it.requestId,
+        it.messageHash,
+        SendEventKind.Propagated,
+        anonymous = it.anonymous,
+      )
     let registered = listener.valueOr:
       return err(listenFailed("MessagePropagatedEvent", error))
     self.propagated = Opt.some(registered)
   if self.errored.isNone():
     let listener = MessageErrorEvent.listenIt(ctx):
-      cache.recordSend($it.requestId, it.messageHash, SendEventKind.Error, it.error)
+      cache.recordSend(
+        $it.requestId,
+        it.messageHash,
+        SendEventKind.Error,
+        it.error,
+        anonymous = it.anonymous,
+      )
     let registered = listener.valueOr:
       return err(listenFailed("MessageErrorEvent", error))
     self.errored = Opt.some(registered)

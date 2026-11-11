@@ -15,6 +15,8 @@ declarePublicCounter logos_delivery_send_unconfirmed,
   "sends over mix that ended with no confirmation"
 declarePublicCounter logos_delivery_send_store_validation_timeouts,
   "messages propagated but failed without store-node validation within the retry window"
+declarePublicCounter logos_delivery_send_mix_fallbacks,
+  "sends at the Preferred anonymity level that the node attempted in the clear, because mix could not carry them or its window ended"
 declarePublicCounter logos_delivery_recv_messages,
   "messages delivered to the application, live from the network or history from Store",
   ["source"]
@@ -32,6 +34,9 @@ proc recordUnconfirmed*() =
 
 proc recordStoreValidationTimeout*() =
   logos_delivery_send_store_validation_timeouts.inc()
+
+proc recordMixFallback*() =
+  logos_delivery_send_mix_fallbacks.inc()
 
 proc recordReceived*(source: MessageSource, payloadBytes: int) =
   logos_delivery_recv_messages.inc(labelValues = [$source])

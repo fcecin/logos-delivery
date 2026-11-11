@@ -1,6 +1,7 @@
 import results, chronos
 import brokers/broker_context
 import logos_delivery/waku/waku, logos_delivery/waku/api/publish
+import logos_delivery/messaging/messaging_metrics
 import ./delivery_task
 
 {.push raises: [].}
@@ -20,6 +21,15 @@ method isValidProcessor*(
 method deanonymizes*(self: BaseSendProcessor): bool {.base, gcsafe.} =
   ## True for a processor that sends in the clear and so can show this node's address.
   return true
+
+proc deanonymize(task: DeliveryTask, chainHead: BaseSendProcessor) =
+  ## Sets `deanonymized` before a plain send attempt.
+  ## When the chain starts with mix, `recordMixFallback` counts the first such attempt.
+  ## That chain is the `Preferred` chain.
+  ## The `Required` chain has no plain processor, and the `None` chain has no mix.
+  if not task.deanonymized and not chainHead.deanonymizes():
+    recordMixFallback()
+  task.deanonymized = true
 
 method checkBeforeAdmission*(
     self: BaseSendProcessor, task: DeliveryTask
@@ -52,7 +62,7 @@ proc resend*(
   while not currentProcessor.isNil():
     if currentProcessor.canResend(task):
       if currentProcessor.deanonymizes():
-        task.deanonymized = true
+        task.deanonymize(self)
       await currentProcessor.resendImpl(task)
       return
     currentProcessor = currentProcessor.fallbackProcessor
@@ -81,7 +91,7 @@ method process*(
   while not currentProcessor.isNil() and keepTrying:
     if currentProcessor.isValidProcessor(task):
       if currentProcessor.deanonymizes():
-        task.deanonymized = true
+        task.deanonymize(self)
       await currentProcessor.sendImpl(task)
     currentProcessor = currentProcessor.fallbackProcessor
     keepTrying = task.state == DeliveryState.FallbackRetry

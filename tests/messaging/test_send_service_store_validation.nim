@@ -267,6 +267,73 @@ suite "SendService - mix completion":
     check await sent.waitCount(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
     check not await sent.waitCount(2).withTimeout(FUTURE_TIMEOUT_SHORT)
 
+  proc listenSentAnonymous(anonymous: ref seq[bool]): MessageSentEventListener =
+    ## Adds the `anonymous` field of each `MessageSentEvent` to `anonymous`.
+    return MessageSentEvent
+      .listen(
+        waku.brokerCtx,
+        proc(e: MessageSentEvent) {.async: (raises: []).} =
+          anonymous[].add(e.anonymous),
+      )
+      .expect("listen")
+
+  asyncTest "the sent event of a send that went out over mix only is anonymous":
+    ## The reply of the exit confirms the send.
+    let anonymous = new seq[bool]
+    let listener = listenSentAnonymous(anonymous)
+    defer:
+      await MessageSentEvent.dropListener(waku.brokerCtx, listener)
+    let service = reliableService(waku, ScriptedProc(overMix: true))
+    check service.enqueue(newTask("sent-mix")).isOk()
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+
+    checkUntilTimeout:
+      anonymous[].len == 1
+    check anonymous[] == @[true]
+
+  asyncTest "the sent event of a send that the Store confirms is not anonymous":
+    ## A mix attempt anonymized the task, and a plain attempt then deanonymized it.
+    ## Such a send waits for a Store confirmation, and its event must not say anonymous.
+    let anonymous = new seq[bool]
+    let listener = listenSentAnonymous(anonymous)
+    defer:
+      await MessageSentEvent.dropListener(waku.brokerCtx, listener)
+    let mix = MixThenFallbackProcessor()
+    mix.chain(PlainPropagatesProc())
+    let manager =
+      RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
+    let service = SendService
+      .new(
+        true,
+        waku,
+        manager,
+        mix,
+        AnonymityLevel.Preferred,
+        retryInterval = chronos.milliseconds(100),
+      )
+      .expect("SendService.new") # reliability = on
+    let task = newTask("sent-plain")
+    check service.enqueue(task).isOk()
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+    checkUntilTimeout:
+      not task.storeAnswer.isNil()
+    check:
+      task.anonymized
+      anonymous[].len == 0
+    if task.storeAnswer.isNil():
+      # The wait above failed, and the task does not wait for Store.
+      return
+
+    task.storeAnswer.complete()
+
+    checkUntilTimeout:
+      anonymous[].len == 1
+    check anonymous[] == @[false]
+
   asyncTest "a send that a plain attempt deanonymized after a mix attempt waits for a Store confirmation":
     ## A mix attempt anonymized the task, and a plain attempt then deanonymized it.
     ## The message went out in the clear, so only a Store confirmation ends the send.

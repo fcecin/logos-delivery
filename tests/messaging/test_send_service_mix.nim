@@ -2,6 +2,7 @@
 
 import std/[sequtils, sets, strutils]
 import chronos, testutils/unittests, results, stew/byteutils
+from metrics import value
 
 import
   libp2p_mix,
@@ -29,7 +30,8 @@ import
   logos_delivery/waku/factory/waku_conf,
   logos_delivery/messaging/rate_limit_manager/rate_limit_manager,
   logos_delivery/messaging/delivery_service/send_service/
-    [send_service, send_processor, mix_processor, delivery_task]
+    [send_service, send_processor, mix_processor, delivery_task],
+  logos_delivery/messaging/messaging_metrics
 import ../testlib/[futures, testasync, wakucore, wakunodeconf]
 
 ## Tests for the anonymity levels of the send path. The first suite mounts no
@@ -57,6 +59,12 @@ method isValidProcessor(self: RetryingProcessor, task: DeliveryTask): bool {.gcs
 method sendImpl(self: RetryingProcessor, task: DeliveryTask): Future[void] {.async.} =
   task.errorDesc = self.reason
   task.state = DeliveryState.NextRoundRetry
+
+type NoPeerProcessor = ref object of BaseSendProcessor
+  ## A plain processor with no peer, so it never attempts a task.
+
+method isValidProcessor(self: NoPeerProcessor, task: DeliveryTask): bool {.gcsafe.} =
+  return false
 
 proc testConf(): WakuConf =
   defaultTestWakuNodeConf().toWakuConf().valueOr:
@@ -243,6 +251,40 @@ suite "SendService - mix size before admission":
       task.msg.proof.len == 289
       not task.anonymized
       task.tryCount == 0
+
+  asyncTest "a Preferred send that its proof makes too large for mix is counted and not anonymous":
+    ## The case of issue 4690: the app learns that the message went out in the clear.
+    discard countingRln(waku, 289)
+    let plain = PlainSendProcessor()
+    let mix = MixSendProcessor.new(
+      waku, waku.brokerCtx, AnonymityLevel.Preferred, chronos.minutes(1)
+    )
+    mix.chain(plain)
+    let service = SendService
+      .new(false, waku, newManager(), mix, retryInterval = chronos.hours(1))
+      .expect("SendService.new")
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+    var anonymous: seq[bool]
+    let listener = MessagePropagatedEvent
+      .listen(
+        waku.brokerCtx,
+        proc(event: MessagePropagatedEvent) {.async: (raises: []).} =
+          anonymous.add(event.anonymous),
+      )
+      .expect("listen")
+    defer:
+      await MessagePropagatedEvent.dropListener(waku.brokerCtx, listener)
+    let fallbacks = logos_delivery_send_mix_fallbacks.value()
+
+    check service.enqueue(sizedProofTask("plain-fallback", mixLimit() + 1, 289)).isOk()
+
+    checkUntilTimeout:
+      anonymous.len == 1
+    check:
+      anonymous == @[false]
+      logos_delivery_send_mix_fallbacks.value() == fallbacks + 1
 
   asyncTest "a supplied proof uses its actual length before admission":
     let draws = countingRln(waku, 400)
@@ -776,6 +818,45 @@ suite "SendService - anonymity level with a mounted mix":
     check:
       plain.calls == 1
       fresh.state == DeliveryState.SuccessfullyPropagated
+
+  asyncTest "a Preferred task counts once as a fallback also when its send in the clear retries":
+    let plain = RetryingProcessor(reason: "busy")
+    let mix = MixSendProcessor.new(
+      waku, waku.brokerCtx, AnonymityLevel.Preferred, chronos.minutes(1)
+    )
+    mix.chain(plain)
+    let task = buildTask("counted-once", chronos.seconds(1))
+    let fallbacks = logos_delivery_send_mix_fallbacks.value()
+    await mix.process(task)
+    await mix.process(task)
+    check:
+      task.deanonymized
+      task.state == DeliveryState.NextRoundRetry
+      logos_delivery_send_mix_fallbacks.value() == fallbacks + 1
+
+  asyncTest "a Preferred task with no send attempt in the clear is not counted as a fallback":
+    ## Each pass hands the task over, and no plain send is attempted.
+    let mix = MixSendProcessor.new(
+      waku, waku.brokerCtx, AnonymityLevel.Preferred, chronos.minutes(1)
+    )
+    mix.chain(NoPeerProcessor())
+    let task = buildTask("counted-once-no-peer", chronos.seconds(1))
+    let fallbacks = logos_delivery_send_mix_fallbacks.value()
+    for _ in 0 ..< 3:
+      await mix.process(task)
+    check:
+      not task.deanonymized
+      logos_delivery_send_mix_fallbacks.value() == fallbacks
+
+  asyncTest "a send in the clear at the None level is not counted as a fallback":
+    ## At the `None` level the chain has no mix, so a plain send is no fallback.
+    let plain = RetryingProcessor(reason: "busy")
+    let task = buildTask("plain-chain", chronos.seconds(1))
+    let fallbacks = logos_delivery_send_mix_fallbacks.value()
+    await plain.process(task)
+    check:
+      task.deanonymized
+      logos_delivery_send_mix_fallbacks.value() == fallbacks
 
   asyncTest "a Preferred hand-over for an unusable mix is visible, once, and so is the recovery":
     ## `fellBackFor()` holds the reason that the INFO lines print. No exit hands
