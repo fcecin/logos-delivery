@@ -1,7 +1,7 @@
 {.used.}
 
 import
-  std/[sequtils, strutils, times, sugar, net],
+  std/[sequtils, sets, strutils, times, sugar, net],
   results,
   testutils/unittests,
   chronos,
@@ -15,7 +15,8 @@ import
   libp2p/crypto/crypto,
   libp2p/protocols/pubsub/pubsub,
   libp2p/protocols/pubsub/rpc/message,
-  libp2p/peerid
+  libp2p/peerid,
+  libp2p_mix/[curve25519, pool]
 from metrics import value, valueByName
 import
   logos_delivery/waku/[
@@ -1605,6 +1606,151 @@ procSuite "Peer Manager":
       not pm.switch.peerStore.peers.anyIt(it.peerId == peers[3].peerId)
       not pm.switch.peerStore.peers.anyIt(it.peerId == peers[4].peerId)
 
+  test "prunePeerStore() keeps the configured mix nodes and prunes the other peers":
+    let pm = PeerManager.new(
+      switch = SwitchBuilder
+        .new()
+        .withRng(crypto.newRng())
+        .withMplex()
+        .withNoise()
+        .withPeerStore(25)
+        .withMaxConnections(20)
+        .build(),
+      maxFailedAttempts = 1,
+      storage = nil,
+      maxConnections = 20,
+    )
+    proc peer(): RemotePeerInfo =
+      parsePeerInfo("/ip4/0.0.0.0/tcp/0/p2p/" & $PeerId.random(crypto.newRng()).get())
+        .get()
+
+    proc withMixKey(peer: RemotePeerInfo): RemotePeerInfo =
+      var configured = peer
+      configured.mixPubKey =
+        Opt.some(generateKeyPair().expect("mix key pair").publicKey)
+      return configured
+
+    proc peerOnShard(): RemotePeerInfo =
+      ## A peer with an ENR that has relay shard 0, so the prune sorts it by shard.
+      let node = newTestWakuNode(
+        generateSecp256k1Key(), clusterId = 0, subscribeShards = @[0'u16]
+      )
+      var info = node.switch.peerInfo.toRemotePeerInfo()
+      info.enr = Opt.some(node.enr)
+      return info
+
+    # One configured peer and one other peer for each pass of the prune.
+    let configuredFailed = peer()
+    let failed = peer()
+    let configured = peer()
+    let other = peer()
+    let configuredOnShard = peerOnShard()
+    let otherOnShard = peerOnShard()
+    for p in [failed, other, otherOnShard]:
+      pm.addPeer(p)
+    for p in [configuredFailed, configured, configuredOnShard]:
+      check pm.addConfiguredMixNode(p.withMixKey()).isOk()
+    for p in [configuredFailed, failed]:
+      pm.switch.peerStore[NumberFailedConnBook][p.peerId] = pm.maxFailedAttempts
+
+    # A capacity of 0 makes the prune take every peer that it may take.
+    pm.switch.peerStore.setCapacity(0)
+    pm.prunePeerStore()
+
+    check pm.switch.peerStore.peers.mapIt(it.peerId).toHashSet() ==
+      [configuredFailed.peerId, configured.peerId, configuredOnShard.peerId].toHashSet()
+
+  asyncTest "addConfiguredMixNode() takes the peer out of the cleanup queue of libp2p":
+    ## Real disconnects queue both peers before the node knows that one is configured.
+    let nodes = toSeq(0 ..< 3).mapIt(newTestWakuNode(generateSecp256k1Key()))
+    await allFutures(nodes.mapIt(it.start()))
+    defer:
+      await allFutures(nodes.mapIt(it.stop()))
+    let pm = nodes[0].peerManager
+    let configured = nodes[1].peerInfo.peerId
+    let other = nodes[2].peerInfo.peerId
+    for i in [1, 2]:
+      check await pm.connectPeer(nodes[i].peerInfo.toRemotePeerInfo())
+      await pm.switch.disconnect(nodes[i].peerInfo.peerId)
+    check pm.switch.peerStore.toClean == @[configured, other]
+    let mixKeys = generateKeyPair().expect("mix key pair")
+
+    check pm
+      .addConfiguredMixNode(
+        RemotePeerInfo.init(
+          configured, nodes[1].peerInfo.addrs, mixPubKey = Opt.some(mixKeys.publicKey)
+        )
+      )
+      .isOk()
+
+    check:
+      configured in pm.configuredMixNodes
+      pm.switch.peerStore.toClean == @[other]
+
+  test "addConfiguredMixNode() refuses this node and a peer with no mix key":
+    ## The peer store keeps a configured node for good.
+    ## Neither peer can be in the mix pool, so neither may get a row that stays.
+    let node = newTestWakuNode(generateSecp256k1Key())
+    let pm = node.peerManager
+    let address = MultiAddress.init("/ip4/127.0.0.1/tcp/1").tryGet()
+    let thisNode = RemotePeerInfo.init(
+      node.peerInfo.peerId,
+      @[address],
+      mixPubKey = Opt.some(generateKeyPair().expect("mix key pair").publicKey),
+    )
+    let noMixKey = RemotePeerInfo.init(PeerId.random(crypto.newRng()).get(), @[address])
+
+    check:
+      pm.addConfiguredMixNode(thisNode).isErr()
+      pm.addConfiguredMixNode(noMixKey).isErr()
+    for peerId in [thisNode.peerId, noMixKey.peerId]:
+      check:
+        peerId notin pm.configuredMixNodes
+        not pm.switch.peerStore[AddressBook].contains(peerId)
+
+  asyncTest "a configured mix node stays when libp2p cleans up the disconnected peers":
+    ## Real connections, so libp2p queues each peer before it emits `Left`.
+    ## With a capacity of 2, a queue of three peers makes libp2p delete the oldest one.
+    let nodes = toSeq(0 ..< 5).mapIt(newTestWakuNode(generateSecp256k1Key()))
+    await allFutures(nodes.mapIt(it.start()))
+    defer:
+      await allFutures(nodes.mapIt(it.stop()))
+    let pm = nodes[0].peerManager
+    let peerStore = pm.switch.peerStore
+    let configured = nodes[1].peerInfo.peerId
+    let others = nodes[2 ..< 5].mapIt(it.peerInfo.peerId)
+    let mixKeys = generateKeyPair().expect("mix key pair")
+    check pm
+      .addConfiguredMixNode(
+        RemotePeerInfo.init(
+          configured, nodes[1].peerInfo.addrs, mixPubKey = Opt.some(mixKeys.publicKey)
+        )
+      )
+      .isOk()
+    peerStore.setCapacity(2)
+
+    proc connectThenDisconnect(i: int): Future[bool] {.async.} =
+      let connected = await pm.connectPeer(nodes[i].peerInfo.toRemotePeerInfo())
+      # `disconnect` returns after the `Left` handlers ran.
+      await pm.switch.disconnect(nodes[i].peerInfo.peerId)
+      return connected
+
+    check:
+      await connectThenDisconnect(2)
+      await connectThenDisconnect(1)
+    # The `Left` handler took only the configured node out of the queue.
+    check peerStore.toClean == @[others[0]]
+
+    # Without the `Left` handler, the configured node would be second in the queue now.
+    # The next two disconnects would then delete it.
+    check:
+      await connectThenDisconnect(3)
+      await connectThenDisconnect(4)
+    check:
+      peerStore.toClean == @[others[1], others[2]]
+      peerStore[AddressBook].contains(configured)
+      peerStore[MixPubKeyBook][configured] == mixKeys.publicKey
+
   asyncTest "canBeConnected() returns correct value":
     let pm = PeerManager.new(
       switch = SwitchBuilder
@@ -1661,6 +1807,51 @@ procSuite "Peer Manager":
     pm.maxFailedAttempts = 2
     check:
       pm.canBeConnected(p1) == false
+
+  test "canBeConnected() caps the backoff of a configured mix node at the backoff of maxFailedAttempts":
+    let pm = PeerManager.new(
+      switch = SwitchBuilder
+        .new()
+        .withRng(crypto.newRng())
+        .withMplex()
+        .withNoise()
+        .withPeerStore(25)
+        .withMaxConnections(20)
+        .build(),
+      initialBackoffInSec = 100,
+      backoffFactor = 2,
+      maxFailedAttempts = 2,
+      storage = nil,
+      maxConnections = 20,
+    )
+    let configured = PeerId.random(crypto.newRng()).get()
+    let other = PeerId.random(crypto.newRng()).get()
+    check pm
+      .addConfiguredMixNode(
+        RemotePeerInfo.init(
+          configured,
+          @[MultiAddress.init("/ip4/127.0.0.1/tcp/1").tryGet()],
+          mixPubKey = Opt.some(generateKeyPair().expect("mix key pair").publicKey),
+        )
+      )
+      .isOk()
+
+    # With no cap, 5 failed dials make a backoff of 1600 s.
+    # The configured node waits 200 s, the backoff of `maxFailedAttempts`.
+    for p in [configured, other]:
+      pm.switch.peerStore[NumberFailedConnBook][p] = 5
+      pm.switch.peerStore[LastFailedConnBook][p] =
+        Moment.init(getTime().toUnix - 100, Second)
+    check:
+      not pm.canBeConnected(configured)
+      not pm.canBeConnected(other)
+
+    for p in [configured, other]:
+      pm.switch.peerStore[LastFailedConnBook][p] =
+        Moment.init(getTime().toUnix - 200, Second)
+    check:
+      pm.canBeConnected(configured)
+      not pm.canBeConnected(other)
 
   test "peer manager must fail if max backoff is over a week":
     # Should result in overflow exception

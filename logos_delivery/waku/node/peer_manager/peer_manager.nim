@@ -128,6 +128,11 @@ type PeerManager* = ref object
   getShards: GetShards
   maxConnections: int
   activeStoreRequests*: Table[PeerId, int]
+  configuredMixNodes*: HashSet[PeerId]
+    ## The mix nodes of `--mixnode`, the network preset and `waku_mix_add_peer`.
+    ## The owner chose them, so the prune and the libp2p cleanup keep them.
+    ## Relay never gives up on them.
+    ## `addConfiguredMixNode` is the only writer.
 
 #~~~~~~~~~~~~~~~~~~~#
 # Helper Functions  #
@@ -572,15 +577,18 @@ proc canBeConnected*(pm: PeerManager, peerId: PeerId): bool =
     return true
 
   # if there are too many failed attempts, do not reconnect
-  if failedAttempts >= pm.maxFailedAttempts:
+  # A configured mix node never gets this stop.
+  # Its backoff stops at the backoff of `maxFailedAttempts`.
+  if failedAttempts >= pm.maxFailedAttempts and peerId notin pm.configuredMixNodes:
     return false
 
   # If it errored we wait an exponential backoff from last connection
   # the more failed attempts, the greater the backoff since last attempt
   let now = Moment.init(getTime().toUnix, Second)
   let lastFailed = peerStore[LastFailedConnBook][peerId]
-  let backoff =
-    calculateBackoff(pm.initialBackoffInSec, pm.backoffFactor, failedAttempts)
+  let backoff = calculateBackoff(
+    pm.initialBackoffInSec, pm.backoffFactor, min(failedAttempts, pm.maxFailedAttempts)
+  )
 
   return now >= (lastFailed + backoff)
 
@@ -902,6 +910,10 @@ proc onPeerIdentified(pm: PeerManager, peerId: PeerId) {.async.} =
   asyncSpawn(pm.switch.disconnect(peerId))
   pm.switch.peerStore.delete(peerId)
 
+proc removeFromCleanupQueue(pm: PeerManager, peerId: PeerId) =
+  ## libp2p deletes the oldest peers of this queue while it is longer than the capacity.
+  pm.switch.peerStore.toClean.keepItIf(it != peerId)
+
 # called when a peer i) first connects to us ii) disconnects all connections from us
 proc onPeerEvent(pm: PeerManager, peerId: PeerId, event: PeerEvent) {.async.} =
   var peerStore = pm.switch.peerStore
@@ -945,6 +957,11 @@ proc onPeerEvent(pm: PeerManager, peerId: PeerId, event: PeerEvent) {.async.} =
   of PeerEventKind.Left:
     direction = UnknownDirection
     connectedness = CanConnect
+
+    # libp2p queues the peer for deletion before `Left`.
+    # Take a configured mix node out.
+    if peerId in pm.configuredMixNodes:
+      pm.removeFromCleanupQueue(peerId)
 
     # note we cant access the peerId ip here as the connection was already closed
     for ip, peerIds in pm.ipTable.pairs:
@@ -1136,6 +1153,26 @@ proc manageRelayPeers*(pm: PeerManager) {.async.} =
     trace "Connecting to Peers", peerIds = $uniquePeers[i ..< stop]
     await pm.connectToNodes(uniquePeers[i ..< stop])
 
+proc addConfiguredMixNode*(
+    pm: PeerManager, peer: RemotePeerInfo
+): Result[void, string] =
+  ## Adds a mix node that the owner of this node gives, and keeps it in the peer store.
+  ## The mix pool reads the peer store, so the node is in the pool too.
+  if peer.peerId == pm.switch.peerInfo.peerId:
+    return err("Mix peer is this node")
+  if peer.mixPubKey.isNone():
+    return err("Mix peer has no mix key")
+  pm.addPeer(peer)
+  # Peer persistence can store an address at a lower confidence.
+  # Raise it to `Infinite`, so the address TTL of libp2p never deletes it.
+  pm.switch.peerStore[AddressBook].extend(
+    peer.peerId, peer.addrs, AddressConfidence.Infinite
+  )
+  pm.configuredMixNodes.incl(peer.peerId)
+  # The node can still be in the libp2p cleanup queue from an earlier disconnect.
+  pm.removeFromCleanupQueue(peer.peerId)
+  return ok()
+
 proc prunePeerStore*(pm: PeerManager) =
   let peerStore = pm.switch.peerStore
   let numPeers = peerStore[AddressBook].book.len
@@ -1149,7 +1186,7 @@ proc prunePeerStore*(pm: PeerManager) =
 
   # prune failed connections
   for peerId, count in peerStore[NumberFailedConnBook].book.pairs:
-    if count < pm.maxFailedAttempts:
+    if count < pm.maxFailedAttempts or peerId in pm.configuredMixNodes:
       continue
 
     if peersToPrune.len >= pruningCount:
@@ -1157,7 +1194,9 @@ proc prunePeerStore*(pm: PeerManager) =
 
     peersToPrune.incl(peerId)
 
-  var notConnected = peerStore.getDisconnectedPeers().mapIt(it.peerId)
+  var notConnected = peerStore.getDisconnectedPeers().mapIt(it.peerId).filterIt(
+      it notin pm.configuredMixNodes
+    )
 
   # Always pick random non-connected peers
   shuffle(notConnected)

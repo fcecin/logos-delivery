@@ -51,12 +51,11 @@ proc waku_mix_add_peer(
     let publicKey = PublicKey(scheme: Secp256k1, skkey: pubkey)
     if PeerId.init(publicKey).valueOr(default(PeerId)) != peerId:
       return err("Mix peer id does not match public key")
-    mix.nodePool.add(MixPubInfo.init(peerId, address, key, pubkey))
-    self.waku.node.peerManager.addPeer(
-      RemotePeerInfo.init(
-        peerId, @[address], publicKey = publicKey, mixPubKey = Opt.some(key)
-      )
+    let peer = RemotePeerInfo.init(
+      peerId, @[address], publicKey = publicKey, mixPubKey = Opt.some(key)
     )
+    self.waku.node.peerManager.addConfiguredMixNode(peer).isOkOr:
+      return err(error)
     if mix.nodePool.get(peerId).isNone():
       return err(
         "Mix has no usable address for this peer. A private or a loopback address needs mix-allow-all-addresses"
