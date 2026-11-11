@@ -25,6 +25,7 @@ import
     node/peer_manager/peer_store/waku_peer_storage,
     waku_node,
     waku_core,
+    waku_enr,
     waku_enr/capabilities,
     waku_relay/protocol,
     waku_filter_v2/common,
@@ -1604,6 +1605,44 @@ procSuite "Peer Manager":
       not pm.switch.peerStore.peers.anyIt(it.peerId == peers[2].peerId)
       not pm.switch.peerStore.peers.anyIt(it.peerId == peers[3].peerId)
       not pm.switch.peerStore.peers.anyIt(it.peerId == peers[4].peerId)
+
+  test "prunePeerStore() prunes the shard with the most peers":
+    let pm = PeerManager.new(
+      switch = SwitchBuilder
+        .new()
+        .withRng(crypto.newRng())
+        .withMplex()
+        .withNoise()
+        .withPeerStore(25)
+        .withMaxConnections(20)
+        .build(),
+      storage = nil,
+      maxConnections = 20,
+    )
+    proc addPeerOnShard(shard: uint16): PeerId =
+      let key = generateSecp256k1Key()
+      var builder = EnrBuilder.init(key)
+      builder.withWakuRelaySharding(RelayShards.init(1, shard).get()).expect("sharding")
+      let peerId = PeerId.init(key.getPublicKey().get()).get()
+      pm.addPeer(
+        RemotePeerInfo.init(
+          peerId,
+          @[MultiAddress.init("/ip4/127.0.0.1/tcp/1").get()],
+          enr = Opt.some(builder.build().get()),
+        )
+      )
+      return peerId
+
+    let large = toSeq(1 .. 6).mapIt(addPeerOnShard(1))
+    let small = toSeq(1 .. 4).mapIt(addPeerOnShard(2))
+
+    # 10 peers over a capacity of 6
+    pm.switch.peerStore.setCapacity(6)
+    pm.prunePeerStore()
+
+    check:
+      large.countIt(pm.switch.peerStore.peerExists(it)) == 3
+      small.countIt(pm.switch.peerStore.peerExists(it)) == 3
 
   asyncTest "canBeConnected() returns correct value":
     let pm = PeerManager.new(
