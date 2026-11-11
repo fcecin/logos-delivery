@@ -16,7 +16,9 @@ import
   logos_delivery/messaging/delivery_service/send_service/
     [send_service, send_processor, lightpush_processor, delivery_task],
   logos_delivery/api/events/messaging_client_events
-import ../testlib/[futures, testasync, wakunodeconf, wakucore, wakunode]
+import
+  ../testlib/
+    [futures, testasync, wakunodeconf, wakucore, wakunode, send_service_fixtures]
 import ../waku_store/store_utils
 import ../waku_lightpush/lightpush_utils
 import logos_delivery/waku/waku_lightpush/common
@@ -141,36 +143,17 @@ method process(self: ScriptedProc, task: DeliveryTask): Future[void] {.async.} =
   if task.firstPropagatedTime.isNone():
     task.firstPropagatedTime = Opt.some(Moment.now())
 
-type MixAfterPlainProc = ref object of BaseSendProcessor
-  ## A mix attempt that hands the first pass to the plain path.
-  ## It propagates the message over mix at the next pass.
-  calls: int
+type PlainPropagatesProc = ref object of BaseSendProcessor
+  ## A plain attempt that propagates the message.
 
-method deanonymizes(self: MixAfterPlainProc): bool {.gcsafe.} =
-  return false
-
-method isValidProcessor(self: MixAfterPlainProc, task: DeliveryTask): bool {.gcsafe.} =
+method isValidProcessor(
+    self: PlainPropagatesProc, task: DeliveryTask
+): bool {.gcsafe.} =
   return true
 
-method sendImpl(self: MixAfterPlainProc, task: DeliveryTask): Future[void] {.async.} =
-  # The first call marks the task and hands it over.
-  # The mix processor does that in two rounds: an attempt, then the hand-over.
-  inc self.calls
-  task.anonymized = true
-  if self.calls == 1:
-    task.state = DeliveryState.FallbackRetry
-    return
+method sendImpl(self: PlainPropagatesProc, task: DeliveryTask): Future[void] {.async.} =
   task.state = DeliveryState.SuccessfullyPropagated
   task.firstPropagatedTime = Opt.some(Moment.now())
-
-type PlainRetryProc = ref object of BaseSendProcessor
-  ## A plain attempt that leaves the task for a retry.
-
-method isValidProcessor(self: PlainRetryProc, task: DeliveryTask): bool {.gcsafe.} =
-  return true
-
-method sendImpl(self: PlainRetryProc, task: DeliveryTask): Future[void] {.async.} =
-  task.state = DeliveryState.NextRoundRetry
 
 const FastLoop = chronos.milliseconds(10)
   ## The loop interval of a test service. It keeps each wait for a loop short.
@@ -284,14 +267,15 @@ suite "SendService - mix completion":
     check await sent.waitCount(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
     check not await sent.waitCount(2).withTimeout(FUTURE_TIMEOUT_SHORT)
 
-  asyncTest "a send over mix after a plain attempt waits for a Store confirmation":
-    ## A plain attempt came first, so the answer of the exit does not end the send.
+  asyncTest "a send that a plain attempt deanonymized after a mix attempt waits for a Store confirmation":
+    ## A mix attempt anonymized the task, and a plain attempt then deanonymized it.
+    ## The message went out in the clear, so only a Store confirmation ends the send.
     let sent = EventCounter()
     let listener = countSent(sent)
     defer:
       await MessageSentEvent.dropListener(waku.brokerCtx, listener)
-    let mix = MixAfterPlainProc()
-    mix.chain(PlainRetryProc())
+    let mix = MixThenFallbackProcessor()
+    mix.chain(PlainPropagatesProc())
     let manager =
       RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
     let service = SendService
@@ -304,7 +288,7 @@ suite "SendService - mix completion":
         retryInterval = chronos.milliseconds(100),
       )
       .expect("SendService.new") # reliability = on
-    let task = newTask("mix-after-plain")
+    let task = newTask("mix-then-plain")
 
     check service.enqueue(task).isOk()
     service.startSendService()
@@ -316,6 +300,7 @@ suite "SendService - mix completion":
       not task.storeAnswer.isNil()
     check:
       mix.calls == 2
+      task.anonymized
       task.deanonymized
       service.awaitsStoreValidation(task)
       sent.value == 0

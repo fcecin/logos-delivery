@@ -177,7 +177,7 @@ package main
 			"onMessageSent", "onMessageError", "onMessagePropagated",
 			"onMessageReceived", "onConnectionStatusChange", "onTopicHealthChange",
 			"onConnectionChange", "onReceivedMessage", "onChannelMessageReceived",
-			"onChannelMessageSent", "onChannelMessageError"};
+			"onChannelMessageSent", "onChannelMessageError", "onMessageUnconfirmed"};
 		for (size_t i = 0; i < sizeof(eventNames) / sizeof(eventNames[0]); i++) {
 			logosdelivery_add_event_listener(wakuCtx, eventNames[i], (FFICallBack) globalEventCallback, wakuCtx);
 		}

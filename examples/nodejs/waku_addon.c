@@ -308,7 +308,7 @@ static napi_value WakuSetEventCallback(napi_env env, napi_callback_info info) {
       "onConnectionStatusChange", "onTopicHealthChange",
       "onConnectionChange",       "onReceivedMessage",
       "onChannelMessageReceived", "onChannelMessageSent",
-      "onChannelMessageError"};
+      "onChannelMessageError",    "onMessageUnconfirmed"};
   for (size_t i = 0; i < sizeof(kEventNames) / sizeof(kEventNames[0]); i++)
     logosdelivery_add_event_listener(ctx, kEventNames[i], event_handler, userData);
 

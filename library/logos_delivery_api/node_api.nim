@@ -35,6 +35,15 @@ proc registerFFIEventListeners(self: LogosDelivery): Result[void, string] =
     chronicles.error "MessageSentEvent.listen failed", err = $error
     return err("MessageSentEvent.listen failed: " & $error)
 
+  MessageUnconfirmedEvent.listen(
+    self.waku.brokerCtx,
+    proc(event: MessageUnconfirmedEvent) {.async: (raises: []).} =
+      emitEvent("onMessageUnconfirmed"):
+        $newJsonEvent("message_unconfirmed", event),
+  ).isOkOr:
+    chronicles.error "MessageUnconfirmedEvent.listen failed", err = $error
+    return err("MessageUnconfirmedEvent.listen failed: " & $error)
+
   MessageErrorEvent.listen(
     self.waku.brokerCtx,
     proc(event: MessageErrorEvent) {.async: (raises: []).} =
@@ -167,6 +176,7 @@ proc teardownFFIEventScope(self: LogosDelivery) {.async.} =
   ## an instance context also deletes its per-event buckets, so an FFI
   ## thread reused for a later node starts with clean broker state.
   await MessageSentEvent.dropAllListeners(self.waku.brokerCtx)
+  await MessageUnconfirmedEvent.dropAllListeners(self.waku.brokerCtx)
   await MessageErrorEvent.dropAllListeners(self.waku.brokerCtx)
   await MessageQueuedEvent.dropAllListeners(self.waku.brokerCtx)
   await MessagePropagatedEvent.dropAllListeners(self.waku.brokerCtx)

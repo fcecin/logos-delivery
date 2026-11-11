@@ -367,7 +367,7 @@ actor WakuActor {
             "onMessageSent", "onMessageError", "onMessagePropagated",
             "onMessageReceived", "onConnectionStatusChange", "onTopicHealthChange",
             "onConnectionChange", "onReceivedMessage", "onChannelMessageReceived",
-            "onChannelMessageSent", "onChannelMessageError",
+            "onChannelMessageSent", "onChannelMessageError", "onMessageUnconfirmed",
         ]
         for name in eventNames {
             _ = logosdelivery_add_event_listener(ctx, name, WakuActor.eventCallback, nil)

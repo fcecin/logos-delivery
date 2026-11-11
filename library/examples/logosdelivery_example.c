@@ -12,6 +12,7 @@ static LogosDeliveryCtx *node_ctx = NULL;
 // Flags set by event callback, polled by main thread
 static volatile int got_message_sent = 0;
 static volatile int got_message_error = 0;
+static volatile int got_message_unconfirmed = 0;
 static volatile int got_message_received = 0;
 
 // Event callback that handles message events
@@ -54,6 +55,15 @@ void event_callback(int ret, const char *msg, size_t len, void *userData) {
         printf("[EVENT] Message error - RequestID: %s, Hash: %s, Error: %s\n",
                requestId, messageHash, error);
         got_message_error = 1;
+
+    } else if (strcmp(eventType, "message_unconfirmed") == 0) {
+        char requestId[128];
+        char messageHash[128];
+        extract_json_field(eventJson, "requestId", requestId, sizeof(requestId));
+        extract_json_field(eventJson, "messageHash", messageHash, sizeof(messageHash));
+        printf("[EVENT] Message unconfirmed - RequestID: %s, Hash: %s\n", requestId,
+               messageHash);
+        got_message_unconfirmed = 1;
 
     } else if (strcmp(eventType, "message_propagated") == 0) {
         char requestId[128];
@@ -244,6 +254,7 @@ int main() {
     logosdelivery_add_event_listener(ctx->ptr, "onMessageSent", event_callback, NULL);
     logosdelivery_add_event_listener(ctx->ptr, "onMessagePropagated", event_callback, NULL);
     logosdelivery_add_event_listener(ctx->ptr, "onMessageError", event_callback, NULL);
+    logosdelivery_add_event_listener(ctx->ptr, "onMessageUnconfirmed", event_callback, NULL);
     logosdelivery_add_event_listener(ctx->ptr, "onChannelMessageReceived", event_callback, NULL);
     logosdelivery_add_event_listener(ctx->ptr, "onChannelMessageSent", event_callback, NULL);
     logosdelivery_add_event_listener(ctx->ptr, "onChannelMessageError", event_callback, NULL);
@@ -287,11 +298,12 @@ int main() {
     "}";
     logosdelivery_ctx_send(ctx, message, on_reply, (void *)"send");
 
-    // Poll for terminal message events (sent, error, or received) with timeout
+    // Poll for terminal message events (sent, error, unconfirmed, or received) with timeout
     printf("Waiting for message delivery events...\n");
     int timeout_sec = 60;
     int elapsed = 0;
-    while (!(got_message_sent || got_message_error || got_message_received)
+    while (!(got_message_sent || got_message_error || got_message_unconfirmed ||
+             got_message_received)
            && elapsed < timeout_sec) {
         usleep(100000); // 100ms
         elapsed++;

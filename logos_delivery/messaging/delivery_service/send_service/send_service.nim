@@ -27,8 +27,9 @@ const DeliveryWindow* = chronos.minutes(1)
 
 proc maxDeliveryTime*(anonymityLevel: AnonymityLevel): timer.Duration =
   ## `Preferred` gets two windows: one for mix, then one for the plain path.
+  ## A task that mix sent with no answer spends both windows on mix.
   if anonymityLevel == AnonymityLevel.Preferred:
-    DeliveryWindow + DeliveryWindow
+    2 * DeliveryWindow
   else:
     DeliveryWindow
 
@@ -380,9 +381,22 @@ proc fail(self: SendService, task: DeliveryTask, errorDesc: string) =
   )
   self.finish(task)
 
+proc reportUnconfirmed(self: SendService, task: DeliveryTask) =
+  ## Ends a task that has no confirmation with `MessageUnconfirmedEvent`.
+  task.state = DeliveryState.Unconfirmed
+  info "Message sent with no confirmation", requestId = task.requestId
+  recordUnconfirmed()
+  MessageUnconfirmedEvent.emit(self.brokerCtx, task.requestId, task.msgHash.to0xHex())
+  self.finish(task)
+
 proc failExpired(self: SendService, task: DeliveryTask): bool =
   ## Fails the task when its delivery window or its parked age ended.
-  if task.isDeliveryTimedOut(self.maxDeliveryTime):
+  ## A task sent with no answer ends as unconfirmed when its window ends.
+  let timedOut = task.isDeliveryTimedOut(self.maxDeliveryTime)
+  if task.sentWithNoAnswer and timedOut:
+    self.reportUnconfirmed(task)
+    return true
+  if timedOut:
     # A processor that leaves a task for a retry can write why in `errorDesc`,
     # as the mix processor does for a `Required` task that mix cannot attempt yet.
     # Report that reason if set.
@@ -530,16 +544,22 @@ proc sendUntilPropagated(
     self: SendService, task: DeliveryTask
 ): Future[bool] {.async: (raises: [CancelledError]).} =
   ## Makes the first attempt at once, then one attempt at each tick of
-  ## `retryLoop`, until the task propagates. Returns false when the task failed.
+  ## `retryLoop`, until the task propagates. Returns false when it did not propagate.
   while true:
     if task.setPropagatedIfNetworkHasMessage():
       # An earlier attempt can have sent the message, also one that a stop cut.
       self.reportPropagated(task)
       return true
+    if task.sentWithNoAnswer and self.failExpired(task):
+      # No resend after the end of the window.
+      return false
     if not self.needsAdmission(task) or await self.runAdmission(task):
       await self.sendSlots.acquire()
       try:
         if not task.setPropagatedIfNetworkHasMessage():
+          if task.sentWithNoAnswer and self.failExpired(task):
+            # The window can end during the admission or the wait for a slot.
+            return false
           await self.sendProcessor.process(task)
       except CancelledError as exc:
         raise exc
@@ -558,7 +578,6 @@ proc sendUntilPropagated(
       self.reportPropagated(task)
       return true
     of DeliveryState.FailedToDeliver:
-      # A mix exit may have published the message even though its reply was lost.
       error "Failed to send message",
         requestId = task.requestId, msgHash = task.loggedHash(), error = task.errorDesc
       self.fail(task, task.errorDesc)

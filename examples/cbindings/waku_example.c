@@ -409,7 +409,8 @@ int main(int argc, char **argv)
       "onConnectionStatusChange", "onTopicHealthChange",
       "onConnectionChange",       "onReceivedMessage",
       "onChannelMessageReceived", "onChannelMessageSent",
-      "onChannelMessageError",     "onChannelMessageLost"};
+      "onChannelMessageError",     "onChannelMessageLost",
+      "onMessageUnconfirmed"};
   for (size_t i = 0; i < sizeof(kEventNames) / sizeof(kEventNames[0]); i++)
     logosdelivery_add_event_listener(ctx->ptr, kEventNames[i], on_event_received, userData);
 

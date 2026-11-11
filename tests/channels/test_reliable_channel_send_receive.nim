@@ -5,7 +5,7 @@ from std/times import epochTime
 import chronos, testutils/unittests, stew/byteutils
 import brokers/broker_context
 
-import ../testlib/[wakucore, wakunodeconf]
+import ../testlib/[futures, testasync, wakucore, wakunodeconf]
 
 import logos_delivery
 import logos_delivery/waku/waku_core
@@ -359,6 +359,66 @@ suite "Reliable Channel - send state machine":
     )
 
     let finalised = await sentFut.withTimeout(1.seconds)
+    check finalised
+    if finalised:
+      check sentFut.read() == channelReqId
+
+    (await waku.stop()).expect("stop")
+
+  asyncTest "MessageUnconfirmedEvent finalises the channelReqId as Sent":
+    ## A segment sent over mix with no answer ends with `MessageUnconfirmedEvent`.
+    ## The node sent the message, and SDS carries the acknowledgements of the channel.
+    ## So the channel counts the segment as sent, and `ChannelMessageSentEvent` comes.
+    const
+      channelId = ChannelId("sm-unconfirmed-channel")
+      contentTopic = ContentTopic("/reliable-channel/test/sm-unconfirmed")
+      fakeMsgReqId = RequestId("fake-msg-req-unconfirmed")
+
+    var waku: LogosDelivery
+    var manager: ReliableChannelManager
+    var brokerCtx: BrokerContext
+    lockNewGlobalBrokerContext:
+      brokerCtx = globalBrokerContext()
+      waku = (await LogosDelivery.new(createApiNodeConf())).expect("LogosDelivery.new")
+      manager = waku.reliableChannelManager
+
+    var sendCalls = 0
+    MessagingSend.replaceProvider(
+      brokerCtx,
+      proc(envelope: MessageEnvelope): Future[Result[RequestId, string]] {.async.} =
+        sendCalls.inc
+        return ok(fakeMsgReqId),
+    ).isOkOr:
+      raiseAssert "replaceProvider failed: " & error
+
+    discard manager
+      .createReliableChannel(channelId, contentTopic, SdsParticipantID("local"))
+      .expect("createReliableChannel")
+
+    let sentFut = newFuture[RequestId]("channel-sent")
+    discard ChannelMessageSentEvent
+      .listen(
+        brokerCtx,
+        proc(evt: ChannelMessageSentEvent) {.async: (raises: []).} =
+          if not sentFut.finished() and evt.channelId == channelId:
+            sentFut.complete(evt.requestId)
+        ,
+      )
+      .expect("listen ChannelMessageSentEvent")
+
+    let channelReqId = (await manager.send(channelId, "hello".toBytes())).expect("send")
+
+    checkUntilTimeout:
+      sendCalls == 1
+
+    waku_message_events.MessageUnconfirmedEvent.emit(
+      brokerCtx,
+      waku_message_events.MessageUnconfirmedEvent(
+        requestId: fakeMsgReqId, messageHash: ""
+      ),
+    )
+
+    let finalised = await sentFut.withTimeout(FUTURE_TIMEOUT)
     check finalised
     if finalised:
       check sentFut.read() == channelReqId

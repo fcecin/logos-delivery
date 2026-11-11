@@ -1,3 +1,4 @@
+from std/json import JsonNode, parseJson, items, `[]`
 import chronos, stew/byteutils, presto, presto/client as presto_client
 import logos_delivery/waku/waku_core
 import
@@ -72,6 +73,25 @@ proc waitForRelayMessages*(
     messages.add(response.data)
     await sleepAsync(50.milliseconds)
   return messages
+
+proc waitForSendRecords*(
+    server: WakuRestServerRef,
+    requestId: string,
+    count: int,
+    timeout = FUTURE_TIMEOUT_MEDIUM,
+): Future[seq[JsonNode]] {.async.} =
+  ## Each GET of a request id removes its records, so the helper adds up the polls.
+  var records: seq[JsonNode]
+  let deadline = Moment.now() + timeout
+  while records.len < count and Moment.now() < deadline:
+    let response =
+      await issueRequest(server.getAddress("/messaging/v1/events/send/" & requestId))
+    if response.status == 200:
+      for record in parseJson(response.data)["events"]:
+        records.add(record)
+    else:
+      await sleepAsync(50.milliseconds)
+  return records
 
 proc waitForRelayAutoMessages*(
     client: RestClientRef,

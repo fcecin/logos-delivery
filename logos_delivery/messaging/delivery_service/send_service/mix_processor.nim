@@ -22,6 +22,16 @@ const MixNoExitReason* = "no mix node serves lightpush on the shard of the messa
 const MixTooLargeReason* = "message too large for mix"
   ## One mix message carries much less than the plain path.
 
+const MixResendInterval* = chronos.seconds(5)
+  ## The wait of a task sent over mix with no answer before its next send over mix.
+
+const MaxMixResends* = 1
+  ## The most sends over mix of a task after the first one that got no answer.
+
+const MaxMixResendAge* = chronos.seconds(15)
+  ## The age of a message after which mix does not send it again.
+  ## Store and RLN validators refuse a message more than 20 s from their clock.
+
 const MixUnusableGrace* = chronos.seconds(3)
   ## How long after its admission a `Required` task waits for a mounted mix that
   ## cannot attempt it. Retries come `RetryInterval` apart.
@@ -41,6 +51,8 @@ type
     fellBackReason: MixUnusable
       ## Why the last task went to the plain path; `None` once mix can attempt
       ## a task again. INFO logs each change.
+    resendInterval: timer.Duration
+      ## The time from the end of a send over mix with no answer to its resend.
 
 proc reason*(unusable: MixUnusable): string =
   ## The text written to `errorDesc` and the log lines.
@@ -61,12 +73,14 @@ proc new*(
     brokerCtx: BrokerContext,
     anonymityLevel: AnonymityLevel,
     mixWindow: timer.Duration,
+    resendInterval = MixResendInterval,
 ): T =
   return T(
     waku: waku,
     brokerCtx: brokerCtx,
     fallbackAllowed: anonymityLevel == AnonymityLevel.Preferred,
     mixWindow: mixWindow,
+    resendInterval: resendInterval,
   )
 
 method deanonymizes*(self: MixSendProcessor): bool {.gcsafe.} =
@@ -79,6 +93,11 @@ proc mixWindowElapsed(self: MixSendProcessor, task: DeliveryTask): bool =
   ## True once `task` has spent its whole mix window, which bounds failed mix
   ## attempts at either level.
   return task.admissionAge() > self.mixWindow
+
+proc mixResendDue(self: MixSendProcessor, task: DeliveryTask): bool =
+  ## True when a task sent over mix with no answer can send the message again.
+  task.resendsAfterNoAnswer < MaxMixResends and task.messageAge() < MaxMixResendAge and
+    Moment.now() - task.lastSendFinishedTime.get(Moment.low()) >= self.resendInterval
 
 proc mixUnusable(self: MixSendProcessor, task: DeliveryTask): MixUnusable =
   ## Why mix cannot attempt `task` now, with no network call. It splits
@@ -153,6 +172,67 @@ method checkBeforeAdmission*(
     return false
   return true
 
+proc decideAfterMixError(
+    self: MixSendProcessor, task: DeliveryTask, error: ErrorStatus
+) =
+  ## Sets the next state of a task whose send over mix got an error answer.
+  if error.isRlnRejection():
+    if not task.sentWithNoAnswer:
+      task.parkForRlnProofRefresh(self.waku, error.desc.get($error.code))
+      return
+    # An earlier send can have delivered the message, so the task stays on mix.
+    # It keeps its proof, because a new proof makes a new relay message.
+    task.state = DeliveryState.NextRoundRetry
+    return
+
+  if task.sentWithNoAnswer:
+    # A send of the task got no answer, and the message can be on the network.
+    # A refusal of a later send does not change that.
+    task.state = DeliveryState.NextRoundRetry
+    return
+
+  case error.code
+  of LightPushErrorCode.NO_PEERS_TO_RELAY, LightPushErrorCode.TOO_MANY_REQUESTS,
+      LightPushErrorCode.OUT_OF_RLN_PROOF, LightPushErrorCode.SERVICE_NOT_AVAILABLE,
+      LightPushErrorCode.INTERNAL_SERVER_ERROR:
+    task.state = DeliveryState.NextRoundRetry
+  else:
+    task.state = DeliveryState.FailedToDeliver
+    task.errorDesc = error.desc.get($error.code)
+
+proc applyMixAnswer(
+    self: MixSendProcessor, task: DeliveryTask, answer: WakuLightPushResult
+) =
+  ## Sets the next state of a task from the answer of its send over mix.
+  ## Also marks the end of the send on the task, if the attempt counts as a send.
+  let unanswered = answer.isErr() and answer.error.isUnanswered()
+  # The exit gives `INTERNAL_SERVER_ERROR` when it fails before it publishes.
+  # `lightpushPublishToAny` gives it for a fault of this node before the request leaves.
+  # Neither one puts the message on the network, so neither one counts as a send.
+  if answer.isOk() or unanswered or
+      answer.error.code != LightPushErrorCode.INTERNAL_SERVER_ERROR:
+    task.markSendFinished(unanswered)
+
+  let numLightpushServers = answer.valueOr:
+    if error.isAlreadySeenRejection():
+      # The refusal of the exit means what its success answer means.
+      debug "The mix exit already has the message",
+        requestId = task.requestId, msgHash = task.msgHash.to0xHex()
+      task.setPropagated()
+      return
+    debug "MixSendProcessor.sendImpl failed", error = error.desc.get($error.code)
+    self.decideAfterMixError(task, error)
+    return
+
+  if numLightpushServers > 0:
+    debug "Message propagated via Mix",
+      requestId = task.requestId, msgHash = task.msgHash.to0xHex()
+    task.setPropagated()
+  else:
+    debug "Mix publish returned zero peers, the task waits for a retry",
+      requestId = task.requestId
+    task.state = DeliveryState.NextRoundRetry
+
 proc publishUntilAnswered(
     self: MixSendProcessor, task: DeliveryTask
 ): Future[Opt[WakuLightPushResult]] {.async.} =
@@ -168,7 +248,14 @@ proc publishUntilAnswered(
     # The exit publishes before it answers, so a copy from the network also answers.
     discard await race(FutureBase(publish), FutureBase(networkHasMessageWait))
   except CancelledError as exc:
-    await publish.cancelAndWait()
+    # A stop cut the wait.
+    if publish.completed():
+      # An answer that came before the stop is the answer of this send.
+      self.applyMixAnswer(task, publish.read())
+    else:
+      await publish.cancelAndWait()
+      # The network can have the message, so the send counts as one with no answer.
+      task.markSendFinished(unanswered = true)
     raise exc
   finally:
     networkHasMessageWait.cancelSoon()
@@ -178,11 +265,27 @@ proc publishUntilAnswered(
   return Opt.some(await publish)
 
 method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.async.} =
+  if task.deanonymized:
+    # A plain attempt already showed this node's address, so the task stays plain.
+    task.errorDesc = ""
+    task.state = DeliveryState.FallbackRetry
+    return
+
+  if task.sentWithNoAnswer and
+      (not self.mixResendDue(task) or self.mixUnusable(task) != MixUnusable.None):
+    # The message can be on the network, so the task waits on mix and never goes plain.
+    task.state = DeliveryState.NextRoundRetry
+    return
+
   # No wait can make the message fit, so check the size before the reasons that
   # a wait can clear. A task that is too large has no mix attempt, so it must not
   # get the `anonymized` mark.
   let (size, limit) = self.waku.mixLightpushSize(task.pubsubTopic, task.msg)
   if size > limit:
+    if task.sentWithNoAnswer:
+      # The message can be on the network, so a task that is too large stays on mix.
+      task.state = DeliveryState.NextRoundRetry
+      return
     self.decideTooLarge(task, size, limit)
     return
 
@@ -197,7 +300,7 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
     self.fellBackReason = MixUnusable.None
     info "Mix can carry messages again"
 
-  if self.fallbackAllowed and self.mixWindowElapsed(task):
+  if self.fallbackAllowed and self.mixWindowElapsed(task) and not task.sentWithNoAnswer:
     debug "Mix window elapsed, handing the task to the plain send path",
       requestId = task.requestId,
       msgHash = task.msgHash.to0xHex(),
@@ -225,36 +328,4 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
     task.setPropagated()
     return
 
-  let numLightpushServers = answer.get().valueOr:
-    if error.isAlreadySeenRejection():
-      # The refusal of the exit means what its success answer means.
-      debug "The mix exit already has the message",
-        requestId = task.requestId, msgHash = task.msgHash.to0xHex()
-      task.setPropagated()
-      return
-    debug "MixSendProcessor.sendImpl failed", error = error.desc.get($error.code)
-
-    if error.isRlnRejection():
-      task.parkForRlnProofRefresh(self.waku, error.desc.get($error.code))
-      return
-
-    case error.code
-    of LightPushErrorCode.NO_PEERS_TO_RELAY, LightPushErrorCode.TOO_MANY_REQUESTS,
-        LightPushErrorCode.OUT_OF_RLN_PROOF, LightPushErrorCode.SERVICE_NOT_AVAILABLE,
-        LightPushErrorCode.INTERNAL_SERVER_ERROR:
-      task.state = DeliveryState.NextRoundRetry
-    else:
-      task.state = DeliveryState.FailedToDeliver
-      task.errorDesc = error.desc.get($error.code)
-    return
-
-  if numLightpushServers > 0:
-    debug "Message propagated via Mix",
-      requestId = task.requestId, msgHash = task.msgHash.to0xHex()
-    task.setPropagated()
-  else:
-    debug "Mix publish returned zero peers, the task waits for a retry",
-      requestId = task.requestId
-    task.state = DeliveryState.NextRoundRetry
-
-  return
+  self.applyMixAnswer(task, answer.get())

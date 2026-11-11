@@ -62,7 +62,8 @@ type
       ## for this `channelReqId`. Set once in `send`, never mutated.
     inflightMessagingIds: seq[RequestId]
       ## Messaging-layer ids minted by the send handler that have not
-      ## yet produced a final event. Removed on `MessageSentEvent` / `MessageErrorEvent`.
+      ## yet produced a final event. Removed on `MessageSentEvent`,
+      ## `MessageUnconfirmedEvent` or `MessageErrorEvent`.
     confirmedCount: int
     failedCount: int
 
@@ -88,6 +89,7 @@ type
     crypto: Opt[ChannelCrypto] ## `none` means the channel is not encrypted
     receivedListener: MessageReceivedEventListener
     sentListener: MessageSentEventListener
+    unconfirmedListener: MessageUnconfirmedEventListener
     errorListener: MessageErrorEventListener
     closed: bool
 
@@ -119,6 +121,7 @@ proc stop*(self: ReliableChannel) {.async: (raises: []).} =
   self.closed = true
   await MessageReceivedEvent.dropListener(self.brokerCtx, self.receivedListener)
   await MessageSentEvent.dropListener(self.brokerCtx, self.sentListener)
+  await MessageUnconfirmedEvent.dropListener(self.brokerCtx, self.unconfirmedListener)
   await MessageErrorEvent.dropListener(self.brokerCtx, self.errorListener)
   if not self.cleanupFut.isNil():
     await self.cleanupFut.cancelAndWait()
@@ -439,6 +442,16 @@ proc new*(
   ).valueOr:
     error "MessageSentEvent.listen failed", channelId = channelId, error = error
     MessageSentEventListener()
+
+  # The node sent the message over mix, and SDS acknowledges it in the channel.
+  # So a mix send with no confirmation counts as sent.
+  chn.unconfirmedListener = MessageUnconfirmedEvent.listen(
+    chn.brokerCtx,
+    proc(evt: MessageUnconfirmedEvent): Future[void] {.async: (raises: []).} =
+      chn.onMessageFinal(evt.requestId, MessagingOutcome.Sent),
+  ).valueOr:
+    error "MessageUnconfirmedEvent.listen failed", channelId = channelId, error = error
+    MessageUnconfirmedEventListener()
 
   chn.errorListener = MessageErrorEvent.listen(
     chn.brokerCtx,

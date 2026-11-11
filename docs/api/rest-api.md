@@ -72,14 +72,15 @@ A send is asynchronous. `200` means that the node accepted the message. The resu
 * `queued`: the send waits for rate-limit budget (only when rate limiting is on)
 * `propagated`: the message reached at least one peer
 * `sent`: a Store peer confirmed that it holds the message, or, for a send over mix, the mix exit replied, the exit refused a later copy as already seen, or the node received a copy of the message. A deanonymized message, which the node attempted to send in the clear, waits for a Store peer.
+* `unconfirmed`: a send over mix ended with no confirmation. The node sent the message over mix, and the message can be on the network. The node can send it again over mix one time. Then it does not send it again, also not in the clear. A send over mix gets `propagated` only with its confirmation, so an unconfirmed send gets no `propagated`.
 * `error`: the send failed (rejected message, no peer within the retry window, no Store confirmation within about 60 s of propagation, ...)
 
-After a `sent` or `error` event, no more events come for that message.
+After a `sent`, `unconfirmed` or `error` event, no more events come for that message.
 
 * The `sent` event needs reliability. A send in the clear, or a deanonymized send over mix, also needs a Store peer.
 * A message sent with `"ephemeral": true` gets no `sent` event, because Store nodes do not keep ephemeral messages.
 * Reliability is on by default, and off for the `twn` and `status.prod` presets. `--reliability` overrides that.
-* Without reliability, or for an ephemeral message, `propagated` is the last event.
+* Without reliability, or for an ephemeral message, `propagated` is the last event of a send that succeeds. A send over mix with no confirmation still ends with `unconfirmed`.
 * Later versions can add new event types. A client must skip an event type that it does not know.
 * `GET /messaging/v1/events/send/{requestId}` answers `404` while the node has no event for that request: the request id is unknown, a client already read its events, or no event came yet. Call it again until the last event comes.
 

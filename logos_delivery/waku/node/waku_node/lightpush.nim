@@ -40,6 +40,9 @@ logScope:
 
 const MountWithoutRelayError* = "cannot mount lightpush because relay is not mounted"
 
+const MixTimedOutDesc* = "Waku lightpush over mix timed out"
+  ## The result of a mix publish with no answer within `replyTimeout`.
+
 const MixLightpushSurbs* = 1'u8
   ## The number of SURBs in a lightpush request over mix. One SURB, so the reply
   ## uses one path.
@@ -88,9 +91,8 @@ proc publishOverMix*(
     await conn.reset()
     publishFut.cancelSoon()
     debug "Mix lightpush timed out", pubsubTopic = pubsubTopic, timeout = replyTimeout
-    return lighpushErrorResult(
-      LightPushErrorCode.SERVICE_NOT_AVAILABLE, "Waku lightpush over mix timed out"
-    )
+    return
+      lighpushErrorResult(LightPushErrorCode.SERVICE_NOT_AVAILABLE, MixTimedOutDesc)
 
   await deadline.cancelAndWait()
   return await publishFut

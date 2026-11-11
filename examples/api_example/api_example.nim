@@ -23,6 +23,14 @@ proc periodicSender(logos: LogosDelivery): Future[void] {.async.} =
     echo "Failed to listen to message error event: ", error
     return
 
+  let unconfirmedListener = MessageUnconfirmedEvent.listen(
+    proc(event: MessageUnconfirmedEvent) {.async: (raises: []).} =
+      echo "Message sent over mix with no confirmation, request ID: ",
+        event.requestId, " hash: ", event.messageHash
+  ).valueOr:
+    echo "Failed to listen to message unconfirmed event: ", error
+    return
+
   let propagatedListener = MessagePropagatedEvent.listen(
     proc(event: MessagePropagatedEvent) {.async: (raises: []).} =
       echo "Message propagated with request ID: ",
@@ -34,6 +42,7 @@ proc periodicSender(logos: LogosDelivery): Future[void] {.async.} =
   defer:
     await MessageSentEvent.dropListener(sentListener)
     await MessageErrorEvent.dropListener(errorListener)
+    await MessageUnconfirmedEvent.dropListener(unconfirmedListener)
     await MessagePropagatedEvent.dropListener(propagatedListener)
 
   ## Periodically sends a Waku message every 30 seconds

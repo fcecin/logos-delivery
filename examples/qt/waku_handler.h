@@ -39,7 +39,7 @@ public:
              {"onMessageSent", "onMessageError", "onMessagePropagated",
               "onMessageReceived", "onConnectionStatusChange", "onTopicHealthChange",
               "onConnectionChange", "onReceivedMessage", "onChannelMessageReceived",
-              "onChannelMessageSent", "onChannelMessageError"}) {
+              "onChannelMessageSent", "onChannelMessageError", "onMessageUnconfirmed"}) {
             logosdelivery_add_event_listener(ctx, eventName, on_event_received, userData);
         }
         qDebug() << "Waku context initialized, ready to start.";

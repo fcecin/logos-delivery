@@ -1,7 +1,7 @@
 {.used.}
 
 import
-  std/[net, sequtils, strutils],
+  std/[json, net, sequtils, strutils],
   chronos,
   metrics,
   testutils/unittests,
@@ -174,6 +174,32 @@ suite "Messaging REST API":
     check:
       emptyResp.status == 200
       emptyResp.data.len == 0
+
+    await rest.stop(node)
+
+    (await node.stop()).isOkOr:
+      raiseAssert "Failed to stop node: " & error
+
+  asyncTest "a send that ends unconfirmed has the unconfirmed kind":
+    ## A send over mix with no confirmation ends with this event, so REST must show it.
+    var node: LogosDelivery
+    var rest: RestService
+    lockNewGlobalBrokerContext:
+      node = (await LogosDelivery.new(restNodeConf())).valueOr:
+        raiseAssert error
+      rest = (await node.startWithRest()).valueOr:
+        raiseAssert "Failed to start node: " & error
+    let brokerCtx = node.waku.brokerCtx
+    let reqU = RequestId("req-U")
+
+    MessageUnconfirmedEvent.emit(
+      brokerCtx, MessageUnconfirmedEvent(requestId: reqU, messageHash: "0xcc")
+    )
+
+    let records = await rest.server.waitForSendRecords($reqU, 1)
+    check:
+      records.len == 1
+      records[0]["kind"].getStr() == $SendEventKind.Unconfirmed
 
     await rest.stop(node)
 

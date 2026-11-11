@@ -328,7 +328,7 @@ int main(int argc, char **argv)
          {"onMessageSent", "onMessageError", "onMessagePropagated",
           "onMessageReceived", "onConnectionStatusChange", "onTopicHealthChange",
           "onConnectionChange", "onReceivedMessage", "onChannelMessageReceived",
-          "onChannelMessageSent", "onChannelMessageError"})
+          "onChannelMessageSent", "onChannelMessageError", "onMessageUnconfirmed"})
         logosdelivery_add_event_listener(ctx->ptr, eventName, onEvent, nullptr);
 
     WAKU_CALL(logosdelivery_ctx_start_node(
