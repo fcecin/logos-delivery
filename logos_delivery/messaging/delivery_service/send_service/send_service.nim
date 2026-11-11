@@ -103,6 +103,8 @@ type SendService* = ref object of RootObj
     ## A task is asked about in Store only once its propagation and its last
     ## Store query are older than this, giving a Store node time to archive it.
     ## Also the pause of the Store validation loop while no Store peer is available.
+  storeValidationQueryTimeout*: timer.Duration
+    ## see `StoreValidationQueryTimeout`, shorter in tests
   sendQueueCapacity*: int
   retryInterval: timer.Duration
 
@@ -184,6 +186,7 @@ proc new*(
     maxParkedAge: maxParkedAge,
     maxValidationAge: maxValidationAge,
     archiveTime: ArchiveTime,
+    storeValidationQueryTimeout: StoreValidationQueryTimeout,
     sendQueueCapacity: sendQueueCapacity,
     retryInterval: retryInterval,
     subscribeOnSend: anonymityLevel == AnonymityLevel.None,
@@ -275,19 +278,17 @@ proc queryStoreForTasks(
   ## Confirms the tasks the answer reports and resends the others.
   ## With no `shards`, any Store peer can answer.
   # TODO: confirm hash format for store query!!!
-  let query = self.waku.storeQueryToAny(
-    StoreQueryRequest(
-      includeData: false,
-      messageHashes: tasks.mapIt(it.msgHash),
-      paginationLimit: Opt.some(uint64(tasks.len)),
-    ),
-    shards,
-  )
-  if not await query.withTimeout(StoreValidationQueryTimeout):
-    debug "Store validation query timed out", messageCount = tasks.len
-    return
-
-  let storeResp: StoreQueryResponse = query.read().valueOr:
+  let storeResp: StoreQueryResponse = (
+    await self.waku.storeQueryToAny(
+      StoreQueryRequest(
+        includeData: false,
+        messageHashes: tasks.mapIt(it.msgHash),
+        paginationLimit: Opt.some(uint64(tasks.len)),
+      ),
+      self.storeValidationQueryTimeout,
+      shards,
+    )
+  ).valueOr:
     debug "Failed to get store validation for messages",
       messageCount = tasks.len, error = $error
     return
