@@ -440,7 +440,7 @@ suite "SendService - Store validation loop":
     storeNode = newTestWakuNode(generateSecp256k1Key())
     storeNode.mountMetadata(TestClusterId, @[0'u16, 1]).isOkOr:
       raiseAssert "mountMetadata: " & error
-    discard await newTestWakuStore(storeNode.switch, delayedStoreHandler)
+    storeNode.wakuStore = await newTestWakuStore(storeNode.switch, delayedStoreHandler)
     await storeNode.start()
     waku.node.peerManager.addServicePeer(
       storeNode.peerInfo.toRemotePeerInfo(), WakuStoreCodec
