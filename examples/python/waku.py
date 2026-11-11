@@ -142,7 +142,7 @@ for event_name in [b"onMessageSent", b"onMessageError", b"onMessagePropagated",
                    b"onMessageReceived", b"onConnectionStatusChange",
                    b"onTopicHealthChange", b"onConnectionChange", b"onReceivedMessage",
                    b"onChannelMessageReceived", b"onChannelMessageSent",
-                   b"onChannelMessageError"]:
+                   b"onChannelMessageError", b"onMessageUnconfirmed"]:
     libwaku.logosdelivery_add_event_listener(ctx, event_name, callback, ctypes.c_void_p(0))
 
 # Start the node

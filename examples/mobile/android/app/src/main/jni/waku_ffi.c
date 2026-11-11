@@ -348,7 +348,7 @@ void Java_com_mobile_WakuModule_wakuSetEventCallback(JNIEnv *env, jobject thiz,
       "onConnectionStatusChange", "onTopicHealthChange",
       "onConnectionChange",       "onReceivedMessage",
       "onChannelMessageReceived", "onChannelMessageSent",
-      "onChannelMessageError"};
+      "onChannelMessageError",    "onMessageUnconfirmed"};
   for (size_t i = 0; i < sizeof(kEventNames) / sizeof(kEventNames[0]); i++)
     logosdelivery_add_event_listener((void *)wakuPtr, kEventNames[i], wk_callback,
                                      (void *)c);

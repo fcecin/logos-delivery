@@ -14,6 +14,7 @@ type DeliveryState* {.pure.} = enum
   FallbackRetry # retry sending with fallback processor if available
   NextRoundRetry # waits for its next attempt
   FailedToDeliver # final state of failed delivery
+  Unconfirmed # final state of a send with no confirmation
 
 type DeliveryTask* = ref object
   requestId*: RequestId
@@ -50,6 +51,15 @@ type DeliveryTask* = ref object
     ## Relay or filter delivers such a copy.
     ## A send is not a copy, and neither is the answer or the refusal of a relay.
     ## It is never reset, and it is nil until it completes or a send waits for it.
+  sentWithNoAnswer*: bool
+    ## Set when a send got no answer, so the network can have the message.
+    ## A stop that cuts a send also sets it.
+    ## With no confirmation, the task ends with `MessageUnconfirmedEvent`, not an error.
+    ## Only `MixSendProcessor` sets it.
+  resendsAfterNoAnswer*: int
+    ## How many sends of the task came after the first one with no answer.
+  lastSendFinishedTime*: Opt[Moment]
+    ## The end time of the last send of the task over mix.
   lastStoreQueryTime*: Opt[Moment]
     ## When a Store peer was last asked about this task, none before the first query.
   storeValidationWaited*: timer.Duration
@@ -164,6 +174,14 @@ proc setPropagated*(self: DeliveryTask) =
   self.state = DeliveryState.SuccessfullyPropagated
   if self.firstPropagatedTime.isNone():
     self.firstPropagatedTime = Opt.some(Moment.now())
+
+proc markSendFinished*(self: DeliveryTask, unanswered: bool) =
+  ## Marks the end of a send of the task, and keeps whether no answer came.
+  if self.sentWithNoAnswer:
+    self.resendsAfterNoAnswer.inc()
+  self.lastSendFinishedTime = Opt.some(Moment.now())
+  if unanswered:
+    self.sentWithNoAnswer = true
 
 func isAnonymous*(self: DeliveryTask): bool =
   ## True when the node attempted to send the message over mix, and never in the clear.

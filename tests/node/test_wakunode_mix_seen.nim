@@ -14,12 +14,16 @@ import
   logos_delivery/waku/factory/waku_conf,
   logos_delivery/api/types,
   logos_delivery/messaging/rate_limit_manager/rate_limit_manager,
-  logos_delivery/messaging/delivery_service/send_service/[send_service, delivery_task]
+  logos_delivery/messaging/delivery_service/send_service/
+    [send_service, send_processor, mix_processor, delivery_task]
 import
   ../testlib/[futures, testasync, wakucore, wakunode, mix_size_network, wakunodeconf]
 
 const ReplyTimeout = chronos.seconds(1)
   ## Shorter than `MixReplyTimeout`, so that a lost answer ends the wait soon.
+
+const ResendInterval = chronos.milliseconds(200)
+  ## Shorter than `MixResendInterval`, so that a send with no answer resends soon.
 
 proc mixSendsStarted(): float64 {.gcsafe.} =
   ## The number of sends that the Mix library got from the nodes of this process.
@@ -41,7 +45,17 @@ proc newService(
 ): SendService =
   let manager =
     RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
-  let chain = setupSendProcessorChain(waku, level).expect("chain")
+  # The `Required` chain of `setupSendProcessorChain` is one mix processor.
+  # This one resends after `ResendInterval`.
+  let chain =
+    if level == AnonymityLevel.Required:
+      BaseSendProcessor(
+        MixSendProcessor.new(
+          waku, waku.brokerCtx, level, DeliveryWindow, resendInterval = ResendInterval
+        )
+      )
+    else:
+      setupSendProcessorChain(waku, level).expect("chain")
   let service = SendService
     .new(false, waku, manager, chain, level, retryInterval = retryInterval)
     .expect("SendService.new")

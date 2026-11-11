@@ -22,15 +22,25 @@ type
     ## A NAT that drops the reply does the same.
     enabled: bool ## True until the first request, when there is no `answersToDrop`.
     answersToDrop: int
+    refusal: Opt[string]
+      ## After the dropped answers, the exit refuses each request with this text.
+    refusalCode: LightPushStatusCode ## The code of that refusal.
     requests*: int ## The lightpush requests that the exit received.
     requested*: AsyncEvent
     arrivals*: seq[WakuMessageHash]
       ## The hashes of the messages that the exit received over relay.
 
-proc new*(T: type ExitHook, answersToDrop = 0): ExitHook =
+proc new*(
+    T: type ExitHook,
+    answersToDrop = 0,
+    refusal = Opt.none(string),
+    refusalCode = LightPushErrorCode.INVALID_MESSAGE,
+): ExitHook =
   ExitHook(
     enabled: answersToDrop == 0,
     answersToDrop: answersToDrop,
+    refusal: refusal,
+    refusalCode: refusalCode,
     requested: newAsyncEvent(),
   )
 
@@ -47,6 +57,8 @@ proc mountHookedLightpush(node: WakuNode, hook: ExitHook) =
       # The answer never leaves the exit.
       await newFuture[void]("an answer that the exit never sends")
       return published
+    if hook.refusal.isSome():
+      return lighpushErrorResult(hook.refusalCode, hook.refusal.get())
     if not hook.enabled:
       return await relayHandler(pubsubTopic, message)
     hook.enabled = false

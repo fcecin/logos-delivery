@@ -2,7 +2,7 @@
 
 ## Overview
 
-The liblogosdelivery library emits four types of message delivery events and one message receipt event that clients can listen to by registering a per-event callback with `logosdelivery_add_event_listener()`. The events are delivered under the wire names `onMessageQueued`, `onMessageSent`, `onMessagePropagated`, `onMessageError` and `onMessageReceived` (the JSON `eventType` inside each payload is `message_queued` / `message_sent` / `message_propagated` / `message_error` / `message_received`).
+The liblogosdelivery library emits five types of message delivery events and one message receipt event that clients can listen to by registering a per-event callback with `logosdelivery_add_event_listener()`. The events are delivered under the wire names `onMessageQueued`, `onMessageSent`, `onMessageUnconfirmed`, `onMessagePropagated`, `onMessageError` and `onMessageReceived` (the JSON `eventType` inside each payload is `message_queued` / `message_sent` / `message_unconfirmed` / `message_propagated` / `message_error` / `message_received`).
 
 ## Event Types
 
@@ -41,7 +41,7 @@ Emitted when a message has been successfully propagated to neighboring nodes on 
 - `messageHash`: Hash of the message that was propagated
 
 ### 3. message_error
-Emitted when a send fails: rejected, retry window elapsed, parked too long, ephemeral dropped near the rate limit, or store validation timed out.
+Emitted when a send fails: rejected, retry window elapsed, parked too long, ephemeral dropped near the rate limit, or store validation timed out. A send over mix that got no answer ends with `message_unconfirmed` instead.
 
 **JSON Structure:**
 ```json
@@ -105,6 +105,23 @@ Emitted once for every message accepted on a subscribed content topic, whether i
 
 Duplicate suppression is best effort. The node remembers the hashes it has delivered for a few minutes, in memory only, so a live message that a Store check returns within that window is not reported again. After a restart, or when a Store recovery returns a message later than that, the same message can be reported a second time as `history`. Consumers that need exactly-once delivery should deduplicate by `messageHash`.
 
+### 6. message_unconfirmed
+Emitted when a send over mix ends with no confirmation. The node sent the message over mix, and the message can be on the network. The node can send it again over mix one time. Then it does not send it again, also not in the clear. Like `message_sent` and `message_error`, it is the last event of the send. It comes also with the `reliability` option off and for an ephemeral message. A send over mix gets `message_propagated` only with its confirmation, so an unconfirmed send gets no `message_propagated`.
+
+**JSON Structure:**
+```json
+{
+  "eventType": "message_unconfirmed",
+  "requestId": "unique-request-id",
+  "messageHash": "0x..."
+}
+```
+
+**Fields:**
+- `eventType`: Always "message_unconfirmed"
+- `requestId`: Request ID from the send operation
+- `messageHash`: Hash of the message that was sent
+
 ## Usage
 
 ### 1. Define an Event Callback
@@ -127,6 +144,8 @@ void event_callback(int ret, const char *msg, size_t len, void *userData) {
         // Handle message propagated
     } else if (eventType == "message_error") {
         // Handle message error
+    } else if (eventType == "message_unconfirmed") {
+        // Handle a send over mix that ended with no confirmation
     } else if (eventType == "message_received") {
         // Handle message received; check "source" for "live" or "history"
     }
@@ -148,6 +167,7 @@ logosdelivery_add_event_listener(rawCtx, "onMessageQueued", event_callback, NULL
 logosdelivery_add_event_listener(rawCtx, "onMessageSent", event_callback, NULL);
 logosdelivery_add_event_listener(rawCtx, "onMessagePropagated", event_callback, NULL);
 logosdelivery_add_event_listener(rawCtx, "onMessageError", event_callback, NULL);
+logosdelivery_add_event_listener(rawCtx, "onMessageUnconfirmed", event_callback, NULL);
 logosdelivery_add_event_listener(rawCtx, "onMessageReceived", event_callback, NULL);
 ```
 
@@ -166,6 +186,11 @@ For a typical successful message send:
 1. **send** → Returns request ID
 2. **message_propagated** → Message delivered to peers
 3. **message_sent** → A store node confirms the message, or, for a send over mix, the exit, a copy of the message or an already-seen refusal confirms it (only with the `reliability` option on)
+
+For a send over mix that gets no confirmation:
+
+1. **send** → Returns request ID
+2. **message_unconfirmed** → The node sent the message over mix, and no confirmation came in the window
 
 For a failed message send:
 
@@ -200,7 +225,7 @@ The `on_reply` callback of `logosdelivery_ctx_send` gets the request ID before t
 See `examples/liblogosdelivery_example.c` for a complete working example that:
 - Registers an event callback
 - Sends a message
-- Receives and prints all four event types
+- Receives and prints all five event types
 - Properly parses the JSON event structure
 
 ## Debugging Events

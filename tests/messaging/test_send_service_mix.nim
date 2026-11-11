@@ -581,6 +581,157 @@ suite "SendService - anonymity level with a mounted mix":
       not task.anonymized
       mix.fellBackFor() == MixUnusable.None # a size hand-over records no mix outage
 
+  asyncTest "a Preferred task that a plain attempt deanonymized gets no mix attempt":
+    ## A short pool sends the task to the plain path, which deanonymizes it.
+    ## A full pool then gives it no mix attempt, because a send over mix adds nothing.
+    for i in 0 ..< MinMixPoolSize - 1:
+      addMixPeer(60430 + i, lightpush = true)
+    check not waku.mixReady()
+    let mix = MixSendProcessor.new(
+      waku, waku.brokerCtx, AnonymityLevel.Preferred, chronos.minutes(1)
+    )
+    mix.chain(RetryingProcessor(reason: "busy"))
+    let task = sizedTask("deanonymized", mixLimit() - 1)
+    check await mix.process(task).withTimeout(FUTURE_TIMEOUT)
+    check task.deanonymized
+    addMixPeer(60430 + MinMixPoolSize - 1, lightpush = true)
+    check waku.mixReady()
+
+    check await mix.process(task).withTimeout(FUTURE_TIMEOUT)
+
+    check:
+      not task.anonymized
+      task.tryCount == 0
+
+  asyncTest "a Preferred task with an unanswered mix send that becomes too large stays on mix":
+    ## The message can be on the network, so the plain path must not get it.
+    ## The mix processor never makes such a task larger, so only a test makes it.
+    ## The resend is due at once, so the size check keeps the task on mix.
+    for i in 0 ..< MinMixPoolSize:
+      addMixPeer(60420 + i, lightpush = true)
+    check waku.mixReady()
+    let plain = PlainSendProcessor()
+    let mix = MixSendProcessor.new(
+      waku,
+      waku.brokerCtx,
+      AnonymityLevel.Preferred,
+      chronos.minutes(1),
+      resendInterval = ZeroDuration,
+    )
+    mix.chain(plain)
+    let task = sizedTask("unanswered-too-large", mixLimit() + 1)
+    # A young message, so that the resend is due.
+    task.msg.timestamp = getNowInNanosecondTime()
+    task.anonymized = true
+    task.markSendFinished(unanswered = true)
+
+    check await mix.process(task).withTimeout(FUTURE_TIMEOUT)
+    check:
+      plain.calls == 0
+      not task.deanonymized
+      task.state == DeliveryState.NextRoundRetry
+
+  asyncTest "a Preferred task with an unanswered mix send stays on mix when the pool is short":
+    ## The message can be on the network, so the plain path must not get it.
+    ## The resend is due at once, so the check of the pool keeps the task on mix.
+    for i in 0 ..< MinMixPoolSize - 1:
+      addMixPeer(60440 + i, lightpush = true)
+    check not waku.mixReady()
+    let plain = PlainSendProcessor()
+    let mix = MixSendProcessor.new(
+      waku,
+      waku.brokerCtx,
+      AnonymityLevel.Preferred,
+      chronos.minutes(1),
+      resendInterval = ZeroDuration,
+    )
+    mix.chain(plain)
+    let task = sizedTask("unanswered-short-pool", mixLimit() - 1)
+    # A young message, so that the resend is due.
+    task.msg.timestamp = getNowInNanosecondTime()
+    task.anonymized = true
+    task.markSendFinished(unanswered = true)
+
+    check await mix.process(task).withTimeout(FUTURE_TIMEOUT)
+    check:
+      plain.calls == 0
+      not task.deanonymized
+      task.state == DeliveryState.NextRoundRetry
+
+  asyncTest "a Preferred task with an unanswered mix send resends over mix after its mix window":
+    ## The message can be on the network, so an ended mix window gives no hand-over.
+    for i in 0 ..< MinMixPoolSize:
+      addMixPeer(60470 + i, lightpush = true)
+    check waku.mixReady()
+    let plain = PlainSendProcessor()
+    let mix = MixSendProcessor.new(
+      waku,
+      waku.brokerCtx,
+      AnonymityLevel.Preferred,
+      chronos.seconds(1),
+      resendInterval = ZeroDuration,
+    )
+    mix.chain(plain)
+    # `sizedTask` admits the task 5 s ago, so its mix window of 1 s ended.
+    let task = sizedTask("unanswered-after-the-window", mixLimit() - 1)
+    # A young message, so that the resend is due.
+    task.msg.timestamp = getNowInNanosecondTime()
+    task.anonymized = true
+    task.markSendFinished(unanswered = true)
+
+    let resend = mix.process(task)
+    check:
+      task.tryCount == 1
+      plain.calls == 0
+    await resend.cancelAndWait()
+    check not task.deanonymized
+
+  asyncTest "a task sent with no answer waits for its resend interval before it sends again":
+    for i in 0 ..< MinMixPoolSize:
+      addMixPeer(60450 + i, lightpush = true)
+    check waku.mixReady()
+    let mix = MixSendProcessor.new(
+      waku,
+      waku.brokerCtx,
+      AnonymityLevel.Required,
+      chronos.minutes(1),
+      resendInterval = chronos.hours(1),
+    )
+    let task = sizedTask("waits-for-resend", mixLimit() - 1)
+    # A young message, so that only the interval holds the resend.
+    task.msg.timestamp = getNowInNanosecondTime()
+    task.anonymized = true
+    task.markSendFinished(unanswered = true)
+
+    check await mix.process(task).withTimeout(FUTURE_TIMEOUT)
+    check:
+      task.tryCount == 0
+      task.state == DeliveryState.NextRoundRetry
+
+  asyncTest "a task sent with no answer does not send again a message older than MaxMixResendAge":
+    ## Store and RLN validators refuse a message more than 20 s from their clock.
+    ## A resend of an older message would spend a send that confirms nothing.
+    for i in 0 ..< MinMixPoolSize:
+      addMixPeer(60460 + i, lightpush = true)
+    check waku.mixReady()
+    let mix = MixSendProcessor.new(
+      waku,
+      waku.brokerCtx,
+      AnonymityLevel.Required,
+      chronos.minutes(1),
+      resendInterval = ZeroDuration,
+    )
+    let task = sizedTask("too-old-to-resend", mixLimit() - 1)
+    task.msg.timestamp =
+      getNowInNanosecondTime() - (MaxMixResendAge + chronos.seconds(1)).nanoseconds
+    task.anonymized = true
+    task.markSendFinished(unanswered = true)
+
+    check await mix.process(task).withTimeout(FUTURE_TIMEOUT)
+    check:
+      task.tryCount == 0
+      task.state == DeliveryState.NextRoundRetry
+
   asyncTest "a Required task waits with no exit on the shard during its grace, then fails":
     ## A full pool with no lightpush member on the shard has no exit, as in a
     ## seeded pool before identify and waku-metadata fill its books.
