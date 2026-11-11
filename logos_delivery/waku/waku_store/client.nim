@@ -47,6 +47,9 @@ type WakuStoreClient* = ref object
     ## see `FailedPeerRankLastPeriod`, shorter in tests
   failedPeerStartingBackoff*: Duration = FailedPeerStartingBackoff
     ## see `FailedPeerStartingBackoff`, shorter in tests
+  dials: Table[PeerId, Future[bool]]
+    ## The dial in progress to each store peer that had no connection.
+    ## The future gives true when the dial failed.
 
 proc new*(
     T: type WakuStoreClient,
@@ -101,13 +104,53 @@ proc sendStoreRequest(
 
   return ok(res)
 
+proc dialAndShare(
+    self: WakuStoreClient, peer: RemotePeerInfo | PeerId, peerId: PeerId
+): Future[Opt[Connection]] {.async.} =
+  ## Dials `peer`, and gives the result to the queries that wait for this dial.
+  let dial = newFuture[bool]("store dial")
+  self.dials[peerId] = dial
+  var failed = false
+  try:
+    let connection = await self.peerManager.dialPeer(peer, WakuStoreCodec)
+    failed = connection.isNone()
+    return connection
+  finally:
+    # After a cancel of this query, one of the queries that wait dials the peer.
+    self.dials.del(peerId)
+    dial.complete(failed)
+
+proc dialStorePeer(
+    self: WakuStoreClient, peer: RemotePeerInfo | PeerId
+): Future[Opt[Connection]] {.async.} =
+  ## A store stream to `peer`.
+  ## Only one query at a time dials a peer with no connection, and the others wait.
+  ## When that dial fails, they fail too, and they do not dial.
+  let peerId = when peer is PeerId: peer else: peer.peerId
+  let switch = self.peerManager.switch
+  while not switch.isConnected(peerId):
+    let otherDial = self.dials.getOrDefault(peerId)
+    if otherDial.isNil():
+      let connection = await self.dialAndShare(peer, peerId)
+      if connection.isSome():
+        return connection
+    else:
+      # `join` leaves the dial of the other query as it is when this query ends.
+      await otherDial.join()
+      if not otherDial.read():
+        continue # the dial gave a connection, or its query was cancelled
+    # The peer can connect to this node while the dial to the peer fails.
+    if not switch.isConnected(peerId):
+      return Opt.none(Connection)
+  return await self.peerManager.dialPeer(peer, WakuStoreCodec)
+
 proc query*(
     self: WakuStoreClient, request: StoreQueryRequest, peer: RemotePeerInfo | PeerId
 ): Future[StoreQueryResult] {.async, gcsafe.} =
   if request.paginationCursor.isSome() and request.paginationCursor.get() == EmptyCursor:
     return err(StoreError(kind: ErrorCode.BAD_REQUEST, cause: "invalid cursor"))
 
-  let connection = (await self.peerManager.dialPeer(peer, WakuStoreCodec)).valueOr:
+  let connection = (await self.dialStorePeer(peer)).valueOr:
     logos_delivery_store_errors.inc(labelValues = [DialFailure])
 
     return err(StoreError(kind: ErrorCode.PEER_DIAL_FAILURE, address: $peer))
