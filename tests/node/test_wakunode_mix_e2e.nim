@@ -14,11 +14,13 @@ import
   libp2p/crypto/crypto,
   libp2p/peerid,
   libp2p/multiaddress,
-  libp2p_mix/[curve25519, mix_protocol, mix_metrics]
+  libp2p_mix/[curve25519, mix_protocol, mix_metrics],
+  brokers/broker_context
 
 import
   logos_delivery/waku/
     [waku_core, node/peer_manager, waku_node, waku_mix, waku_lightpush],
+  logos_delivery/waku/node/subscription_manager,
   logos_delivery/waku/node/peer_manager/waku_peer_store,
   logos_delivery/waku/waku,
   logos_delivery/waku/api/publish,
@@ -342,8 +344,9 @@ suite "Waku Mix - end to end transport":
       surbBuildErrors() == surbErrorsBefore
 
   asyncTest "a mixed send through the send service completes and is marked as mixed":
-    ## `MixSendProcessor` sets `propagatedAnonymously` after a real mixed publish, which
-    ## no unit test reaches. The sender is a `Waku` with the `Required` chain.
+    ## The answer of the exit to a real mixed publish propagates the task.
+    ## No unit test reaches it.
+    ## The sender is a `Waku` with the `Required` chain.
     let mixnet = await setupMixNet(23910)
     defer:
       await teardownMixNet(mixnet)
@@ -356,20 +359,25 @@ suite "Waku Mix - end to end transport":
     nodeConf.clusterId = Opt.some(DefaultClusterId)
     let conf = nodeConf.toWakuConf().valueOr:
       raiseAssert error
-    let waku = (await Waku.new(conf)).expect("Waku.new")
+    # Its own broker context keeps the relay events of the cores from its send service.
+    var waku: Waku
+    lockNewGlobalBrokerContext:
+      waku = (await Waku.new(conf)).expect("Waku.new")
+      let kp = generateKeyPair().expect("mix key pair")
+      (
+        await waku.node.mountMix(
+          DefaultClusterId,
+          kp.privateKey,
+          mixnet.pubInfos[0 ..< NumCore],
+          allowAllAddresses = true,
+        )
+      ).isOkOr:
+        raiseAssert "mountMix sender: " & $error
+      (await waku.start()).expect("start")
     defer:
       discard await waku.stop()
-    let kp = generateKeyPair().expect("mix key pair")
-    (
-      await waku.node.mountMix(
-        DefaultClusterId,
-        kp.privateKey,
-        mixnet.pubInfos[0 ..< NumCore],
-        allowAllAddresses = true,
-      )
-    ).isOkOr:
-      raiseAssert "mountMix sender: " & $error
-    (await waku.start()).expect("start")
+    # No copy reaches the sender, so only the answer of the exit can propagate the task.
+    waku.node.subscriptionManager.unsubscribeShard(shard).expect("unsubscribe")
     await waku.node.connectToNodes(
       (0 ..< NumCore).toSeq().mapIt(mixnet.nodes[it].peerInfo.toRemotePeerInfo())
     )
@@ -419,6 +427,6 @@ suite "Waku Mix - end to end transport":
     let after = hopCounts()
     check:
       task.state == DeliveryState.SuccessfullyPropagated
-      task.propagatedAnonymously # no store query for this task
-      task.anonymized # set at the attempt
+      task.isAnonymous() # no store query for this task
+      not task.networkHasMessage()
       after.exited - before.exited >= 1.0

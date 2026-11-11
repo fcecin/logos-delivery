@@ -5,9 +5,9 @@ import logos_delivery/api/types as api_types
 export event_broker, api_types
 
 EventBroker:
-  # Event emitted when a store node, or the mix exit for a send over mix, confirms
-  # a message. Only with the `reliability` option on, and never for an ephemeral
-  # message.
+  # Event emitted when a store node, or the mix exit or a copy from the network for a
+  # send over mix, confirms a message. Only with the `reliability` option on, and
+  # never for an ephemeral message.
   type MessageSentEvent* = object
     requestId*: RequestId
     messageHash*: string

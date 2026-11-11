@@ -117,5 +117,5 @@ suite "Waku Mix - the size of a mix send":
       fits.state == DeliveryState.SuccessfullyPropagated
     check:
       fits.state == DeliveryState.SuccessfullyPropagated
-      fits.propagatedAnonymously
+      fits.isAnonymous()
       errors.len == 1

@@ -29,6 +29,7 @@ import
   ../../waku_lightpush/client as lightpush_client,
   ../../waku_lightpush as lightpush_protocol,
   ../peer_manager,
+  ../../waku_mix,
   ../../common/rate_limit/setting,
   ../../rln,
   ../../rln/rln_plugin
@@ -38,10 +39,6 @@ logScope:
   topics = "waku node lightpush api"
 
 const MountWithoutRelayError* = "cannot mount lightpush because relay is not mounted"
-
-const MixReplyTimeout* = chronos.seconds(5)
-  ## Time limit for one mix-routed lightpush, so a broken path costs one
-  ## attempt.
 
 const MixLightpushSurbs* = 1'u8
   ## The number of SURBs in a lightpush request over mix. One SURB, so the reply
@@ -78,7 +75,14 @@ proc publishOverMix*(
   let publishFut =
     node.wakuLightpushClient.publish(Opt.some(pubsubTopic), message, conn)
   let deadline = sleepAsync(replyTimeout)
-  discard await race(FutureBase(publishFut), FutureBase(deadline))
+  try:
+    discard await race(FutureBase(publishFut), FutureBase(deadline))
+  except CancelledError as exc:
+    # `race` does not cancel the futures that it waits for.
+    publishFut.cancelSoon()
+    deadline.cancelSoon()
+    await noCancel conn.reset()
+    raise exc
 
   if not publishFut.finished():
     await conn.reset()
@@ -302,7 +306,9 @@ proc lightpushPublishHandler(
             "Waku lightpush with mix not available",
           )
 
-        return await node.publishOverMix(conn, pubsubTopic, message)
+        return await node.publishOverMix(
+          conn, pubsubTopic, message, node.wakuMix.replyTimeout
+        )
       else:
         # Fail the build here, not every mixed send at runtime
         {.error: "mix sends need -d:libp2p_mix_experimental_exit_is_dest".}
