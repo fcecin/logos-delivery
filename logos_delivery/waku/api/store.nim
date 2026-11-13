@@ -37,6 +37,22 @@ proc storeQueryToAny*(
   except CatchableError as e:
     return err(e.msg)
 
+proc storeQueryTo*(
+    self: Waku, request: StoreQueryRequest, peer: RemotePeerInfo
+): Future[Result[StoreQueryResponse, string]] {.async.} =
+  try:
+    if self.node.wakuStoreClient.isNil():
+      return err("wakuStoreClient is not mounted")
+
+    let queryResponse = (await self.node.wakuStoreClient.query(request, peer)).valueOr:
+      return err($error)
+
+    return ok(queryResponse)
+  except CancelledError as e:
+    raise e
+  except CatchableError as e:
+    return err(e.msg)
+
 proc storeQuery*(
     self: Waku, request: StoreQueryRequest, peer: string, timeoutMs: int
 ): Future[Result[StoreQueryResponse, string]] {.async.} =
