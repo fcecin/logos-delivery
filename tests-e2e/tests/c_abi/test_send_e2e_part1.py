@@ -133,10 +133,10 @@ class TestSendBeforeRelay(StepsStore, StepsMetrics):
     def test_s19_store_peer_appears_after_propagation(self, node_config):
         """
         S19: a store peer comes online later.
-          - send() returns Ok(RequestId) immediately
+          - send() returns the message hash immediately
           - Propagated --- relay peer
-          - The store peer missed the message, the sender sends it again
-            through lightpush, and Sent follows once the store reports it.
+          - The store peer missed the message, and the sender does not send it
+            again. The send ends with message_error (NotStored).
         """
         sender_collector = EventCollector()
 
@@ -199,125 +199,27 @@ class TestSendBeforeRelay(StepsStore, StepsMetrics):
                 sender_multiaddr = get_node_multiaddr(sender_node)
                 store_node.add_peers([relay_multiaddr, sender_multiaddr])
 
-                sent_event = wait_for_sent(
+                error_event = wait_for_error(
                     collector=sender_collector,
                     request_id=request_id,
                     timeout_s=ERROR_AFTER_CACHE_EXPIRY_TIMEOUT_S,
                 )
-                assert sent_event is not None, (
-                    f"No MessageSentEvent within {ERROR_AFTER_CACHE_EXPIRY_TIMEOUT_S}s "
+                assert error_event is not None, (
+                    f"No MessageErrorEvent within {ERROR_AFTER_CACHE_EXPIRY_TIMEOUT_S}s "
                     f"after the store peer joined. Collected events: {sender_collector.events}"
                 )
+                assert error_event.get("kind") == "NotStored", error_event
+                assert error_event.get("error") == STORE_VALIDATION_TIMEOUT_MSG, error_event
 
                 # The store peer answered the sender's store queries.
                 self.wait_for_metric(store_node, "logos_delivery_store_queries_total", 1)
-
-                error_event = wait_for_error(
-                    collector=sender_collector,
-                    request_id=request_id,
-                    timeout_s=0,
-                )
-                assert error_event is None, f"Unexpected message_error event: {error_event}. Collected events: {sender_collector.events}"
-
-                store_response = self.get_messages_from_store(node=store_node, pubsub_topic=self.test_pubsub_topic, page_size=5)
-                assert store_response.messages, f"The store peer holds no message. Actual response: {store_response.resp_json}"
-
-                assert_event_invariants(sender_collector, request_id)
-
-    @pytest.mark.docker_required
-    def test_s20_message_missing_from_store_is_resent(self, node_config):
-        """
-        S20: the store queries miss, and the message is sent again through lightpush.
-
-        The store peer is connected but on shard 1, so it does not receive
-        the message the relay peer propagates on shard 0. It then joins
-        shard 0, misses the message, and receives it through the lightpush
-        resend, so the send is confirmed.
-
-        Covers state flow:
-            SuccessfullyPropagated -> SuccessfullyValidated
-        """
-        sender_collector = EventCollector()
-
-        # On shard 1 the sender can query it, but it does not receive shard-0 messages.
-        store_node = WakuNode(NODE_2, f"s20_store_{self.test_id}")
-        store_node.start(relay="true", store="true", lightpush="true", discv5_discovery="false", cluster_id=node_config["clusterId"], shard=1)
-
-        node_config.update(
-            {
-                "relay": True,
-                "store": False,
-                "discv5Discovery": False,
-                "numShardsInNetwork": 1,
-                "reliabilityEnabled": True,
-            }
-        )
-        sender_config = {
-            **node_config,
-            # The lightpush resend reaches the store peer: the lightpushnode peer is picked whatever its shards.
-            "lightpushnode": store_node.get_multiaddr_with_id(),
-        }
-
-        sender_result = WrapperManager.create_and_start(
-            config=sender_config,
-            event_cb=sender_collector.event_callback,
-        )
-        assert sender_result.is_ok(), f"Failed to start sender: {sender_result.err()}"
-
-        with sender_result.ok_value as sender_node:
-            relay_config = {
-                **node_config,
-                "staticnodes": [get_node_multiaddr(sender_node)],
-                "store": False,
-            }
-            relay_result = WrapperManager.create_and_start(config=relay_config)
-            assert relay_result.is_ok(), f"Failed to start relay peer: {relay_result.err()}"
-
-            with relay_result.ok_value as relay_peer:
-                assert wait_for_mesh(sender_collector), "sender gossipsub mesh has no peer"
-
-                store_node.add_peers([get_node_multiaddr(sender_node), get_node_multiaddr(relay_peer)])
-
-                message = create_message_bindings(ephemeral=False)
-                send_result = sender_node.send_message(message=message)
-                assert send_result.is_ok(), f"send() must return Ok(RequestId), got: {send_result.err()}"
-
-                request_id = send_result.ok_value
-                assert request_id, "send() returned an empty RequestId"
-
-                propagated_event = wait_for_propagated(
-                    collector=sender_collector,
-                    request_id=request_id,
-                    timeout_s=PROPAGATED_TIMEOUT_S,
-                )
-                assert propagated_event is not None, (
-                    f"No MessagePropagatedEvent within {PROPAGATED_TIMEOUT_S}s. " f"Collected events: {sender_collector.events}"
-                )
-
-                store_node.set_relay_subscriptions([self.test_pubsub_topic])
 
                 sent_event = wait_for_sent(
                     collector=sender_collector,
                     request_id=request_id,
-                    timeout_s=ERROR_AFTER_CACHE_EXPIRY_TIMEOUT_S,
-                )
-                assert sent_event is not None, (
-                    f"No MessageSentEvent within {ERROR_AFTER_CACHE_EXPIRY_TIMEOUT_S}s "
-                    f"after the store joined the shard. Collected events: {sender_collector.events}"
-                )
-
-                # The store peer answered the sender's store queries.
-                self.wait_for_metric(store_node, "logos_delivery_store_queries_total", 1)
-
-                error_event = wait_for_error(
-                    collector=sender_collector,
-                    request_id=request_id,
                     timeout_s=0,
                 )
-                assert error_event is None, f"Unexpected message_error event: {error_event}. Collected events: {sender_collector.events}"
-
-                store_response = self.get_messages_from_store(node=store_node, pubsub_topic=self.test_pubsub_topic, page_size=5)
-                assert store_response.messages, f"The store peer holds no message. Actual response: {store_response.resp_json}"
+                assert sent_event is None, f"Unexpected message_sent event: {sent_event}. Collected events: {sender_collector.events}"
 
                 assert_event_invariants(sender_collector, request_id)
 
@@ -787,19 +689,19 @@ class TestSendBeforeRelay(StepsStore, StepsMetrics):
                     )
                     assert error_event is None, f"Unexpected message_error for request_id={request_id}: {error_event}"
 
-                # Cross-association guard: every event with a requestId must
+                # Cross-association guard: every event with a messageHash must
                 # belong to exactly one of the request ids we issued.
                 issued = set(request_ids)
                 for event in sender_collector.snapshot():
-                    event_request_id = event.get("requestId")
+                    event_request_id = event.get("messageHash")
                     if event_request_id is None:
                         continue
                     assert event_request_id in issued, (
-                        f"Event carries an unknown requestId={event_request_id!r}, " f"not in issued set {issued}. Event: {event}"
+                        f"Event carries an unknown messageHash={event_request_id!r}, " f"not in issued set {issued}. Event: {event}"
                     )
 
                 # Per-request invariants apply to every concurrent send
-                # (correct requestId, no duplicate terminal events,
+                # (correct messageHash, no duplicate terminal events,
                 # Sent never before Propagated).
                 for request_id in request_ids:
                     assert_event_invariants(sender_collector, request_id)
@@ -916,11 +818,11 @@ class TestSendBeforeRelay(StepsStore, StepsMetrics):
 
             issued = set(all_request_ids)
             for event in sender_collector.snapshot():
-                event_request_id = event.get("requestId")
+                event_request_id = event.get("messageHash")
                 if event_request_id is None:
                     continue
                 assert event_request_id in issued, (
-                    f"Event carries an unknown requestId={event_request_id!r}, " f"not in issued set {issued}. Event: {event}"
+                    f"Event carries an unknown messageHash={event_request_id!r}, " f"not in issued set {issued}. Event: {event}"
                 )
 
             # Use the hash the wrapper emitted on message_sent so the store
