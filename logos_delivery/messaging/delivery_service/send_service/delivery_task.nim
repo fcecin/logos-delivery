@@ -3,17 +3,18 @@ import brokers/broker_context
 import
   logos_delivery/waku/waku_core,
   logos_delivery/api/types,
-  logos_delivery/waku/requests/node_requests
+  logos_delivery/waku/requests/node_requests,
+  ./delivery_plan
 
-type DeliveryState* {.pure.} = enum
-  Entry
-  SuccessfullyPropagated
-    # message is known to be sent to the network but not yet validated
-  SuccessfullyValidated
-    # message is known to be stored at least on one store node, thus validated
-  FallbackRetry # retry sending with fallback processor if available
-  NextRoundRetry # waits for its next attempt
-  FailedToDeliver # final state of failed delivery
+export delivery_plan, types
+
+type StoreAnswer* = ref object
+  ## The Store answers for a task, which the Store validation loop sets for `deliver`.
+  ## A report replaces a miss that `deliver` did not take yet.
+  pending: StepOutcome
+  signal: AsyncEvent
+  openedAt*: Moment
+  deadline*: Moment ## The end of the Store validation window of the task.
 
 type DeliveryTask* = ref object
   requestId*: RequestId
@@ -22,6 +23,13 @@ type DeliveryTask* = ref object
   msgHash*: WakuMessageHash
   tryCount*: int
   state*: DeliveryState
+    ## Only `deliver` changes it.
+    ## A stop keeps the state of the cancelled step.
+  lastError*: StepOutcome
+    ## Why the last step did not propagate the message, `None` before a failure.
+  lastErrorDesc*: string
+    ## The text that came with `lastError`, for the log lines and the error text.
+  finalOutcome*: StepOutcome ## The outcome that ended the send, `None` while it runs.
   firstPropagatedTime*: Opt[Moment]
     ## Set once on the first successful propagation; never reset on re-publish.
     ## Anchors the archive wait before the first Store query (see
@@ -31,9 +39,7 @@ type DeliveryTask* = ref object
     ## waiting for epoch budget. Guards re-admission on retry and anchors the
     ## delivery window (`isDeliveryTimedOut`), so a task parked for budget is not
     ## aged out before it can be sent.
-  propagatedEventEmitted*: bool
-    ## Set when the task emits `MessagePropagatedEvent`. After a restart, the send
-    ## service does not send the task again.
+  propagatedEventEmitted*: bool ## Set when the task emits `MessagePropagatedEvent`.
   queuedEventEmitted*: bool
     ## Set once the task has reported itself queued for rate-limit budget, so
     ## the event fires on the first park only and not on every retry.
@@ -51,15 +57,35 @@ type DeliveryTask* = ref object
   deliverHandle*: Future[void]
     ## The `deliver` of the send service for this task. Nil or finished while
     ## it does not run.
-  storeAnswer*: Future[void]
-    ## Completes when a Store node reports the message. Nil while the send service
-    ## does not wait for a Store confirmation of this task.
+  storeAnswer*: StoreAnswer
+    ## Nil while `deliver` does not wait for a Store confirmation.
   resendCount*: int
     ## How many times the send service sent the message again after a Store miss.
   storeMissed*: bool
     ## A Store node answered without the message. Each later Store query for
     ## this task can ask each Store node.
-  errorDesc*: string
+
+proc new*(T: typedesc[StoreAnswer], openedAt, deadline: Moment): T =
+  T(signal: newAsyncEvent(), openedAt: openedAt, deadline: deadline)
+
+proc setAnswer*(answer: StoreAnswer, outcome: StepOutcome) =
+  if outcome == StepOutcome.StoreReported or answer.pending == StepOutcome.None:
+    answer.pending = outcome
+  answer.signal.fire()
+
+proc takeAnswer*(answer: StoreAnswer): StepOutcome =
+  ## The answer that the Store validation loop set, or `None`.
+  let pending = answer.pending
+  answer.pending = StepOutcome.None
+  answer.signal.clear()
+  return pending
+
+proc waitAnswer*(
+    answer: StoreAnswer
+): Future[void] {.async: (raises: [CancelledError]).} =
+  ## Completes when the Store validation loop sets an answer.
+  ## Each call returns a new future.
+  await answer.signal.wait()
 
 proc new*(
     T: typedesc[DeliveryTask],

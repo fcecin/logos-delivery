@@ -43,6 +43,8 @@ const MixReplyTimeout* = chronos.seconds(5)
   ## Time limit for one mix-routed lightpush, so a broken path costs one
   ## attempt.
 
+const MixReplyTimedOutMsg* = "Waku lightpush over mix timed out"
+
 const MixLightpushSurbs* = 1'u8
   ## The number of SURBs in a lightpush request over mix. One SURB, so the reply
   ## uses one path.
@@ -78,15 +80,21 @@ proc publishOverMix*(
   let publishFut =
     node.wakuLightpushClient.publish(Opt.some(pubsubTopic), message, conn)
   let deadline = sleepAsync(replyTimeout)
-  discard await race(FutureBase(publishFut), FutureBase(deadline))
+  try:
+    discard await race(FutureBase(publishFut), FutureBase(deadline))
+  except CancelledError as exc:
+    # `race` leaves its futures running when the caller cancels it.
+    await noCancel conn.reset()
+    publishFut.cancelSoon()
+    deadline.cancelSoon()
+    raise exc
 
   if not publishFut.finished():
     await conn.reset()
     publishFut.cancelSoon()
     debug "Mix lightpush timed out", pubsubTopic = pubsubTopic, timeout = replyTimeout
-    return lighpushErrorResult(
-      LightPushErrorCode.SERVICE_NOT_AVAILABLE, "Waku lightpush over mix timed out"
-    )
+    return
+      lighpushErrorResult(LightPushErrorCode.SERVICE_NOT_AVAILABLE, MixReplyTimedOutMsg)
 
   await deadline.cancelAndWait()
   return await publishFut
