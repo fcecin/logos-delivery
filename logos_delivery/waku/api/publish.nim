@@ -85,6 +85,13 @@ func isRlnRejection*(error: ErrorStatus): bool =
       error.desc.get("").contains(RlnValidatorErrorMsg)
     )
 
+func isMixReplyTimeout*(error: ErrorStatus): bool =
+  ## True when a lightpush over mix got no reply in time.
+  ## Only the text tells it apart from an exit that answers `SERVICE_NOT_AVAILABLE`.
+  return
+    error.code == LightPushErrorCode.SERVICE_NOT_AVAILABLE and
+    error.desc.get("") == MixReplyTimedOutMsg
+
 proc onRlnProofRejected*(self: Waku): bool =
   ## Tells the mounted RLN backend its proof was rejected. True when the
   ## backend will refresh what proofs are built against; see

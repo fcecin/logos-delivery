@@ -72,12 +72,11 @@ type CountingProcessor = ref object of BaseSendProcessor
   ## Propagates every task it is given; `calls` shows whether a task got out.
   calls: int
 
-method isValidProcessor(self: CountingProcessor, task: DeliveryTask): bool {.gcsafe.} =
-  return true
-
-method sendImpl(self: CountingProcessor, task: DeliveryTask): Future[void] {.async.} =
+method attempt(
+    self: CountingProcessor, task: DeliveryTask
+): Future[StepResult] {.async.} =
   inc self.calls
-  task.state = DeliveryState.SuccessfullyPropagated
+  return StepResult.init(StepOutcome.Propagated)
 
 proc buildTask(id: string): DeliveryTask =
   let msg = testMessage()
@@ -87,7 +86,6 @@ proc buildTask(id: string): DeliveryTask =
     pubsubTopic: pubsubTopic,
     msg: msg,
     msgHash: computeMessageHash(pubsubTopic, msg),
-    state: DeliveryState.Entry,
   )
 
 suite "SendService RLN proof attach":
@@ -159,7 +157,7 @@ suite "SendService RLN proof attach - failing backend":
         false,
         waku,
         manager,
-        processor,
+        SendProcessors(lightpush: processor),
         sendQueueCapacity = 1,
         retryInterval = chronos.minutes(10),
       )
@@ -178,7 +176,7 @@ suite "SendService RLN proof attach - failing backend":
     checkUntilTimeout:
       errors.len == 1
     check:
-      task.state == DeliveryState.FailedToDeliver
+      task.state == DeliveryState.NotPropagated
       processor.calls == 0
       errors.mapIt(it.requestId) == @[task.requestId]
       errors.mapIt(it.error) == @[PermanentReason]
@@ -208,7 +206,7 @@ suite "SendService RLN proof attach - failing backend":
     checkUntilTimeout:
       errors.len == 1
     check:
-      task.state == DeliveryState.FailedToDeliver
+      task.state == DeliveryState.NotPropagated
       processor.calls == 0
       errors.mapIt(it.requestId) == @[task.requestId]
       errors.mapIt(it.error) == @[PermanentReason]
@@ -275,20 +273,25 @@ suite "SendService RLN proof attach - RLN mounted":
     let quota = RateLimitManager
       .new(RateLimitConfig(enabled: true, epochPeriodSec: 600, messagesPerEpoch: 1))
       .expect("RateLimitManager.new")
-    let mix = MixSendProcessor.new(
-      waku, waku.brokerCtx, AnonymityLevel.Required, chronos.minutes(1)
-    )
+    let mix = MixSendProcessor.new(waku, waku.brokerCtx)
     let service = SendService
-      .new(false, waku, quota, mix, retryInterval = chronos.hours(1))
+      .new(
+        false,
+        waku,
+        quota,
+        SendProcessors(mix: mix),
+        AnonymityLevel.Required,
+        retryInterval = chronos.hours(1),
+      )
       .expect("SendService.new")
     service.startSendService()
     defer:
       await service.stopSendService()
     check service.enqueue(task).isOk()
     checkUntilTimeout:
-      task.state == DeliveryState.FailedToDeliver
+      task.state == DeliveryState.NotPropagated
     check:
-      task.errorDesc.startsWith(MixTooLargeReason)
+      task.errorText().startsWith(MixTooLargeReason)
       task.msg.proof.len == 0
       task.firstAdmittedTime.isNone()
       onchainRln.nonceManager.nextId == 0
