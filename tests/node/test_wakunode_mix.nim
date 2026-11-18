@@ -2,7 +2,7 @@
 
 import std/[sequtils, strutils]
 import testutils/unittests, chronos, results, metrics
-import libp2p/[crypto/crypto, peerid, multiaddress]
+import libp2p/[crypto/crypto, peerid, peerstore, multiaddress]
 import libp2p/nameresolving/nameresolver
 import libp2p_mix, libp2p_mix/[curve25519, mix_metrics]
 
@@ -609,6 +609,55 @@ suite "Waku Mix - bootstrap nodes":
 
     check node.getMixNodePoolSize() == MinMixPoolSize
     await node.stop()
+
+  asyncTest "a bootstrap node stays through a prune of the peer store":
+    ## A bootstrap node has no ENR and no connection, so a prune takes it first.
+    ## The other peer shows that the prune ran.
+    let node = await mountWith(
+      @[
+        mixBootnode("/ip4/127.0.0.1/tcp/60101"),
+        mixBootnode("/ip4/127.0.0.1/tcp/60102"),
+        mixBootnode("/ip4/127.0.0.1/tcp/60103"),
+        mixBootnode("/ip4/127.0.0.1/tcp/60104"),
+      ]
+    )
+    let other = PeerId.init(generateSecp256k1Key()).tryGet()
+    node.peerManager.addPeer(
+      RemotePeerInfo.init(
+        other, @[MultiAddress.init("/ip4/127.0.0.1/tcp/60105").tryGet()]
+      )
+    )
+
+    # A capacity of 1 asks the prune to take every peer but one.
+    node.peerManager.switch.peerStore.setCapacity(1)
+    node.peerManager.prunePeerStore()
+
+    check:
+      node.getMixNodePoolSize() == MinMixPoolSize
+      other notin node.peerManager.switch.peerStore.peers.mapIt(it.peerId)
+    await node.stop()
+
+  asyncTest "a bootstrap node that the address book already knows gets an address that never expires":
+    ## Peer persistence writes a stored address at `Medium` confidence before the mount.
+    ## libp2p deletes such an address of a disconnected peer after one hour.
+    let entry = mixBootnode("/ip4/127.0.0.1/tcp/60101")
+    let stored = parsePeerInfo(entry.multiAddr).tryGet()
+    let node = newTestWakuNode(generateSecp256k1Key())
+    let addressBook = node.peerManager.switch.peerStore[AddressBook]
+    node.peerManager.addPeer(RemotePeerInfo.init(stored.peerId, stored.addrs))
+    check addressBook.entries(stored.peerId).mapIt(it.confidence) ==
+      @[AddressConfidence.Medium]
+
+    let mixKeys = generateKeyPair().expect("mix key pair")
+    (
+      await node.mountMix(
+        DefaultClusterId, mixKeys.privateKey, @[entry], allowAllAddresses = true
+      )
+    ).isOkOr:
+      raiseAssert "Failed to mount mix: " & $error
+
+    check addressBook.entries(stored.peerId).mapIt(it.confidence) ==
+      @[AddressConfidence.Infinite]
 
   asyncTest "a node skips its own entry in the bootstrap list":
     ## A fleet node finds itself in its own preset. The mount skips that entry,
