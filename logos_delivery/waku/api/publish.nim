@@ -20,6 +20,7 @@ import
     node/waku_node/lightpush,
     node/peer_manager,
     rln,
+    waku_lightpush/client,
     waku_lightpush/common,
     waku_lightpush/rpc,
     waku_lightpush/callbacks,
@@ -51,6 +52,11 @@ proc rlnEpochQuota*(
   ## `timestamp` (Unix seconds). An error without a backend that keeps one.
   return await epochQuota(self.node.rlnPlugin, timestamp)
 
+proc rlnEpochSizeSec*(self: Waku): Opt[uint64] =
+  let plugin = self.node.rlnPlugin.valueOr:
+    return Opt.none(uint64)
+  return plugin.epochSizeSec
+
 proc attachRlnProof*(
     self: Waku, message: WakuMessage
 ): Future[Result[WakuMessage, RlnError]] {.async.} =
@@ -69,6 +75,26 @@ proc messageForSizeCheck*(
     self: Waku, message: WakuMessage
 ): Result[WakuMessage, RlnError] =
   return self.node.rlnPlugin.messageForSizeCheck(message)
+
+func maxMessageSizeBytes*(self: Waku): uint64 =
+  return self.conf.maxMessageSizeBytes
+
+func isUnanswered*(error: ErrorStatus): bool =
+  ## True when a publish got no answer that the node can read.
+  ## The time limit ended, the request could not be written, or the reply could not be
+  ## read, decoded or matched.
+  ## The network can have the message after each of these.
+  ## It checks the code and the text, as `isRlnRejection` does.
+  let desc = error.desc.get("")
+  return
+    (error.code == LightPushErrorCode.SERVICE_NOT_AVAILABLE and desc == MixTimedOutDesc) or
+    (
+      error.code == LightPushErrorCode.INTERNAL_SERVER_ERROR and (
+        desc.startsWith(WriteRequestFailedDesc) or
+        desc.startsWith(ReadResponseFailedDesc) or desc == ResponseNotDecodedDesc or
+        desc == RequestIdMismatchDesc
+      )
+    )
 
 func isRlnRejection*(error: ErrorStatus): bool =
   ## True when a publish failure means "the RLN proof was not accepted", so the
@@ -90,6 +116,10 @@ proc onRlnProofRejected*(self: Waku): bool =
   ## backend will refresh what proofs are built against; see
   ## `notifyProofRejected`.
   return self.node.rlnPlugin.notifyProofRejected()
+
+proc rlnRefreshesProofs*(self: Waku): bool =
+  ## True when the mounted RLN backend refreshes its proofs after a rejection.
+  return self.node.rlnPlugin.refreshesProofs()
 
 proc lightpushPeerAvailable*(self: Waku, shard: PubsubTopic): bool =
   ## True if a lightpush service peer is available for `shard`.
@@ -175,8 +205,8 @@ proc lightpushPublishToAny*(
     return
       await self.node.lightpushPublish(Opt.some(shard), message, Opt.some(peer), mixify)
   except CancelledError as exc:
-    # The send service cancelled this attempt during its stop. Raise the cancel
-    # again, so that `deliver` ends with the cancel and counts no failed attempt.
+    # The send service cancelled this attempt.
+    # Raise the cancel again, so that the send service counts no failed attempt.
     raise exc
   except CatchableError as e:
     return lightpushResultInternalError(e.msg)

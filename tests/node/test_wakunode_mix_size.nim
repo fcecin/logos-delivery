@@ -34,26 +34,24 @@ proc newService(waku: Waku, level: AnonymityLevel): SendService =
   ## Each accepted task runs through the scheduler.
   let manager =
     RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
-  let chain = setupSendProcessorChain(waku, level).expect("chain")
+  let processors = setupSendProcessors(waku, level).expect("processors")
   let service = SendService
-    .new(false, waku, manager, chain, level, retryInterval = chronos.hours(1))
+    .new(false, waku, manager, processors, level, retryInterval = chronos.hours(1))
     .expect("SendService.new")
   service.startSendService()
   return service
 
-proc sizedTask(id: string, size: int): DeliveryTask =
+proc sizedTask(size: int): DeliveryTask =
   ## An admitted task whose lightpush request over mix has `size` bytes.
   const contentTopic = "/mix-size/1/probe/proto"
   for n in 0 .. size:
     let msg = fakeWakuMessage(payload = newSeq[byte](n), contentTopic = contentTopic)
     if mixLightpushSize(DefaultPubsubTopic, msg).size == size:
       return DeliveryTask(
-        requestId: RequestId(id),
         pubsubTopic: DefaultPubsubTopic,
         msg: msg,
         msgHash: computeMessageHash(DefaultPubsubTopic, msg),
-        state: DeliveryState.Entry,
-        firstAdmittedTime: Opt.some(Moment.now()), # no budget and no proof
+        charged: true, # no budget and no proof
       )
   raiseAssert "no payload gives a request of " & $size & " bytes"
 
@@ -95,23 +93,18 @@ suite "Waku Mix - the size of a mix send":
       await service.stopSendService()
     let limit = mixLightpushSize(DefaultPubsubTopic, fakeWakuMessage()).limit
 
-    let tooLarge = sizedTask("one-byte-too-many", limit + 1)
-    check service.enqueue(tooLarge).isOk()
-    checkUntilTimeout:
-      tooLarge.state == DeliveryState.FailedToDeliver
+    let tooLarge = sizedTask(limit + 1)
+    let refused = service.enqueue(tooLarge)
     check:
-      tooLarge.state == DeliveryState.FailedToDeliver
-      tooLarge.errorDesc.startsWith(MixTooLargeReason)
+      refused.isErr() and refused.error.kind == SendErrorKind.TooLarge
+      refused.isErr() and refused.error.desc.startsWith(MixTooLargeReason)
       tooLarge.tryCount == 0
-    checkUntilTimeout:
-      errors.len == 1
-    check errors == @[tooLarge.errorDesc]
 
-    let fits = sizedTask("largest-that-fits", limit)
+    let fits = sizedTask(limit)
     check service.enqueue(fits).isOk()
     checkUntilTimeout:
-      fits.state == DeliveryState.SuccessfullyPropagated
+      fits.state == DeliveryState.Propagated
     check:
-      fits.state == DeliveryState.SuccessfullyPropagated
+      fits.state == DeliveryState.Propagated
       fits.propagatedAnonymously
-      errors.len == 1
+      errors.len == 0 # the refused send got no event

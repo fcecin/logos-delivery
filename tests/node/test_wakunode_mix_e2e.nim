@@ -338,8 +338,8 @@ suite "Waku Mix - end to end transport":
       surbBuildErrors() == surbErrorsBefore
 
   asyncTest "a mixed send through the send service completes and is marked as mixed":
-    ## `MixSendProcessor` sets `propagatedAnonymously` after a real mixed publish, which
-    ## no unit test reaches. The sender is a `Waku` with the `Required` chain.
+    ## The send service sets `propagatedAnonymously` after a real mixed publish, which
+    ## no unit test reaches. The sender is a `Waku` with the `Required` plan.
     let mixnet = await setupMixNet(23910)
     defer:
       await teardownMixNet(mixnet)
@@ -384,9 +384,10 @@ suite "Waku Mix - end to end transport":
 
     let manager =
       RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
-    let chain = setupSendProcessorChain(waku, AnonymityLevel.Required).expect("chain")
+    let processors =
+      setupSendProcessors(waku, AnonymityLevel.Required).expect("processors")
     let service = SendService
-      .new(false, waku, manager, chain, AnonymityLevel.Required)
+      .new(false, waku, manager, processors, AnonymityLevel.Required)
       .expect("SendService.new")
     let msg = WakuMessage(
       payload: toBytes("mix-e2e-send-service over mix"),
@@ -395,12 +396,10 @@ suite "Waku Mix - end to end transport":
       timestamp: getNowInNanosecondTime(),
     )
     let task = DeliveryTask(
-      requestId: RequestId("mix-e2e-required"),
       pubsubTopic: shard,
       msg: msg,
       msgHash: computeMessageHash(shard, msg),
-      state: DeliveryState.Entry,
-      firstAdmittedTime: Opt.some(Moment.now()), # admitted: no budget, no proof
+      charged: true, # admitted: no budget, no proof
     )
     let before = hopCounts()
     check service.enqueue(task).isOk()
@@ -411,7 +410,7 @@ suite "Waku Mix - end to end transport":
       task.propagatedEventEmitted
     let after = hopCounts()
     check:
-      task.state == DeliveryState.SuccessfullyPropagated
+      task.state == DeliveryState.Propagated
       task.propagatedAnonymously # no store query for this task
       task.anonymized # set at the attempt
       after.exited - before.exited >= 1.0

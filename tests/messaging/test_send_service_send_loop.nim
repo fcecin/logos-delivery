@@ -25,6 +25,17 @@ const PollInterval = chronos.milliseconds(5)
 const FastRetryInterval = chronos.milliseconds(10)
   ## The `retryInterval` of most tests, so a parked task retries soon.
 
+proc label(task: DeliveryTask): string =
+  ## The payload text, the name of a task in these tests.
+  return string.fromBytes(task.msg.payload)
+
+proc hashHex(task: DeliveryTask): string =
+  ## The message hash as the events carry it.
+  return task.msgHash.to0xHex()
+
+proc refusedAs(res: Result[void, SendError], kind: SendErrorKind): bool =
+  return res.isErr() and res.error.kind == kind
+
 type ScriptedProcessor = ref object of BaseSendProcessor
   ## The first call parks a task. A retry of a `stalled` task waits for its reply,
   ## a `raising` task raises, and other retries propagate the task.
@@ -45,12 +56,13 @@ proc retryStarted(self: ScriptedProcessor, id: string): Future[void] =
   ## Completes when the first retry of `id` starts. Each call returns a new future.
   return self.startedEvent(id).wait()
 
-method process(self: ScriptedProcessor, task: DeliveryTask): Future[void] {.async.} =
-  let id = $task.requestId
+method attempt(
+    self: ScriptedProcessor, task: DeliveryTask
+): Future[StepReport] {.async.} =
+  let id = task.label()
   if id notin self.seen:
     self.seen.add(id)
-    task.state = DeliveryState.NextRoundRetry
-    return
+    return StepReport.init(Trigger.ServiceUnavailable)
 
   inc self.running
   defer:
@@ -70,10 +82,7 @@ method process(self: ScriptedProcessor, task: DeliveryTask): Future[void] {.asyn
   else:
     # Suspend, so the sends overlap.
     await sleepAsync(ZeroDuration)
-
-  task.state = DeliveryState.SuccessfullyPropagated
-  if task.firstPropagatedTime.isNone():
-    task.firstPropagatedTime = Opt.some(Moment.now())
+  return StepReport.init(Trigger.Published)
 
 proc newScripted(
     stalled: seq[string] = @[], raising: seq[string] = @[]
@@ -84,81 +93,114 @@ type FakePropagatingProcessor = ref object of BaseSendProcessor
   ## Propagates each task at once.
   calls: int
 
-method isValidProcessor(
+method attempt(
     self: FakePropagatingProcessor, task: DeliveryTask
-): bool {.gcsafe.} =
-  return true
-
-method sendImpl(
-    self: FakePropagatingProcessor, task: DeliveryTask
-): Future[void] {.async.} =
+): Future[StepReport] {.async.} =
   self.calls.inc()
-  task.state = DeliveryState.SuccessfullyPropagated
-  if task.firstPropagatedTime.isNone():
-    task.firstPropagatedTime = Opt.some(Moment.now())
+  return StepReport.init(Trigger.Published)
 
 type OrderProcessor = ref object of BaseSendProcessor
   ## Parks each task at its first call and propagates it at the next one.
-  ## `calls` holds the request ids in call order.
+  ## `calls` holds the labels of the tasks in call order.
   calls: seq[string]
 
-method process(self: OrderProcessor, task: DeliveryTask): Future[void] {.async.} =
-  let id = $task.requestId
-  task.state =
-    if id in self.calls:
-      DeliveryState.SuccessfullyPropagated
-    else:
-      DeliveryState.NextRoundRetry
-  if task.state == DeliveryState.SuccessfullyPropagated and
-      task.firstPropagatedTime.isNone():
-    task.firstPropagatedTime = Opt.some(Moment.now())
+method attempt(self: OrderProcessor, task: DeliveryTask): Future[StepReport] {.async.} =
+  let id = task.label()
+  let trigger = if id in self.calls: Trigger.Published else: Trigger.ServiceUnavailable
   self.calls.add(id)
+  return StepReport.init(trigger)
 
 type HandOffProcessor = ref object of BaseSendProcessor
-  ## Overrides `sendImpl`, so the base chain runs. The first call parks the task
-  ## for a retry. Each later call hands it to the fallback processor, as the mix
-  ## processor does for `Preferred`.
+  ## The mix processor of a `Preferred` service. The first call parks the task
+  ## for a retry. Each later call hands it to the plain path, as the mix
+  ## processor does when mix cannot take the task.
   calls: int
 
-method isValidProcessor(self: HandOffProcessor, task: DeliveryTask): bool {.gcsafe.} =
-  return true
-
-method sendImpl(self: HandOffProcessor, task: DeliveryTask): Future[void] {.async.} =
+method attempt(
+    self: HandOffProcessor, task: DeliveryTask
+): Future[StepReport] {.async.} =
   inc self.calls
-  task.state =
-    if self.calls == 1: DeliveryState.NextRoundRetry else: DeliveryState.FallbackRetry
+  let trigger = if self.calls == 1: Trigger.ServiceBusy else: Trigger.MixUnavailable
+  return StepReport.init(trigger)
 
 type StallingProcessor = ref object of BaseSendProcessor
-  ## Overrides `sendImpl`, which the chain calls on each link. Each call waits on
-  ## a new reply in `replies`, then propagates the task.
+  ## Each call waits on a new reply in `replies`, then propagates the task.
   replies: seq[Future[void]]
 
-method isValidProcessor(self: StallingProcessor, task: DeliveryTask): bool {.gcsafe.} =
-  return true
-
-method sendImpl(self: StallingProcessor, task: DeliveryTask): Future[void] {.async.} =
+method attempt(
+    self: StallingProcessor, task: DeliveryTask
+): Future[StepReport] {.async.} =
   let reply = newFuture[void]("stalling-reply")
   self.replies.add(reply)
   await reply
-  task.state = DeliveryState.SuccessfullyPropagated
-  if task.firstPropagatedTime.isNone():
-    task.firstPropagatedTime = Opt.some(Moment.now())
+  return StepReport.init(Trigger.Published)
+
+type NoRelayPeerProcessor = ref object of BaseSendProcessor
+  ## A relay processor that never has a relay peer.
+
+method attempt(
+    self: NoRelayPeerProcessor, task: DeliveryTask
+): Future[StepReport] {.async.} =
+  return StepReport.init(Trigger.NoRelayPeers)
+
+type ReplyProcessor = ref object of BaseSendProcessor
+  ## Each attempt waits for a reply that the test gives.
+  replies: seq[Future[StepReport]]
+
+method attempt(self: ReplyProcessor, task: DeliveryTask): Future[StepReport] {.async.} =
+  let reply = newFuture[StepReport]("scripted reply")
+  self.replies.add(reply)
+  return await reply
+
+type SeenFlags = ref object ## The flags of a task that the listeners saw.
+  propagated: bool
+
+type RejectingProcessor = ref object of BaseSendProcessor
+  ## A peer rejects each message, with no suspension.
+
+method attempt(
+    self: RejectingProcessor, task: DeliveryTask
+): Future[StepReport] {.async.} =
+  return StepReport.init(Trigger.Rejected, "rejected by the test")
+
+type ZeroPeersProcessor = ref object of BaseSendProcessor
+  ## A relay processor whose publish reaches no peer.
+
+method attempt(
+    self: ZeroPeersProcessor, task: DeliveryTask
+): Future[StepReport] {.async.} =
+  return publishReport(0)
 
 type RaisingProcessor = ref object of BaseSendProcessor
   calls: int
 
-method isValidProcessor(self: RaisingProcessor, task: DeliveryTask): bool {.gcsafe.} =
-  return true
-
-method sendImpl(self: RaisingProcessor, task: DeliveryTask): Future[void] {.async.} =
+method attempt(
+    self: RaisingProcessor, task: DeliveryTask
+): Future[StepReport] {.async.} =
   inc self.calls
   raise newException(ValueError, "scripted fallback failure")
 
+type RestartingProcessor = ref object of BaseSendProcessor
+  ## Reports `Started`, which only `deliver` can report.
+
+method attempt(
+    self: RestartingProcessor, task: DeliveryTask
+): Future[StepReport] {.async.} =
+  return StepReport.init(Trigger.Started)
+
+type SilentProcessor = ref object of BaseSendProcessor
+  ## Ends its attempt with the zero value of a report.
+
+method attempt(
+    self: SilentProcessor, task: DeliveryTask
+): Future[StepReport] {.async.} =
+  return StepReport()
+
 type OutcomeLog = ref object
-  ## The request ids of the propagation and error events, in order.
+  ## The message hashes of the propagation and error events, in order.
   brokerCtx: BrokerContext
-  propagated: seq[RequestId]
-  errors: seq[RequestId]
+  propagated: seq[string]
+  errors: seq[string]
   propagatedCount: EventCounter
   propagatedListener: MessagePropagatedEventListener
   errorListener: MessageErrorEventListener
@@ -174,7 +216,7 @@ proc newOutcomeLog(brokerCtx: BrokerContext): OutcomeLog =
     .listen(
       brokerCtx,
       proc(event: MessagePropagatedEvent) {.async: (raises: []).} =
-        log.propagated.add(event.requestId)
+        log.propagated.add(event.messageHash)
         log.propagatedCount.inc(),
     )
     .expect("listen propagated")
@@ -182,7 +224,7 @@ proc newOutcomeLog(brokerCtx: BrokerContext): OutcomeLog =
     .listen(
       brokerCtx,
       proc(event: MessageErrorEvent) {.async: (raises: []).} =
-        log.errors.add(event.requestId),
+        log.errors.add(event.messageHash),
     )
     .expect("listen error")
   return log
@@ -190,27 +232,6 @@ proc newOutcomeLog(brokerCtx: BrokerContext): OutcomeLog =
 proc teardown(log: OutcomeLog) {.async.} =
   await MessagePropagatedEvent.dropListener(log.brokerCtx, log.propagatedListener)
   await MessageErrorEvent.dropListener(log.brokerCtx, log.errorListener)
-
-type FakeQuotaProvider = ref object
-  ## A quota provider whose reads wait for `reply` and never raise a cancel.
-  reply: Future[void]
-  calls: EventCounter ## the quota reads that started
-
-proc newFakeQuotaProvider(): FakeQuotaProvider =
-  return FakeQuotaProvider(reply: newFuture[void]("quota-reply"), calls: EventCounter())
-
-proc waitCalls(quota: FakeQuotaProvider, count: int): Future[void] =
-  ## Completes when `count` quota reads started. Each call returns a new future.
-  return quota.calls.waitCount(count)
-
-proc provider(quota: FakeQuotaProvider): QuotaProvider =
-  return proc(): Future[Opt[EpochQuota]] {.async: (raises: []), gcsafe.} =
-    quota.calls.inc()
-    try:
-      await quota.reply
-    except CatchableError:
-      discard
-    return Opt.none(EpochQuota)
 
 type SendOnErrorHook = ref object
   ## A listener that sends a new message at each error. It starts `timer` at the
@@ -220,22 +241,12 @@ type SendOnErrorHook = ref object
   timer: Future[void] ## a `sleepAsync(ZeroDuration)` from the first error
   stoppedByTimer: bool
   stoppedAt: Moment
-  results: seq[Result[RequestId, string]]
+  results: seq[Result[void, SendError]]
   done: Future[void]
 
 proc testConf(): WakuConf =
   defaultTestWakuNodeConf().toWakuConf().valueOr:
     raiseAssert error
-
-proc fixedEpochQuota(epoch: ref uint64, userMessageLimit: uint64): QuotaProvider =
-  ## `epoch` is a ref so the test can roll the epoch without taking the
-  ## address of a local.
-  return proc(): Future[Opt[EpochQuota]] {.async: (raises: []), gcsafe.} =
-    return Opt.some(
-      EpochQuota(
-        epochIndex: epoch[], rateLimit: userMessageLimit, remaining: userMessageLimit
-      )
-    )
 
 suite "SendService - deliver":
   var waku {.threadvar.}: Waku
@@ -261,46 +272,32 @@ suite "SendService - deliver":
     )
     let pubsubTopic = PubsubTopic("/waku/2/rs/3/0")
     return DeliveryTask(
-      requestId: RequestId(id),
       pubsubTopic: pubsubTopic,
       msg: msg,
       msgHash: computeMessageHash(pubsubTopic, msg),
-      state: DeliveryState.Entry,
+      state: DeliveryState.Initial,
     )
 
   proc newService(
       processor: BaseSendProcessor,
       interval = FastRetryInterval,
-      sendQueueCapacity = DefaultSendQueueCapacity,
+      maxSendsInFlight = MaxSendsInFlight,
       manager =
         RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new"),
+      mix: BaseSendProcessor = nil,
   ): SendService =
+    ## With `mix`, the service has the `Preferred` plan.
+    let level = if mix.isNil(): AnonymityLevel.None else: AnonymityLevel.Preferred
     return SendService
       .new(
         false,
         waku,
         manager,
-        processor,
-        sendQueueCapacity = sendQueueCapacity,
+        SendProcessors(mix: mix, lightpush: processor),
+        level,
+        maxSendsInFlight = maxSendsInFlight,
         retryInterval = interval,
       )
-      .expect("SendService.new")
-
-  proc fakeQuotaService(
-      processor: BaseSendProcessor,
-      quota: FakeQuotaProvider,
-      interval = FastRetryInterval,
-  ): SendService =
-    ## A service whose quota reads wait for the reply of `quota`, so its
-    ## admissions wait too.
-    let manager = RateLimitManager
-      .new(
-        RateLimitConfig(enabled: true, epochPeriodSec: 600, messagesPerEpoch: 100),
-        quota.provider(),
-      )
-      .expect("RateLimitManager.new")
-    return SendService
-      .new(false, waku, manager, processor, retryInterval = interval)
       .expect("SendService.new")
 
   proc names(prefix: string, count: int): seq[string] =
@@ -309,8 +306,8 @@ suite "SendService - deliver":
   proc admitted(processor: ScriptedProcessor, task: DeliveryTask): DeliveryTask =
     ## Marks the task as charged, and its first call as done, so its first call
     ## is a retry.
-    task.firstAdmittedTime = Opt.some(Moment.now())
-    processor.seen.add($task.requestId)
+    task.charged = true
+    processor.seen.add(task.label())
     return task
 
   asyncTest "a send that ends is reported while another send still waits":
@@ -327,13 +324,12 @@ suite "SendService - deliver":
       await service.stopSendService()
     check await log.waitPropagated(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
     check:
-      log.propagated == @[fast.requestId]
+      log.propagated == @[fast.hashHex()]
       processor.running == 1 # the retry of `slow` still waits for its reply
 
-  asyncTest "at most MaxSendsInFlight sends run at the same time":
-    ## The retries of all tasks are due at the same tick. `MaxSendsInFlight` of
-    ## them run, and a slot that a send frees goes to the next send.
-    let ids = names("r", MaxSendsInFlight + 2)
+  asyncTest "the service refuses a send over MaxSendsInFlight, and accepts it after a send ends":
+    ## The service keeps `MaxSendsInFlight` sends with no last event.
+    let ids = names("r", MaxSendsInFlight)
     let processor = newScripted(stalled = ids)
     let service = newService(processor)
     for id in ids:
@@ -344,49 +340,21 @@ suite "SendService - deliver":
       await service.stopSendService()
     checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
       processor.running == MaxSendsInFlight
-    check not await processor.retryStarted(ids[^1]).withTimeout(FUTURE_TIMEOUT_SHORT)
+    let over = buildTask("over")
     check:
-      processor.running == MaxSendsInFlight
-      ids.filterIt(processor.startedEvent(it).isSet()).len == MaxSendsInFlight
+      service.isFull()
+      service.enqueue(over).refusedAs(SendErrorKind.QueueFull)
+      "over" notin processor.seen
 
-    # A new send waits for a slot too.
-    check service.enqueue(buildTask("fresh")).isOk()
-    check not await processor.retryStarted("fresh").withTimeout(FUTURE_TIMEOUT_SHORT)
-    check "fresh" notin processor.seen
-
-    let first = ids.filterIt(processor.startedEvent(it).isSet())[0]
-    processor.replies[first].complete()
+    # The end of one send makes room for the next one.
+    processor.replies[ids[0]].complete()
     checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
-      ids.filterIt(processor.startedEvent(it).isSet()).len == MaxSendsInFlight + 1
-    check processor.running == MaxSendsInFlight
+      not service.isFull()
+    check service.enqueue(over).isOk()
 
-  asyncTest "a send queue of one slot runs one send at a time":
-    let processor = newScripted(stalled = @["a", "b"])
-    let service = SendService
-      .new(
-        false,
-        waku,
-        RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new"),
-        processor,
-        retryInterval = FastRetryInterval,
-        maxSendsInFlight = 1,
-      )
-      .expect("SendService.new")
-    check:
-      service.enqueue(buildTask("a")).isOk()
-      service.enqueue(buildTask("b")).isOk()
-    service.startSendService()
-    defer:
-      await service.stopSendService()
-    check await processor.retryStarted("a").withTimeout(FUTURE_TIMEOUT_MEDIUM)
-    check not await processor.retryStarted("b").withTimeout(FUTURE_TIMEOUT_SHORT)
-    processor.replies["a"].complete()
-    check await processor.retryStarted("b").withTimeout(FUTURE_TIMEOUT_MEDIUM)
-    check await log.waitPropagated(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
-
-  asyncTest "a retry with its charge and its proof sends while a new task waits in admission":
-    ## The proof of the new task waits for `reply`. The retry already has its
-    ## charge and its proof, so it does not wait for that admission.
+  asyncTest "a retry with its proof sends while the proof of a new task waits":
+    ## The proof of each new task waits for `reply`. The retry already has its
+    ## proof, so it does not wait for those proofs.
     let reply = newFuture[void]("proof-reply")
     let proofCalls = new int
     proc generate(message: WakuMessage): Future[Result[seq[byte], RlnError]] {.async.} =
@@ -401,7 +369,7 @@ suite "SendService - deliver":
     proven.msg.proof = @[1'u8, 2, 3]
     check:
       service.enqueue(buildTask("fresh")).isOk()
-      service.enqueue(buildTask("fresh-2")).isOk() # waits for the admission of `fresh`
+      service.enqueue(buildTask("fresh-2")).isOk()
       service.enqueue(proven).isOk()
 
     service.startSendService()
@@ -411,126 +379,9 @@ suite "SendService - deliver":
       FUTURE_TIMEOUT_MEDIUM
     )
     check:
-      proofCalls[] == 1 # the admission of `fresh` still waits for its proof
+      proofCalls[] == 2 # the proofs of `fresh` and `fresh-2` still wait
       "fresh" notin processor.seen
       "fresh-2" notin processor.seen
-
-  asyncTest "one admission runs at a time":
-    ## The quota read of the first admission waits for the reply of the fake
-    ## provider. A task added meanwhile waits for that admission to end.
-    let quota = newFakeQuotaProvider()
-    let processor = newScripted()
-    let service = fakeQuotaService(processor, quota, interval = chronos.minutes(10))
-
-    check service.enqueue(buildTask("first")).isOk()
-    service.startSendService()
-    defer:
-      await service.stopSendService()
-    check await quota.waitCalls(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
-
-    check service.enqueue(buildTask("second")).isOk()
-    check not await quota.waitCalls(2).withTimeout(FUTURE_TIMEOUT_SHORT)
-    check processor.seen.len == 0
-
-    quota.reply.complete()
-    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
-      processor.seen == @["first", "second"]
-    check quota.calls.value == 2
-
-  asyncTest "a task over the epoch budget parks before the processor":
-    ## With a budget of one per epoch, the first task gets the budget, and the
-    ## second parks before the processor.
-    let epoch = new uint64
-    epoch[] = 1'u64
-    let manager = RateLimitManager
-      .new(
-        RateLimitConfig(enabled: true, epochPeriodSec: 600, messagesPerEpoch: 1),
-        fixedEpochQuota(epoch, userMessageLimit = 100),
-      )
-      .expect("RateLimitManager.new")
-    let processor = newScripted()
-    let service = SendService
-      .new(false, waku, manager, processor, retryInterval = chronos.minutes(10))
-      .expect("SendService.new")
-
-    let first = buildTask("in-budget")
-    let second = buildTask("over-budget")
-    check:
-      service.enqueue(first).isOk()
-      service.enqueue(second).isOk()
-    service.startSendService()
-    defer:
-      await service.stopSendService()
-    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
-      processor.seen == @["in-budget"] and second.state == DeliveryState.NextRoundRetry
-    check:
-      first.firstAdmittedTime.isSome()
-      second.firstAdmittedTime.isNone()
-      manager.sentInCurrentEpoch == 1'u64
-
-    service.retryNow()
-    check await log.waitPropagated(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
-    check:
-      log.propagated == @[first.requestId]
-      second.state == DeliveryState.NextRoundRetry
-      manager.sentInCurrentEpoch == 1'u64
-
-  asyncTest "parked tasks get the epoch budget in the order that they parked":
-    ## With a budget of one per epoch, `spent` takes the budget, and `first` then
-    ## `second` park. The test drives the ticks itself: a timer tick between the
-    ## park of `first` and the park of `second` would park `first` again behind
-    ## `second`. At the first tick the retry read of `first` rolls the epoch, but
-    ## the roll lands only after both read, so both park again. The next tick
-    ## wakes them in park order, and `first` gets the budget.
-    privateAccess(SendService)
-    let epoch = new uint64
-    epoch[] = 1'u64
-    let rollAtNextRead = new bool
-    let quota = proc(): Future[Opt[EpochQuota]] {.async: (raises: []), gcsafe.} =
-      if rollAtNextRead[]:
-        rollAtNextRead[] = false
-        callSoon(
-          proc(udata: pointer) {.gcsafe, raises: [].} =
-            epoch[] = epoch[] + 1
-        )
-      return Opt.some(EpochQuota(epochIndex: epoch[], rateLimit: 100, remaining: 100))
-    let manager = RateLimitManager
-      .new(
-        RateLimitConfig(enabled: true, epochPeriodSec: 600, messagesPerEpoch: 1), quota
-      )
-      .expect("RateLimitManager.new")
-    let service = newService(
-      FakePropagatingProcessor(), interval = chronos.minutes(10), manager = manager
-    )
-    let spent = buildTask("spent")
-    let first = buildTask("first")
-    let second = buildTask("second")
-
-    check service.enqueue(spent).isOk()
-    service.startSendService()
-    defer:
-      await service.stopSendService()
-    check await log.waitPropagated(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
-    check service.enqueue(first).isOk()
-    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
-      first.state == DeliveryState.NextRoundRetry
-    check service.enqueue(second).isOk()
-    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
-      second.state == DeliveryState.NextRoundRetry
-    check service.attempts == 3
-
-    rollAtNextRead[] = true
-    service.retryNow()
-    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
-      service.attempts == 5 # both read in epoch 1 and parked again
-      epoch[] == 2'u64 # the roll landed after their reads
-    check log.propagated == @[spent.requestId]
-
-    service.retryNow()
-    check await log.waitPropagated(2).withTimeout(FUTURE_TIMEOUT_MEDIUM)
-    check:
-      log.propagated == @[spent.requestId, first.requestId]
-      second.state == DeliveryState.NextRoundRetry
 
   asyncTest "a restart starts the tasks in queue order":
     let ids = names("q", 8)
@@ -577,23 +428,228 @@ suite "SendService - deliver":
       await service.stopSendService()
     check await log.waitPropagated(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
     check:
-      log.propagated == @[fine.requestId]
+      log.propagated == @[fine.hashHex()]
       boom.state == DeliveryState.NextRoundRetry
       log.errors.len == 0
 
     processor.raising = @[]
     service.retryNow()
     check await log.waitPropagated(2).withTimeout(FUTURE_TIMEOUT_MEDIUM)
-    check log.propagated == @[fine.requestId, boom.requestId]
+    check log.propagated == @[fine.hashHex(), boom.hashHex()]
+
+  asyncTest "an attempt after the delivery window is not made":
+    let stalling = StallingProcessor()
+    let service = SendService
+      .new(
+        false,
+        waku,
+        RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new"),
+        SendProcessors(lightpush: stalling),
+        retryInterval = FastRetryInterval,
+      )
+      .expect("SendService.new")
+    let late = buildTask("past-the-window")
+    late.msg.timestamp -= (DeliveryWindow + chronos.seconds(1)).nanoseconds
+    check:
+      (await service.step(late, DeliveryState.Lightpush)) == DeliveryState.NotPropagated
+      late.lastReport.get().trigger == Trigger.WindowElapsed
+      late.tryCount == 0
+      stalling.replies.len == 0
+
+  asyncTest "a step that reports nothing fails the send":
+    let manager =
+      RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
+    let service = SendService
+      .new(false, waku, manager, SendProcessors(relay: SilentProcessor()))
+      .expect("SendService.new")
+    let task = buildTask("reports-nothing")
+    check:
+      (await service.step(task, DeliveryState.Relay)) == DeliveryState.NotPropagated
+      task.lastReport.get().trigger == Trigger.Unreported
+
+  asyncTest "a step that reports Started fails the send":
+    let manager =
+      RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
+    let service = SendService
+      .new(false, waku, manager, SendProcessors(relay: RestartingProcessor()))
+      .expect("SendService.new")
+    let task = buildTask("reports-started")
+    check:
+      (await service.step(task, DeliveryState.Relay)) == DeliveryState.NotPropagated
+      task.lastReport.get().trigger == Trigger.Started
+
+  asyncTest "each trigger that can fail a send has an error text":
+    ## "detail" is the text that came with the trigger.
+    let expected = {
+      Trigger.WindowElapsed: "Unable to send within retry time window",
+      Trigger.OverBudget: "No rate-limit budget for a new RLN proof",
+      Trigger.StoreWindowElapsed:
+        "Propagated but not confirmed by a store node within the store validation window",
+      Trigger.TooLargeForMix: "message too large for mix: detail",
+      Trigger.ProofPermanent: "Failed to attach RLN proof: detail",
+      Trigger.ProofBudgetExhausted: "Failed to attach RLN proof: detail",
+      Trigger.MixNotMounted: "mix is not mounted or knows fewer than 4 usable mix nodes",
+      Trigger.MixUnavailable:
+        "mix is not mounted or knows fewer than 4 usable mix nodes",
+      Trigger.MixSelfHop: "this node has no address that mix can use for replies",
+      Trigger.MixNoExit: "no mix node serves lightpush on the shard of the message",
+      Trigger.NoRelayPeers: "No relay peer to publish the message to",
+      Trigger.ZeroPeers: "No relay peer to publish the message to",
+      Trigger.Rejected: "detail",
+      Trigger.ProofRejected: "detail",
+    }.toTable()
+    for level in AnonymityLevel:
+      for transports in [
+        {DeliveryState.Relay},
+        {DeliveryState.Lightpush},
+        {DeliveryState.Relay, DeliveryState.Lightpush},
+        {DeliveryState.Mix},
+        {DeliveryState.Mix, DeliveryState.Lightpush},
+        {DeliveryState.Mix, DeliveryState.Relay, DeliveryState.Lightpush},
+      ]:
+        let plan = buildDeliveryPlan(level, transports, true).valueOr:
+          continue
+        for transition in plan.transitions:
+          if transition.toState in {
+            DeliveryState.NotPropagated, DeliveryState.NotStored
+          }:
+            for trigger in transition.triggers:
+              checkpoint($level & " " & $transports & " " & $transition)
+              check:
+                trigger in expected
+                StepReport.init(trigger, "detail").errorText() ==
+                  expected.getOrDefault(trigger)
+
+  asyncTest "a publish that ended before a stop is kept, and it is not sent again":
+    ## The stop comes in the turn in which the publish ends, before the step resumes.
+    ## With reliability on, the task then waits for Store, so the restart starts it.
+    let processor = ReplyProcessor()
+    let service = SendService
+      .new(
+        true,
+        waku,
+        RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new"),
+        SendProcessors(lightpush: processor),
+        retryInterval = FastRetryInterval,
+      )
+      .expect("SendService.new")
+    let task = buildTask("published-then-stopped")
+    check service.enqueue(task).isOk()
+    service.startSendService()
+    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
+      processor.replies.len == 1
+    processor.replies[0].complete(StepReport.init(Trigger.Published))
+    await service.stopSendService()
+    check:
+      task.state == DeliveryState.AwaitingStore
+      log.propagated == @[task.hashHex()]
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
+      not task.storeAnswer.isNil()
+    check processor.replies.len == 1
+
+  asyncTest "a fallback that ends at a stop starts no attempt on the next transport":
+    ## The report of relay is there when the stop comes, so the task moves to lightpush.
+    ## The service does not run then, so `deliver` ends before that step.
+    let relay = ReplyProcessor()
+    let lightpush = FakePropagatingProcessor()
+    let service = SendService
+      .new(
+        false,
+        waku,
+        RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new"),
+        SendProcessors(relay: relay, lightpush: lightpush),
+        retryInterval = FastRetryInterval,
+      )
+      .expect("SendService.new")
+    let task = buildTask("fell-back-at-the-stop")
+    check service.enqueue(task).isOk()
+    service.startSendService()
+    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
+      relay.replies.len == 1
+    relay.replies[0].complete(StepReport.init(Trigger.NoRelayPeers))
+    await service.stopSendService()
+    check:
+      task.state == DeliveryState.Lightpush
+      lightpush.calls == 0
+
+  asyncTest "an attempt with no reply in its timeout ends as timed out, and it is cancelled":
+    let processor = ReplyProcessor()
+    let service = newService(processor)
+    let task = buildTask("times-out")
+    let run =
+      service.runAttempt(task, processor.attempt(task), chronos.milliseconds(20))
+    check await run.withTimeout(FUTURE_TIMEOUT)
+    check:
+      run.completed() and run.read().trigger == Trigger.AttemptTimedOut
+      processor.replies[0].cancelled()
+
+  asyncTest "an attempt that ends at the cancel of its step still gives its report":
+    ## The reply is there, and the attempt did not resume when the cancel comes.
+    let processor = ReplyProcessor()
+    let service = newService(processor)
+    let task = buildTask("done-at-the-cancel")
+    let run = service.runAttempt(task, processor.attempt(task))
+    processor.replies[0].complete(StepReport.init(Trigger.Published))
+    await run.cancelAndWait()
+    check:
+      run.completed()
+      run.read().trigger == Trigger.Published
+
+  asyncTest "a cancel of a step cancels an attempt that has no reply":
+    let processor = ReplyProcessor()
+    let service = newService(processor)
+    let task = buildTask("cancelled-with-no-reply")
+    let run = service.runAttempt(task, processor.attempt(task))
+    await run.cancelAndWait()
+    check:
+      run.cancelled()
+      processor.replies[0].cancelled()
+
+  asyncTest "a listener sees its own event recorded on the task":
+    let service = newService(ReplyProcessor())
+    let task = buildTask("listened")
+    let seen = SeenFlags()
+    let onPropagated = MessagePropagatedEvent
+      .listen(
+        waku.brokerCtx,
+        proc(e: MessagePropagatedEvent) {.async: (raises: []).} =
+          seen.propagated = task.propagatedEventEmitted,
+      )
+      .expect("listen")
+    defer:
+      await MessagePropagatedEvent.dropListener(waku.brokerCtx, onPropagated)
+    service.reportPropagated(task)
+    check seen.propagated
+
+  asyncTest "a relay-only send whose publish reaches no peer fails with an error text":
+    let manager =
+      RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
+    let service = SendService
+      .new(false, waku, manager, SendProcessors(relay: ZeroPeersProcessor()))
+      .expect("SendService.new")
+    let task = buildTask("relay-only-zero-peers")
+    check:
+      (await service.step(task, DeliveryState.Relay)) == DeliveryState.NotPropagated
+      task.errorText() == "No relay peer to publish the message to"
+
+  asyncTest "a relay-only send with no relay peer fails with an error text":
+    let manager =
+      RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
+    let service = SendService
+      .new(false, waku, manager, SendProcessors(relay: NoRelayPeerProcessor()))
+      .expect("SendService.new")
+    let task = buildTask("relay-only")
+    check:
+      (await service.step(task, DeliveryState.Relay)) == DeliveryState.NotPropagated
+      task.errorText() == "No relay peer to publish the message to"
 
   asyncTest "a raise in a fallback processor leaves the task for its next attempt":
-    ## An exception ends `process` before it moves `FallbackRetry` to
-    ## `NextRoundRetry`,
-    ## so `sendUntilPropagated` moves it.
     let handOff = HandOffProcessor()
     let raising = RaisingProcessor()
-    handOff.chain(raising)
-    let service = newService(handOff, interval = chronos.minutes(10))
+    let service = newService(raising, interval = chronos.minutes(10), mix = handOff)
     let task = buildTask("fallback-raise")
     check service.enqueue(task).isOk()
     service.startSendService()
@@ -617,12 +673,12 @@ suite "SendService - deliver":
     let service = newService(processor)
     let first = buildTask("first")
     let second = buildTask("second")
-    let results = new seq[Result[RequestId, string]]
+    let results = new seq[Result[void, SendError]]
     let listener = MessagePropagatedEvent
       .listen(
         waku.brokerCtx,
         proc(event: MessagePropagatedEvent) {.async: (raises: []).} =
-          if event.requestId == first.requestId:
+          if event.messageHash == first.hashHex():
             results[].add(service.enqueue(second))
         ,
       )
@@ -639,18 +695,17 @@ suite "SendService - deliver":
       results[].len == 1
       results[].allIt(it.isOk())
       processor.calls == 2
-      log.propagated == @[first.requestId, second.requestId]
+      log.propagated == @[first.hashHex(), second.hashHex()]
 
   asyncTest "the event loop runs while a listener sends at each error":
-    ## The budget is 0, so each admission drops its ephemeral message with no
-    ## suspension, and the listener sends a new message at each error. The timer
-    ## of the first error ends before the listener reaches its limit only when the
-    ## service returns to the event loop between the sends.
-    let manager = RateLimitManager
-      .new(RateLimitConfig(enabled: true, epochPeriodSec: 600, messagesPerEpoch: 0))
-      .expect("RateLimitManager.new")
+    ## A peer rejects each message with no suspension, and the listener sends a
+    ## new message at each error. The timer of the first error ends before the
+    ## listener reaches its limit only when the service returns to the event loop
+    ## between the sends.
+    let manager =
+      RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
     let service = SendService
-      .new(false, waku, manager, FakePropagatingProcessor())
+      .new(false, waku, manager, SendProcessors(lightpush: RejectingProcessor()))
       .expect("SendService.new")
     let hook = SendOnErrorHook(
       limit: chronos.seconds(1), done: newFuture[void]("send-on-error-done")
@@ -709,22 +764,21 @@ suite "SendService - deliver":
 
   asyncTest "a send cancelled by a stop is retried after the restart, with one terminal event":
     ## The stop cancels the send in the fallback processor, so the task is left
-    ## at `FallbackRetry`. The restart starts the task again.
+    ## in `Lightpush`. The restart starts a new round of the task.
     let handOff = HandOffProcessor()
     let stalling = StallingProcessor()
-    handOff.chain(stalling)
-    let service = newService(handOff)
+    let service = newService(stalling, mix = handOff)
     let task = buildTask("cancelled-by-stop")
     check service.enqueue(task).isOk()
 
     service.startSendService()
     checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
       stalling.replies.len == 1
-    check task.state == DeliveryState.FallbackRetry
+    check task.state == DeliveryState.Lightpush
     await service.stopSendService()
     check:
       stalling.replies[0].cancelled()
-      task.state == DeliveryState.NextRoundRetry # waits for its next attempt
+      task.state == DeliveryState.Lightpush # the step that the stop cancelled
       log.propagated.len == 0
       log.errors.len == 0
 
@@ -738,8 +792,9 @@ suite "SendService - deliver":
     check await log.waitPropagated(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
     check not await log.waitPropagated(2).withTimeout(FUTURE_TIMEOUT_SHORT)
     check:
-      log.propagated == @[task.requestId]
+      log.propagated == @[task.hashHex()]
       log.errors.len == 0
+      handOff.calls == 3 # the restart starts a round at mix again
 
   asyncTest "a second start while the service runs changes nothing":
     privateAccess(SendService)
@@ -765,34 +820,32 @@ suite "SendService - deliver":
       await service.stopSendService()
     check await log.waitPropagated(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
 
-  asyncTest "enqueue returns the task of a queued message, waits while stopped, and refuses only a full send queue":
+  asyncTest "enqueue refuses a queued message and a full send queue, and waits while stopped":
     let processor = FakePropagatingProcessor()
-    let service = newService(processor, sendQueueCapacity = 2)
+    let service = newService(processor, maxSendsInFlight = 2)
     let first = buildTask("first")
+    let second = buildTask("second")
     let copy = DeliveryTask(
-      requestId: RequestId("copy-of-first"),
       pubsubTopic: first.pubsubTopic,
       msg: first.msg, # the same message, so the same hash
       msgHash: first.msgHash,
-      state: DeliveryState.Entry,
+      state: DeliveryState.Initial,
     )
 
     check:
-      service.enqueue(first).valueOr(RequestId("refused")) == first.requestId
-      service.enqueue(copy).valueOr(RequestId("refused")) == first.requestId
-        # the task of `first`
-      service.enqueue(buildTask("second")).isOk()
+      service.enqueue(first).isOk()
+      service.enqueue(copy).refusedAs(SendErrorKind.Duplicate)
+      service.enqueue(second).isOk()
       service.isFull()
-      service.enqueue(buildTask("third")).errorOr("accepted") ==
-        "Send queue full, retry later"
-      service.enqueue(copy).valueOr(RequestId("refused")) == first.requestId
-        # a queued message gets its request id also when the send queue is full
+      service.enqueue(buildTask("third")).refusedAs(SendErrorKind.QueueFull)
+      service.enqueue(copy).refusedAs(SendErrorKind.Duplicate)
+        # a queued message is a duplicate also when the service is full
 
     service.startSendService()
     check await log.waitPropagated(2).withTimeout(FUTURE_TIMEOUT_MEDIUM)
     check:
       processor.calls == 2 # `first` and `second`
-      log.propagated == @[first.requestId, RequestId("second")]
+      log.propagated == @[first.hashHex(), second.hashHex()]
 
     await service.stopSendService()
     check service.enqueue(buildTask("after-stop")).isOk()

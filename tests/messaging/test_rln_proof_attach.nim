@@ -1,6 +1,6 @@
 {.used.}
 
-import std/[sequtils, times, strutils]
+import std/[importutils, sequtils, times, strutils]
 import chronos, testutils/unittests, results, stew/byteutils
 import
   logos_delivery/waku/[waku, waku_core, rln],
@@ -68,26 +68,70 @@ proc mountFailingRln(waku: Waku, failWith: RlnErrorKind): FailingProofBackend =
   waku.node.rlnPlugin = Opt.some(RlnPlugin(name: "stub", generateProof: generate))
   return backend
 
+type RefreshingProofBackend = ref object
+  ## Draws a new proof for each attach, and refreshes after a rejection.
+  proofs: int
+  refreshes: int
+
+proc mountRefreshingRln(waku: Waku): RefreshingProofBackend =
+  let backend = RefreshingProofBackend()
+
+  proc generate(message: WakuMessage): Future[Result[seq[byte], RlnError]] {.async.} =
+    backend.proofs.inc()
+    return ok(@[byte(backend.proofs)])
+
+  proc refresh() {.gcsafe, raises: [].} =
+    backend.refreshes.inc()
+
+  waku.node.rlnPlugin =
+    Opt.some(RlnPlugin(name: "stub", generateProof: generate, onProofRejected: refresh))
+  return backend
+
+proc fixedEpoch(
+    timestamp: uint64
+): Future[Opt[EpochQuota]] {.async: (raises: [CancelledError]), gcsafe.} =
+  ## One epoch for the whole test, so the charges cannot roll over.
+  return Opt.some(EpochQuota(epochIndex: 7, rateLimit: 100, remaining: 100))
+
+type RejectingOnceProcessor = ref object of BaseSendProcessor
+  ## Rejects the proof of the first attempt, then propagates.
+  proofs: seq[seq[byte]] ## The proof of each attempt.
+
+method attempt(
+    self: RejectingOnceProcessor, task: DeliveryTask
+): Future[StepReport] {.async.} =
+  self.proofs.add(task.msg.proof)
+  if self.proofs.len == 1:
+    return StepReport.init(Trigger.ProofRejected, "rln proof rejected")
+  return StepReport.init(Trigger.Published)
+
+type RejectingProcessor = ref object of BaseSendProcessor
+  ## Rejects the proof of each attempt.
+  proofs: seq[seq[byte]] ## The proof of each attempt.
+  hashes: seq[WakuMessageHash] ## The hash of the message of each attempt.
+
+method attempt(
+    self: RejectingProcessor, task: DeliveryTask
+): Future[StepReport] {.async.} =
+  self.proofs.add(task.msg.proof)
+  self.hashes.add(computeMessageHash(task.pubsubTopic, task.msg))
+  return StepReport.init(Trigger.ProofRejected, "rln proof rejected")
+
 type CountingProcessor = ref object of BaseSendProcessor
   ## Propagates every task it is given; `calls` shows whether a task got out.
   calls: int
 
-method isValidProcessor(self: CountingProcessor, task: DeliveryTask): bool {.gcsafe.} =
-  return true
-
-method sendImpl(self: CountingProcessor, task: DeliveryTask): Future[void] {.async.} =
+method attempt(
+    self: CountingProcessor, task: DeliveryTask
+): Future[StepReport] {.async.} =
   inc self.calls
-  task.state = DeliveryState.SuccessfullyPropagated
+  return StepReport.init(Trigger.Published)
 
-proc buildTask(id: string): DeliveryTask =
+proc buildTask(): DeliveryTask =
   let msg = testMessage()
   let pubsubTopic = PubsubTopic("/waku/2/rs/3/0")
   return DeliveryTask(
-    requestId: RequestId(id),
-    pubsubTopic: pubsubTopic,
-    msg: msg,
-    msgHash: computeMessageHash(pubsubTopic, msg),
-    state: DeliveryState.Entry,
+    pubsubTopic: pubsubTopic, msg: msg, msgHash: computeMessageHash(pubsubTopic, msg)
   )
 
 suite "SendService RLN proof attach":
@@ -159,8 +203,8 @@ suite "SendService RLN proof attach - failing backend":
         false,
         waku,
         manager,
-        processor,
-        sendQueueCapacity = 1,
+        SendProcessors(lightpush: processor),
+        maxSendsInFlight = 1,
         retryInterval = chronos.minutes(10),
       )
       .expect("SendService.new")
@@ -169,7 +213,7 @@ suite "SendService RLN proof attach - failing backend":
     let backend = waku.mountFailingRln(RlnErrorKind.Permanent)
     let processor = CountingProcessor()
     let service = newService(processor)
-    let task = buildTask("permanent-in-first-attempt")
+    let task = buildTask()
 
     check service.enqueue(task).isOk()
     service.startSendService()
@@ -178,9 +222,9 @@ suite "SendService RLN proof attach - failing backend":
     checkUntilTimeout:
       errors.len == 1
     check:
-      task.state == DeliveryState.FailedToDeliver
+      task.state == DeliveryState.NotPropagated
       processor.calls == 0
-      errors.mapIt(it.requestId) == @[task.requestId]
+      errors.mapIt(it.messageHash) == @[task.msgHash.to0xHex()]
       errors.mapIt(it.error) == @[PermanentReason]
       backend.attempts == 1
       not service.isFull() # removed, so it is not retried or reported again
@@ -191,7 +235,7 @@ suite "SendService RLN proof attach - failing backend":
     let backend = waku.mountFailingRln(RlnErrorKind.NotReady)
     let processor = CountingProcessor()
     let service = newService(processor)
-    let task = buildTask("permanent-in-retry")
+    let task = buildTask()
 
     check service.enqueue(task).isOk()
     service.startSendService()
@@ -208,12 +252,95 @@ suite "SendService RLN proof attach - failing backend":
     checkUntilTimeout:
       errors.len == 1
     check:
-      task.state == DeliveryState.FailedToDeliver
+      task.state == DeliveryState.NotPropagated
       processor.calls == 0
-      errors.mapIt(it.requestId) == @[task.requestId]
+      errors.mapIt(it.messageHash) == @[task.msgHash.to0xHex()]
       errors.mapIt(it.error) == @[PermanentReason]
       backend.attempts == 2
       not service.isFull() # removed, so no later attempt reserves an id for it
+
+suite "SendService RLN proof attach - refresh after a rejection":
+  var waku {.threadvar.}: Waku
+
+  asyncSetup:
+    waku = (await Waku.new(testConf())).expect("Waku.new")
+
+  asyncTeardown:
+    discard await waku.stop()
+
+  asyncTest "a rejected proof gets a new admission and a new proof before the next attempt":
+    let backend = waku.mountRefreshingRln()
+    let processor = RejectingOnceProcessor()
+    let manager = RateLimitManager
+      .new(
+        RateLimitConfig(
+          enabled: true,
+          epochPeriodSec: DefaultEpochPeriodSec,
+          messagesPerEpoch: 10,
+          approachedThresholdPercent: 100,
+        ),
+        fixedEpoch,
+      )
+      .expect("RateLimitManager.new")
+    privateAccess(RateLimitManager)
+    let service = SendService
+      .new(
+        false,
+        waku,
+        manager,
+        SendProcessors(lightpush: processor),
+        retryInterval = chronos.minutes(10),
+      )
+      .expect("SendService.new")
+    let task = buildTask()
+
+    check service.enqueue(task).isOk()
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+    checkUntilTimeout:
+      task.state == DeliveryState.NextRoundRetry
+    check:
+      backend.proofs == 1
+      backend.refreshes == 1
+      processor.proofs == @[@[1'u8]]
+      manager.sentInCurrentEpoch == 1
+      task.msg.proof.len == 0 # the refresh cleared the rejected proof
+      not task.charged # ... and the admission
+
+    service.retryNow()
+    checkUntilTimeout:
+      task.state == DeliveryState.Propagated
+    check:
+      backend.proofs == 2
+      processor.proofs == @[@[1'u8], @[2'u8]] # the next attempt carries the new proof
+      manager.sentInCurrentEpoch == 2 # the new proof drew a new charge
+      task.charged
+
+  asyncTest "a task past the delivery window takes no new charge and no new proof":
+    ## A proof refresh cleared the charge, and the window ended before the next round.
+    ## No attempt follows, so the task must not pay for a proof.
+    let backend = waku.mountRefreshingRln()
+    let manager = RateLimitManager
+      .new(
+        RateLimitConfig(
+          enabled: true, epochPeriodSec: DefaultEpochPeriodSec, messagesPerEpoch: 2
+        ),
+        fixedEpoch,
+      )
+      .expect("RateLimitManager.new")
+    let service = SendService
+      .new(false, waku, manager, SendProcessors(lightpush: RejectingProcessor()))
+      .expect("SendService.new")
+    let task = buildTask()
+    task.msg.timestamp -= (DeliveryWindow + chronos.seconds(1)).nanoseconds
+    check:
+      (await service.step(task, DeliveryState.Prove)) == DeliveryState.NotPropagated
+      task.lastReport.get().trigger == Trigger.WindowElapsed
+      backend.proofs == 0
+      manager.sentInCurrentEpoch == 0'u64
+      task.msg.proof.len == 0
+      not task.charged
 
 suite "SendService RLN proof attach - RLN mounted":
   var
@@ -251,6 +378,108 @@ suite "SendService RLN proof attach - RLN mounted":
     except Exception:
       assert false, "failed to stop RLN: " & getCurrentExceptionMsg()
 
+  asyncTest "a send gets at most MaxProofRefreshes new proofs, and the next rejection fails it":
+    ## A peer that rejects each proof must not make the send pay at each round.
+    let backend = waku.mountRefreshingRln()
+    let processor = RejectingProcessor()
+    let manager = RateLimitManager
+      .new(
+        RateLimitConfig(
+          enabled: true,
+          epochPeriodSec: DefaultEpochPeriodSec,
+          messagesPerEpoch: 10,
+          approachedThresholdPercent: 100,
+        ),
+        fixedEpoch,
+      )
+      .expect("RateLimitManager.new")
+    privateAccess(RateLimitManager)
+    var errors: seq[string]
+    let listener = MessageErrorEvent
+      .listen(
+        waku.brokerCtx,
+        proc(e: MessageErrorEvent) {.async: (raises: []).} =
+          errors.add(e.error),
+      )
+      .expect("listen")
+    defer:
+      await MessageErrorEvent.dropListener(waku.brokerCtx, listener)
+    let service = SendService
+      .new(
+        false,
+        waku,
+        manager,
+        SendProcessors(lightpush: processor),
+        retryInterval = chronos.milliseconds(10),
+      )
+      .expect("SendService.new")
+    let task = buildTask()
+    let accepted = task.msgHash
+
+    check service.enqueue(task).isOk()
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+    checkUntilTimeout:
+      task.state == DeliveryState.NotPropagated
+    check:
+      backend.refreshes == MaxProofRefreshes
+      backend.proofs == MaxProofRefreshes + 1
+      processor.proofs == (1 .. MaxProofRefreshes + 1).mapIt(@[byte(it)])
+      # A new proof sends the same message, with the hash that `enqueue` accepted.
+      processor.hashes == newSeqWith(MaxProofRefreshes + 1, accepted)
+      manager.sentInCurrentEpoch == uint64(MaxProofRefreshes + 1) # and no charge after
+      errors == @["rln proof rejected"]
+
+  asyncTest "a new proof takes a new charge, and with no budget left the send fails":
+    ## The new proof draws a new RLN message id, so it needs a charge of its own.
+    let backend = waku.mountRefreshingRln()
+    let processor = RejectingProcessor()
+    let manager = RateLimitManager
+      .new(
+        RateLimitConfig(
+          enabled: true,
+          epochPeriodSec: DefaultEpochPeriodSec,
+          messagesPerEpoch: 2,
+          approachedThresholdPercent: 100,
+        ),
+        fixedEpoch,
+      )
+      .expect("RateLimitManager.new")
+    privateAccess(RateLimitManager)
+    var errors: seq[string]
+    let listener = MessageErrorEvent
+      .listen(
+        waku.brokerCtx,
+        proc(e: MessageErrorEvent) {.async: (raises: []).} =
+          errors.add(e.error),
+      )
+      .expect("listen")
+    defer:
+      await MessageErrorEvent.dropListener(waku.brokerCtx, listener)
+    let service = SendService
+      .new(
+        false,
+        waku,
+        manager,
+        SendProcessors(lightpush: processor),
+        retryInterval = chronos.milliseconds(10),
+      )
+      .expect("SendService.new")
+    let task = buildTask()
+
+    check service.enqueue(task).isOk()
+    check manager.sentInCurrentEpoch == 1'u64 # `enqueue` took the first charge
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+    checkUntilTimeout:
+      task.state == DeliveryState.NotPropagated
+    check:
+      backend.proofs == 2 # the proof of the send, and one new proof
+      manager.sentInCurrentEpoch == 2'u64
+      errors == @[NoBudgetForNewProofReason]
+
   asyncTest "the EVM size preview equals the generated proof length":
     let msg = testMessage()
     let preview = waku.messageForSizeCheck(msg).expect("messageForSizeCheck")
@@ -264,7 +493,7 @@ suite "SendService RLN proof attach - RLN mounted":
         mixLightpushSize(PubsubTopic("/waku/2/rs/3/0"), proven).size
 
   asyncTest "an oversized Required send leaves EVM message ids and admission budget untouched":
-    let task = buildTask("oversized-with-evm")
+    let task = buildTask()
     let limit = mixLightpushSize(task.pubsubTopic, task.msg).limit
     for n in 0 .. limit:
       task.msg.payload = newSeq[byte](n)
@@ -275,22 +504,25 @@ suite "SendService RLN proof attach - RLN mounted":
     let quota = RateLimitManager
       .new(RateLimitConfig(enabled: true, epochPeriodSec: 600, messagesPerEpoch: 1))
       .expect("RateLimitManager.new")
-    let mix = MixSendProcessor.new(
-      waku, waku.brokerCtx, AnonymityLevel.Required, chronos.minutes(1)
-    )
+    let mix = MixSendProcessor.new(waku, waku.brokerCtx)
     let service = SendService
-      .new(false, waku, quota, mix, retryInterval = chronos.hours(1))
+      .new(
+        false,
+        waku,
+        quota,
+        SendProcessors(mix: mix),
+        AnonymityLevel.Required,
+        retryInterval = chronos.hours(1),
+      )
       .expect("SendService.new")
     service.startSendService()
     defer:
       await service.stopSendService()
-    check service.enqueue(task).isOk()
-    checkUntilTimeout:
-      task.state == DeliveryState.FailedToDeliver
+    let refused = service.enqueue(task)
     check:
-      task.errorDesc.startsWith(MixTooLargeReason)
+      refused.isErr() and refused.error.kind == SendErrorKind.TooLarge
+      refused.isErr() and refused.error.desc.startsWith(MixTooLargeReason)
       task.msg.proof.len == 0
-      task.firstAdmittedTime.isNone()
       onchainRln.nonceManager.nextId == 0
       quota.sentInCurrentEpoch == 0
 
