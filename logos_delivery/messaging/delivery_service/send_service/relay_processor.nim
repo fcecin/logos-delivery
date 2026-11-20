@@ -53,6 +53,9 @@ method isValidProcessor*(
   # return self.isTopicHealthy(task.pubsubTopic)
   return true
 
+method isPlain*(self: RelaySendProcessor): bool {.gcsafe.} =
+  return true
+
 method sendImpl*(self: RelaySendProcessor, task: DeliveryTask) {.async.} =
   task.tryCount.inc()
   debug "Trying message delivery via Relay",

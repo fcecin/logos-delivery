@@ -175,6 +175,15 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
     self.fellBackReason = MixUnusable.None
     info "Mix can carry messages again"
 
+  # A plain attempt can send the message from the address of this node, and a
+  # mix attempt after that cannot hide the sender.
+  if self.fallbackAllowed and task.plainAttempted:
+    debug "The task had a plain attempt, so it stays on the plain send path",
+      msgHash = task.msgHash.to0xHex()
+    task.errorDesc = ""
+    task.state = DeliveryState.FallbackRetry
+    return
+
   if self.fallbackAllowed and self.mixWindowElapsed(task):
     debug "Mix window elapsed, handing the task to the plain send path",
       msgHash = task.msgHash.to0xHex(), messageAge = task.messageAge()
