@@ -48,13 +48,20 @@ method sendImpl(self: PlainSendProcessor, task: DeliveryTask): Future[void] {.as
   task.state = DeliveryState.SuccessfullyPropagated
 
 type RetryingProcessor = ref object of BaseSendProcessor
-  ## Leaves every task for a retry, with `reason` as the outcome's `desc`.
+  ## A plain processor that leaves every task for a retry, with `reason` as the
+  ## outcome's `desc`. It takes no task while `invalid` is true.
   reason: string
+  invalid: bool
+  calls: int
 
 method isValidProcessor(self: RetryingProcessor, task: DeliveryTask): bool {.gcsafe.} =
+  return not self.invalid
+
+method isPlain(self: RetryingProcessor): bool {.gcsafe.} =
   return true
 
 method sendImpl(self: RetryingProcessor, task: DeliveryTask): Future[void] {.async.} =
+  inc self.calls
   task.tryCount.inc()
   task.state = DeliveryState.NextRoundRetry
   task.errorDesc = self.reason
@@ -681,6 +688,55 @@ suite "SendService - anonymity level with a mounted mix":
     check:
       back.tryCount == 1 # mix attempts it
       mix.fellBackFor() == MixUnusable.None # ... and the recovery was logged
+    await fut.cancelAndWait()
+
+  asyncTest "a Preferred task stays on the plain path after a plain attempt":
+    for i in 0 ..< MinMixPoolSize:
+      addMixPeer(60220 + i, lightpush = false)
+    check waku.mixReady()
+
+    let plain = RetryingProcessor(reason: "no plain peer accepted it")
+    let mix = MixSendProcessor.new(
+      waku, waku.brokerCtx, AnonymityLevel.Preferred, chronos.minutes(1)
+    )
+    mix.chain(plain)
+
+    let task = buildTask("plain-then-exit", chronos.seconds(5))
+    await mix.process(task)
+    check:
+      plain.calls == 1
+      task.plainAttempted
+
+    addMixPeer(60224, lightpush = true)
+    check waku.selectMixLightpushPeer(shard).isSome()
+    let fut = mix.process(task)
+    check:
+      fut.completed()
+      plain.calls == 2
+      not task.anonymized
+    await fut.cancelAndWait()
+
+  asyncTest "a Preferred task that had no plain attempt is attempted once mix can attempt it":
+    for i in 0 ..< MinMixPoolSize:
+      addMixPeer(60230 + i, lightpush = false)
+    check waku.mixReady()
+
+    let plain = RetryingProcessor(reason: "no plain peer accepted it", invalid: true)
+    let mix = MixSendProcessor.new(
+      waku, waku.brokerCtx, AnonymityLevel.Preferred, chronos.minutes(1)
+    )
+    mix.chain(plain)
+
+    let task = buildTask("no-plain-then-exit", chronos.seconds(5))
+    await mix.process(task)
+    check:
+      plain.calls == 0
+      not task.plainAttempted
+
+    addMixPeer(60234, lightpush = true)
+    check waku.selectMixLightpushPeer(shard).isSome()
+    let fut = mix.process(task)
+    check task.anonymized # mix attempts it
     await fut.cancelAndWait()
 
   asyncTest "an expired task reports the reason a processor left on it":

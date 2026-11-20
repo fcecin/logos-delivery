@@ -17,6 +17,10 @@ method isValidProcessor*(
 ): bool {.base, gcsafe.} =
   return false
 
+method isPlain*(self: BaseSendProcessor): bool {.base, gcsafe.} =
+  ## True for a processor that sends the message from the address of this node.
+  return false
+
 method checkBeforeSend*(
     self: BaseSendProcessor, task: DeliveryTask
 ): Result[void, SendError] {.base, gcsafe, raises: [].} =
@@ -77,6 +81,8 @@ method process*(
   var keepTrying = true
   while not currentProcessor.isNil() and keepTrying:
     if currentProcessor.isValidProcessor(task):
+      if currentProcessor.isPlain():
+        task.plainAttempted = true
       await currentProcessor.sendImpl(task)
     currentProcessor = currentProcessor.fallbackProcessor
     keepTrying = task.state == DeliveryState.FallbackRetry

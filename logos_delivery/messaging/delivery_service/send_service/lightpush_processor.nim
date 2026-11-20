@@ -23,6 +23,9 @@ method isValidProcessor*(
 ): bool {.gcsafe.} =
   return self.waku.lightpushPeerAvailable(task.pubsubTopic)
 
+method isPlain*(self: LightpushSendProcessor): bool {.gcsafe.} =
+  return true
+
 method canResend*(self: LightpushSendProcessor, task: DeliveryTask): bool {.gcsafe.} =
   return self.waku.lightpushPeerAvailable(task.pubsubTopic)
 
