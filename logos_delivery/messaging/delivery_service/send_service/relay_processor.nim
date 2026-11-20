@@ -59,6 +59,17 @@ method sendImpl*(self: RelaySendProcessor, task: DeliveryTask) {.async.} =
     msgHash = task.msgHash.to0xHex(), tryCount = task.tryCount
 
   let noOfPublishedPeers = (await self.publishProc(task.pubsubTopic, task.msg)).valueOr:
+    if error.isDuplicateMessage():
+      # The relay of this node already has the message and sends nothing, so the
+      # network has it from another node. For an anonymized task, that copy
+      # usually came from a mix exit, so a Store query must not name it from the
+      # address of this node.
+      debug "The relay already has the message, the task propagated",
+        msgHash = task.msgHash.to0xHex()
+      task.markPropagated()
+      task.propagatedAnonymously = task.anonymized
+      return
+
     let errorMessage = error.desc.get($error.code)
     error "Failed to publish message with relay",
       msgHash = task.msgHash.to0xHex(), error = errorMessage
@@ -77,9 +88,7 @@ method sendImpl*(self: RelaySendProcessor, task: DeliveryTask) {.async.} =
   if noOfPublishedPeers > 0:
     debug "Message propagated via Relay",
       msgHash = task.msgHash.to0xHex(), noOfPeers = noOfPublishedPeers
-    task.state = DeliveryState.SuccessfullyPropagated
-    if task.firstPropagatedTime.isNone():
-      task.firstPropagatedTime = Opt.some(Moment.now())
+    task.markPropagated()
   else:
     # It shall not happen, but still covering it
     task.state = self.fallbackStateToSet
