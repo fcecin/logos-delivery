@@ -46,6 +46,12 @@ type DeliveryTask* = ref object
   anonymized*: bool
     ## Set at the first anonymous send attempt and never cleared; from then on,
     ## the INFO and ERROR records of this task withhold the hash.
+  mixMayHavePublished*: bool
+    ## Set when the network can have the message from a mix attempt, and never
+    ## cleared. That is the case when the attempt got no answer, when a stop ended
+    ## it, or when the exit had no relay peers. Such an exit can still give the message to its store and
+    ## filter clients. The send service never sends a marked task in the clear,
+    ## because a plain copy shows the sender.
   propagatedAnonymously*: bool
     ## Set when an anonymous path propagated the message. No store node confirms
     ## it: the query would name the message from this node's own address.
