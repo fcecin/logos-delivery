@@ -46,6 +46,10 @@ type DeliveryTask* = ref object
   anonymized*: bool
     ## Set at the first anonymous send attempt and never cleared; from then on,
     ## the INFO and ERROR records of this task withhold the hash.
+  hashWithheld*: bool
+    ## Set by `enqueue` when the send chain of the service starts with mix, since a
+    ## later round can send the task over mix. The INFO and ERROR records of the
+    ## task then withhold the hash also before its first mix attempt.
   propagatedAnonymously*: bool
     ## Set when an anonymous path propagated the message. No store node confirms
     ## it: the query would name the message from this node's own address.
@@ -89,8 +93,9 @@ proc new*(
   return ok(T(pubsubTopic: pubsubTopic, msg: msg, msgHash: msgHash))
 
 proc loggedHash*(task: DeliveryTask): string =
-  ## The hash for INFO and ERROR records, withheld once the task is anonymized.
-  if task.anonymized:
+  ## The hash for INFO and ERROR records, `withheld` for a task with the
+  ## `anonymized` or the `hashWithheld` mark.
+  if task.anonymized or task.hashWithheld:
     "withheld"
   else:
     task.msgHash.to0xHex()
