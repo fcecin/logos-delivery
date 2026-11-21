@@ -43,6 +43,9 @@ type DeliveryTask* = ref object
   propagatedEventEmitted*: bool
     ## Set when the task emits `MessagePropagatedEvent`. After a restart, the send
     ## service does not send the task again.
+  hashWithheld*: bool
+    ## `enqueue` sets this when the send chain starts with mix. A later attempt may use
+    ## mix, so INFO and ERROR records withhold the hash from the time the task is queued.
   anonymized*: bool
     ## Set at the first anonymous send attempt and never cleared; from then on,
     ## the INFO and ERROR records of this task withhold the hash.
@@ -89,8 +92,8 @@ proc new*(
   return ok(T(pubsubTopic: pubsubTopic, msg: msg, msgHash: msgHash))
 
 proc loggedHash*(task: DeliveryTask): string =
-  ## The hash for INFO and ERROR records, withheld once the task is anonymized.
-  if task.anonymized:
+  ## Use this value for the message hash in every INFO and ERROR record for a task.
+  if task.anonymized or task.hashWithheld:
     "withheld"
   else:
     task.msgHash.to0xHex()
