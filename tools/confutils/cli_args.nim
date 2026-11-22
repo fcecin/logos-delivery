@@ -56,7 +56,6 @@ const NodeEnvvarPrefix* = "logos_delivery_node"
 const
   DefaultCLIRelay* = true
   DefaultCLIPeerExchange* = true
-  DefaultCLIRendezvous* = true
   DefaultCLINat* = "any"
   DefaultCliRestMessagingCacheCapacity* = DefaultRestMessagingCacheCapacity
     ## Exported because confutils expands `defaultValue` where `load` is called.
@@ -71,7 +70,6 @@ const DefaultKernelModeFlags* = ModeProtocolFlags(
   store: Opt.some(false),
   discv5Discovery: Opt.some(true),
   peerExchange: Opt.some(DefaultCLIPeerExchange),
-  rendezvous: Opt.some(DefaultCLIRendezvous),
 )
 
 type ConfResult*[T] = Result[T, string]
@@ -700,7 +698,8 @@ hence would have reachability issues.""",
 
   ## Rendez vous
   rendezvous* {.
-    desc: "Enable waku rendezvous discovery server. Default is true.",
+    desc:
+      "Enable waku rendezvous discovery server. Default is true without service discovery (kademlia, in-process or plugin-hosted), false with it.",
     defaultValue: Opt.none(bool),
     name: "rendezvous"
   .}: Opt[bool]
