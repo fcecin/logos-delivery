@@ -155,6 +155,10 @@ proc mixSelfHopUsable*(self: Waku): bool =
   ## also checks this; the send path reads it alone to name the reason.
   return not self.node.wakuMix.isNil() and self.node.wakuMix.selfHopUsable()
 
+proc mixHasExcludedNodes*(self: Waku): bool =
+  ## True when a path can use some mix nodes only with `mix-allow-all-addresses`.
+  return not self.node.wakuMix.isNil() and self.node.wakuMix.countExcluded() > 0
+
 proc mixLightpushSize*(
     self: Waku, shard: PubsubTopic, message: WakuMessage
 ): tuple[size, limit: int] =

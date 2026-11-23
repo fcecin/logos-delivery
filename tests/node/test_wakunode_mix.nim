@@ -1,14 +1,15 @@
 {.used.}
 
-import std/[sequtils, strutils]
+import std/[os, sequtils, strutils]
 import testutils/unittests, chronos, results, metrics
 import libp2p/[crypto/crypto, peerid, multiaddress]
 import libp2p/nameresolving/nameresolver
-import libp2p_mix, libp2p_mix/[curve25519, mix_metrics]
+import libp2p_mix, libp2p_mix/[curve25519, mix_metrics, mix_node, pool]
 
 import
   logos_delivery/waku/[
     waku_core,
+    common/logging,
     common/waku_protocol,
     net/net_config,
     node/enr_addresses,
@@ -369,7 +370,7 @@ suite "Waku Mix - pool size":
     discard addMixPeer("/dns4/node.test/tcp/60003")
     discard addMixPeer("/ip6/::1/tcp/60004")
 
-    updatePoolSize(node.getMixNodePoolSize())
+    node.wakuMix.updatePoolSize(node.getMixNodePoolSize())
     check:
       node.getMixNodePoolSize() == 2
       mix_pool_size.value() == 2.0
@@ -383,7 +384,7 @@ suite "Waku Mix - pool size":
     check node.getMixNodePoolSize() == 3
 
     discard addMixPeer("/ip4/127.0.0.1/tcp/60013")
-    updatePoolSize(node.getMixNodePoolSize())
+    node.wakuMix.updatePoolSize(node.getMixNodePoolSize())
     check:
       node.getMixNodePoolSize() == 4
       mix_pool_size.value() == 4.0
@@ -547,6 +548,34 @@ suite "Waku Mix - hop address policy":
       )
     )
 
+  proc mixPubInfo(address: string): MixPubInfo =
+    let
+      key = generateSecp256k1Key()
+      mixKeys = generateKeyPair().expect("mix key pair")
+    return MixPubInfo.init(
+      PeerId.init(key).tryGet(),
+      MultiAddress.init(address).tryGet(),
+      mixKeys.publicKey,
+      key.getPublicKey().tryGet().skkey,
+    )
+
+  proc logPath(): string =
+    getTempDir() / ("logos_delivery_test_mix_" & $getCurrentProcessId() & ".log")
+
+  proc logToFile() =
+    setupLog(logging.LogLevel.INFO, logging.LogFormat.TEXT, logPath()).expect(
+      "log file"
+    )
+
+  proc logToStdout() =
+    setupLog(logging.LogLevel.INFO, logging.LogFormat.TEXT, StdoutLogOutput).expect(
+      "log to stdout"
+    )
+    removeFile(logPath())
+
+  proc hintLines(): seq[string] =
+    readFile(logPath()).splitLines().filterIt("--mix-allow-all-addresses" in it)
+
   asyncTest "by default the pool counts a discovered mix node only at a public address":
     let node = await mixNode()
 
@@ -576,6 +605,78 @@ suite "Waku Mix - hop address policy":
     node.discover(PrivateAddr)
     node.discover(LoopbackAddr)
     check node.getMixNodePoolSize() == 4
+
+  asyncTest "a mix node with no usable address is refused and not stored":
+    let node = await mixNode()
+    let hidden = mixPubInfo(PrivateAddr)
+    check:
+      node.wakuMix.addPeer(hidden).isErr()
+      not node.peerManager.switch.peerStore.peerExists(hidden.peerId)
+      node.wakuMix.nodePool.peerIds().len == 0
+
+    check:
+      node.wakuMix.addPeer(mixPubInfo(PublicAddr)).isOk()
+      node.getMixNodePoolSize() == 1
+
+  asyncTest "a refused update leaves a known mix node unchanged":
+    let node = await mixNode()
+    let known = mixPubInfo(PublicAddr)
+    node.wakuMix.addPeer(known).expect("a public address")
+
+    let update = MixPubInfo.init(
+      known.peerId,
+      MultiAddress.init(PrivateAddr).tryGet(),
+      generateKeyPair().expect("mix key pair").publicKey,
+      known.libp2pPubKey,
+    )
+    check:
+      node.wakuMix.addPeer(update).isErr()
+      node.switch.peerStore[MixPubKeyBook][known.peerId] == known.mixPubKey
+      node.switch.peerStore[AddressBook][known.peerId] == @[known.multiAddr]
+
+  asyncTest "with all addresses allowed a mix node at a private address is added":
+    let node = await mixNode(allowAllAddresses = true)
+    check:
+      node.wakuMix.addPeer(mixPubInfo(PrivateAddr)).isOk()
+      node.getMixNodePoolSize() == 1
+
+  asyncTest "configured mix nodes with no usable address give one warning and one log line":
+    logToFile()
+    defer:
+      logToStdout()
+    discard await mixNode(
+      @[
+        mixBootnode(PublicAddr),
+        mixBootnode(relayedAddr()),
+        mixBootnode(PrivateAddr),
+        mixBootnode(LoopbackAddr),
+      ]
+    )
+    let lines = hintLines()
+    check:
+      lines.countIt(it.startsWith("WRN") and "unroutable=3" in it) == 1
+      lines.countIt(it.startsWith("INF") and "excluded=3" in it) == 1
+      lines.len == 2
+
+  asyncTest "discovered mix nodes with no usable address give one log line":
+    logToFile()
+    defer:
+      logToStdout()
+    let node = await mixNode()
+
+    # The option does not make the IPv6 address usable, so no line names it.
+    node.discover(PublicAddr)
+    node.discover("/ip6/::1/tcp/60505")
+    node.wakuMix.updatePoolSize(node.getMixNodePoolSize())
+    check hintLines().len == 0
+
+    node.discover(PrivateAddr)
+    node.wakuMix.updatePoolSize(node.getMixNodePoolSize())
+    node.wakuMix.updatePoolSize(node.getMixNodePoolSize())
+    let lines = hintLines()
+    check:
+      lines.len == 1
+      lines.allIt(it.startsWith("INF") and "excluded=1" in it)
 
 suite "Waku Mix - bootstrap nodes":
   ## Presets pin `dns4` names. The mount seeds the pool with the literal entries
