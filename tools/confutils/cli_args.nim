@@ -56,7 +56,6 @@ const NodeEnvvarPrefix* = "logos_delivery_node"
 const
   DefaultCLIRelay* = true
   DefaultCLIPeerExchange* = true
-  DefaultCLIRendezvous* = true
   DefaultCLINat* = "any"
   DefaultCliRestMessagingCacheCapacity* = DefaultRestMessagingCacheCapacity
     ## Exported because confutils expands `defaultValue` where `load` is called.
@@ -71,7 +70,6 @@ const DefaultKernelModeFlags* = ModeProtocolFlags(
   store: Opt.some(false),
   discv5Discovery: Opt.some(true),
   peerExchange: Opt.some(DefaultCLIPeerExchange),
-  rendezvous: Opt.some(DefaultCLIRendezvous),
 )
 
 type ConfResult*[T] = Result[T, string]
@@ -700,7 +698,8 @@ hence would have reachability issues.""",
 
   ## Rendez vous
   rendezvous* {.
-    desc: "Enable waku rendezvous discovery server. Default is true.",
+    desc:
+      "Enable waku rendezvous discovery server. Default is true without service discovery (kademlia, in-process or plugin-hosted), false with it.",
     defaultValue: Opt.none(bool),
     name: "rendezvous"
   .}: Opt[bool]
@@ -708,7 +707,9 @@ hence would have reachability issues.""",
   #Mix config
   # Opt-typed; desc states the default since the CLI can't auto-show it for Opt.none().
   mix* {.
-    desc: "Enable mix protocol: true|false. Default is " & $DefaultMix & ".",
+    desc:
+      "Enable mix protocol: true|false. Default is true in Core mode and with an anonymity level above None, else " &
+      $DefaultMix & ".",
     defaultValue: Opt.none(bool),
     name: "mix"
   .}: Opt[bool]
@@ -724,6 +725,20 @@ hence would have reachability issues.""",
       "A mix node to seed the pool with, as multiaddr:mixPubKey. The multiaddress carries a /p2p/<peer id> on TCP or QUIC-v1 over IPv4 (directly or through a circuit relay), or names its host (dns4), which is resolved after the mount. Argument may be repeated. (requires --mix)",
     name: "mixnode"
   .}: seq[MixNodePubInfo]
+
+  mixAllowAllAddresses* {.
+    desc:
+      "Let mix paths use a mix node at a private, a loopback or a circuit relay address. Without it, mix uses a mix node only at a public address. Set it on a node of a local simulation, a test or a private network. (requires --mix)",
+    defaultValue: false,
+    name: "mix-allow-all-addresses"
+  .}: bool
+
+  mixKeyRotation* {.
+    desc:
+      "Rotate the mix key on a timer, as the Mix Key Rotation spec describes. The node then ignores --mixkey and --mixnode, and takes mix keys from discovery only. Set it on every node of a network, or on none. (requires --mix)",
+    defaultValue: false,
+    name: "mix-key-rotation"
+  .}: bool
 
   mixRlnRegistryId* {.
     desc:
@@ -1247,6 +1262,8 @@ func ignoredFlagWarnings*(
     ("quic-port", "quic-support", quic, changed(quicPort)),
     ("mixkey", "mix", mix, changed(mixkey)),
     ("mixnode", "mix", mix, n.mixnodes.len > 0),
+    ("mix-allow-all-addresses", "mix", mix, changed(mixAllowAllAddresses)),
+    ("mix-key-rotation", "mix", mix, changed(mixKeyRotation)),
     ("kad-bootstrap-node", kadParent, kad, changed(kadBootstrapNodes)),
     ("kad-random-lookup-interval", kadParent, kad, changed(kadRandomLookupIntervalSec)),
     (
@@ -1456,6 +1473,8 @@ proc toWakuConf*(n: WakuNodeConf): ConfResult[WakuConf] =
   b.mixConf.withMixNodes(n.mixnodes)
   if n.mixkey.isSome():
     b.mixConf.withMixKey(n.mixkey.get())
+  b.mixConf.withAllowAllAddresses(n.mixAllowAllAddresses)
+  b.mixConf.withKeyRotation(n.mixKeyRotation)
 
   if n.filter.isSome():
     b.filterServiceConf.withEnabled(n.filter.get())

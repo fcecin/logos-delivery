@@ -20,6 +20,8 @@ import
 import
   logos_delivery/waku/waku_core,
   logos_delivery/waku/node/peer_manager,
+  logos_delivery/waku/discovery/delivery_advert,
+  logos_delivery/waku/discovery/peer_discovery_interface,
   logos_delivery/waku/api/events/discovery_events
 
 # `WakuKademlia.new` is generic, so `ServiceDiscovery.new` instantiates in the
@@ -60,21 +62,14 @@ type KademliaDiscoveryConf* = object
   clientMode*: bool
   xprPublishing*: bool
 
-proc extractMixPubKey*(service: ServiceInfo): Opt[Curve25519Key] =
-  if service.id != MixProtocolID:
-    return Opt.none(Curve25519Key)
+func discoveredServices(record: ExtendedPeerRecord): seq[DiscoveredService] =
+  record.services.mapIt(DiscoveredService(id: it.id, data: it.data.get(@[])))
 
-  let data = service.data.get(@[])
-  if data.len != Curve25519KeySize:
-    trace "Invalid mix pub key length",
-      expected = Curve25519KeySize, actual = data.len, dataHex = byteutils.toHex(data)
-    return Opt.none(Curve25519Key)
-
-  let key = intoCurve25519Key(data)
-
-  return Opt.some(key)
-
-proc remotePeerInfoFrom*(record: ExtendedPeerRecord): Opt[RemotePeerInfo] =
+proc remotePeerInfoFrom*(
+    record: ExtendedPeerRecord, clusterId = Opt.none(uint16)
+): Opt[RemotePeerInfo] =
+  ## The codecs and shards the record's delivery payload claims are stored
+  ## with the peer, see `advertisedServing`.
   if record.addresses.len == 0:
     trace "Missing addresses", peerId = record.peerId
     return Opt.none(RemotePeerInfo)
@@ -84,38 +79,45 @@ proc remotePeerInfoFrom*(record: ExtendedPeerRecord): Opt[RemotePeerInfo] =
     trace "No dialable addresses", peerId = record.peerId
     return Opt.none(RemotePeerInfo)
 
-  let protocols = record.services.mapIt(it.id)
+  let (codecs, shards) = advertisedServing(record.discoveredServices(), clusterId)
+  let protocols = deduplicate(record.services.mapIt(it.id) & codecs)
 
-  var mixPubKey: Opt[Curve25519Key] = Opt.none(Curve25519Key)
-  for service in record.services:
-    let key = extractMixPubKey(service).valueOr:
-      continue
-    mixPubKey = Opt.some(key)
-
+  let mixPubKey = advertisedMixKey(record.discoveredServices())
+  if mixPubKey.isSome():
     trace "Successfully extracted mix pub key",
       peerId = record.peerId, keyHex = byteutils.toHex(mixPubKey.get())
-
-    break
 
   return Opt.some(
     RemotePeerInfo.init(
       record.peerId,
       addrs = addrs,
       protocols = protocols,
+      shards = shards,
       origin = PeerOrigin.Kademlia,
       mixPubKey = mixPubKey,
     )
   )
 
-proc processRecords(
+proc processRecords*(
     self: WakuKademlia, records: seq[ExtendedPeerRecord], source: string
 ): seq[RemotePeerInfo] =
   var discovered: seq[RemotePeerInfo]
   for record in records:
-    let peerInfo = remotePeerInfoFrom(record).valueOr:
+    let peerInfo = remotePeerInfoFrom(record, self.peerManager.ownClusterId()).valueOr:
       continue
 
+    # An older record than the one that last told this peer's mix key neither
+    # sets nor removes it.
+    let disclaims = disclaimsMix(record.discoveredServices())
+    let admitted =
+      (peerInfo.mixPubKey.isSome() or disclaims) and
+      self.peerManager.switch.peerStore.admitMixRecord(peerInfo.peerId, record.seqNo)
+    if not admitted:
+      reset(peerInfo.mixPubKey)
+
     self.peerManager.addPeer(peerInfo, PeerOrigin.Kademlia)
+    if admitted and disclaims:
+      self.peerManager.switch.peerStore.removeMixPubKey(peerInfo.peerId)
 
     debug "Peer added via service discovery",
       source,
@@ -356,6 +358,28 @@ proc addServiceToAdvertise*(
       return
     self.servicesToAdvertise[service] = Opt.some(advert)
     debug "Added service to advertise", service = service.id
+
+proc removeServiceToAdvertise*(
+  self: WakuKademlia, service: ServiceInfo
+) {.async: (raises: [CancelledError]).}
+
+proc replaceServiceToAdvertise*(
+    self: WakuKademlia, service: ServiceInfo, advert: seq[byte]
+) {.async: (raises: [CancelledError]).} =
+  ## As `addServiceToAdvertise`, for a service this node may advertise already.
+  ## libp2p refuses a second record for a service, so a changed payload or
+  ## record takes the place of the old one. An unchanged one is left alone:
+  ## a new registration waits at the registrars again.
+  var current = Opt.none(ServiceInfo)
+  for advertised, record in self.servicesToAdvertise:
+    if advertised.id == service.id:
+      if advertised == service and record == Opt.some(advert):
+        return
+      current = Opt.some(advertised)
+      break
+  if current.isSome():
+    await self.removeServiceToAdvertise(current.get())
+  self.addServiceToAdvertise(service, advert)
 
 proc removeServiceToDiscover*(self: WakuKademlia, service: string) =
   if not self.servicesToDiscover.missingOrExcl(service):

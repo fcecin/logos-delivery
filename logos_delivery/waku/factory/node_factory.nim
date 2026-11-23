@@ -182,15 +182,26 @@ proc setupProtocols(
       node.wakuMixRln = ModuleRlnProtection.new(mixConf.mixRlnConfig.get(), rlnMixCall).valueOr:
         return err("failed to create Mix RLN adapter: " & error)
       protection = Opt.some(SpamProtection(node.wakuMixRln))
-    (await node.mountMix(conf.clusterId, mixConf.mixKey, mixConf.mixnodes, protection)).isOkOr:
+    else:
+      warn "Mix runs without Mix RLN: no hop is rate limited. Set mix-rln-registry-id, or turn mix off with mix=false"
+    (
+      await node.mountMix(
+        conf.clusterId,
+        mixConf.mixKey,
+        mixConf.mixnodes,
+        protection,
+        allowAllAddresses = mixConf.allowAllAddresses,
+        keyRotation = mixConf.keyRotation,
+      )
+    ).isOkOr:
       return err("failed to mount waku mix protocol: " & $error)
 
   # Setup service discovery
   if conf.kademliaDiscoveryConf.isSome():
     var kadConf = conf.kademliaDiscoveryConf.get()
 
-    # Mix is no longer injected here: it is advertised at runtime through
-    # IPeerDiscovery (see advertiseMix), so plugin-hosted kademlia gets it too.
+    # Mix is not injected here: its key is advertised at runtime in the
+    # delivery record (see advertiseSelf), so plugin-hosted kademlia gets it too.
 
     node.mountKademlia(kadConf).isOkOr:
       return err("failed to setup service discovery: " & error)

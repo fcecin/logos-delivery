@@ -14,6 +14,7 @@ import
   libp2p/stream/connection,
   logos_delivery/waku/waku,
   logos_delivery/waku/waku_mix,
+  logos_delivery/waku/waku_relay,
   logos_delivery/waku/node/waku_node,
   logos_delivery/waku/api/publish,
   logos_delivery/waku/node/peer_manager,
@@ -133,7 +134,9 @@ suite "SendService - mix size before admission":
   asyncSetup:
     waku = (await Waku.new(testConf())).expect("Waku.new")
     let keys = generateKeyPair().expect("mix key pair")
-    (await waku.node.mountMix(3'u16, keys.privateKey, @[])).expect("mountMix")
+    (await waku.node.mountMix(3'u16, keys.privateKey, @[], allowAllAddresses = true)).expect(
+      "mountMix"
+    )
   asyncTeardown:
     discard await waku.stop()
 
@@ -475,7 +478,7 @@ suite "SendService - anonymity level with a mounted mix":
   asyncSetup:
     waku = (await Waku.new(testConf())).expect("Waku.new")
     let mixKeys = generateKeyPair().expect("mix key pair")
-    (await waku.node.mountMix(3'u16, mixKeys.privateKey, @[])).isOkOr:
+    (await waku.node.mountMix(3'u16, mixKeys.privateKey, @[], allowAllAddresses = true)).isOkOr:
       raiseAssert "Failed to mount mix: " & $error
 
   asyncTeardown:
@@ -826,6 +829,36 @@ suite "SendService - anonymity level with a mounted mix":
       plain.calls == 1
       old.state == DeliveryState.SuccessfullyPropagated
 
+  asyncTest "a Required task fails with the reason when the node has no usable Mix RLN membership":
+    ## With Mix RLN the sender proves the first hop, so no attempt is made
+    ## without a membership. One that arrives later reopens the gate.
+    for i in 0 ..< MinMixPoolSize:
+      addMixPeer(60170 + i, lightpush = true)
+    check waku.mixReady()
+    waku.node.wakuMixRln = ModuleRlnProtection()
+
+    let plain = PlainSendProcessor()
+    let mix = MixSendProcessor.new(
+      waku, waku.brokerCtx, AnonymityLevel.Required, chronos.minutes(1)
+    )
+    mix.chain(plain)
+
+    let task = buildTask("no-membership", ZeroDuration)
+    await mix.process(task)
+    check task.state == DeliveryState.NextRoundRetry
+    task.stampAgo(MixUnusableGrace + chronos.seconds(1))
+    await mix.process(task)
+    check:
+      plain.calls == 0
+      task.state == DeliveryState.FailedToDeliver
+      task.errorDesc == MixNoMembershipReason
+
+    waku.node.mixMembershipUsable = true
+    let later = buildTask("membership-arrived", ZeroDuration)
+    await mix.process(later)
+    check later.errorDesc != MixNoMembershipReason
+    waku.node.wakuMixRln = nil
+
   asyncTest "a Required task waits during its grace when mix cannot encode its own hop, then fails":
     ## The pool is usable and the self hop is not, so no reply path can be built.
     for i in 0 ..< MinMixPoolSize:
@@ -922,20 +955,28 @@ suite "SendService - anonymity level with a mounted mix":
 suite "Mix send path - exit peer selection":
   ## With `exit_is_dest` the lightpush server is the last node of the sphinx
   ## path. Mix refuses a destination that has no mix public key. The selection
-  ## must skip a plain lightpush peer.
+  ## must skip a plain lightpush peer. The selection reads the pool of the
+  ## mounted mix. The test peers are on loopback, so the suite sets
+  ## `mix-allow-all-addresses` in the config of the node.
   var waku {.threadvar.}: Waku
 
+  proc mixWaku(allowAllAddresses: bool): Future[Waku] {.async.} =
+    var nodeConf = defaultTestWakuNodeConf()
+    nodeConf.mix = Opt.some(true)
+    nodeConf.mixAllowAllAddresses = allowAllAddresses
+    let conf = nodeConf.toWakuConf().valueOr:
+      raiseAssert error
+    return (await Waku.new(conf)).expect("Waku.new")
+
   asyncSetup:
-    waku = (await Waku.new(testConf())).expect("Waku.new")
+    waku = await mixWaku(allowAllAddresses = true)
 
   asyncTeardown:
     discard await waku.stop()
 
   const shard = PubsubTopic("/waku/2/rs/3/0")
 
-  proc addLightpushPeer(
-      mixCapable: bool, address = "/ip4/127.0.0.1/tcp/60000"
-  ): PeerId =
+  proc addLightpushPeerTo(target: Waku, mixCapable: bool, address: string): PeerId =
     let peerId = PeerId.init(generateSecp256k1Key()).tryGet()
     let keyPair = generateKeyPair().expect("mix key pair")
     let mixPubKey =
@@ -943,7 +984,7 @@ suite "Mix send path - exit peer selection":
         Opt.some(keyPair.publicKey)
       else:
         Opt.none(typeof(keyPair.publicKey))
-    waku.node.peerManager.addPeer(
+    target.node.peerManager.addPeer(
       RemotePeerInfo.init(
         peerId,
         @[MultiAddress.init(address).tryGet()],
@@ -952,8 +993,36 @@ suite "Mix send path - exit peer selection":
         mixPubKey = mixPubKey,
       )
     )
-    waku.node.peerManager.switch.peerStore.setShardInfo(peerId, @[0'u16])
+    target.node.peerManager.switch.peerStore.setShardInfo(peerId, @[0'u16])
     return peerId
+
+  proc addLightpushPeer(
+      mixCapable: bool, address = "/ip4/127.0.0.1/tcp/60000"
+  ): PeerId =
+    waku.addLightpushPeerTo(mixCapable, address)
+
+  asyncTest "by default a lightpush peer at a private or loopback address is not a mix exit":
+    ## The exit is the last node of the path, so the node before it must dial
+    ## the address of the exit. The node does not start, so it dials nothing.
+    let strict = await mixWaku(allowAllAddresses = false)
+    defer:
+      discard await strict.stop()
+
+    discard strict.addLightpushPeerTo(true, "/ip4/192.168.0.7/tcp/60000")
+    discard strict.addLightpushPeerTo(true, "/ip4/127.0.0.1/tcp/60000")
+    check strict.selectMixLightpushPeer(shard).isNone()
+
+    let publicExit = strict.addLightpushPeerTo(true, "/ip4/8.8.8.8/tcp/60000")
+    let selected = strict.selectMixLightpushPeer(shard).valueOr:
+      raiseAssert "expected the exit at the public address"
+    check selected.peerId == publicExit
+
+  asyncTest "a node without mix selects no mix exit":
+    let bare = (await Waku.new(testConf())).expect("Waku.new")
+    defer:
+      discard await bare.stop()
+    discard bare.addLightpushPeerTo(true, "/ip4/8.8.8.8/tcp/60000")
+    check bare.selectMixLightpushPeer(shard).isNone()
 
   asyncTest "a plain lightpush peer is never offered as a mix exit":
     discard addLightpushPeer(mixCapable = false)
@@ -964,8 +1033,7 @@ suite "Mix send path - exit peer selection":
 
   asyncTest "a mix key alone does not make a peer a usable exit":
     ## Mix routes IPv4 TCP and QUIC-v1 addresses only. A peer with another
-    ## address is not in the pool, whatever its mix key is. Mix evicts such a
-    ## peer at the first path construction.
+    ## address is not in the pool, whatever its mix key is.
     discard addLightpushPeer(mixCapable = true, address = "/dns4/node.test/tcp/60000")
 
     check:
@@ -1034,8 +1102,9 @@ suite "Mix send path - exit peer selection":
       raiseAssert "the slotted lightpush node should be offered as a mix exit"
     check selected.peerId == peerId
 
-## A stub for `MixEntryConnection` of `libp2p_mix`. `write` completes, `readOnce`
-## waits for the reply future, and `closeImpl` cancels the closure that fills it.
+## A stub for `MixEntryConnection` of `libp2p_mix`. `write` completes or stalls,
+## `readOnce` waits for the reply future, and `closeImpl` ends a stalled write
+## and the wait for the reply.
 type StubMixConn = ref object of Connection
   incoming: AsyncQueue[seq[byte]]
   incomingFut: Future[void]
@@ -1077,8 +1146,12 @@ method write(
     await s.sendStall
 
 method closeImpl(s: StubMixConn): Future[void] {.async: (raises: []).} =
+  if not s.sendStall.finished():
+    await s.sendStall.cancelAndWait()
   if not s.incomingFut.isNil():
-    s.incomingFut.cancelSoon()
+    await s.incomingFut.cancelAndWait()
+  if not s.replyReceivedFut.finished():
+    s.replyReceivedFut.complete()
 
 method getWrapped(s: StubMixConn): Connection =
   nil
@@ -1152,8 +1225,8 @@ suite "Mix send path - the reply budget":
       res.error.code == LightPushErrorCode.SERVICE_NOT_AVAILABLE
 
   asyncTest "a stalled first-hop dial is given up on too":
-    ## A stall in the send leaves the reply future pending, and the close of
-    ## the connection cancels the closure that completes it.
+    ## A stall in the send leaves the reply future pending. The close of the
+    ## connection ends the stalled write.
     let res = await givesUpOn(stallInSend = true)
     check:
       res.isErr()
@@ -1196,6 +1269,7 @@ suite "Mix send path - the node's own hop":
         3'u16,
         mixKeys.privateKey,
         @[],
+        allowAllAddresses = true,
       )
       .expect("WakuMix.new")
     for i in 0 ..< MinMixPoolSize:
@@ -1217,8 +1291,13 @@ suite "Mix RLN coordination protection":
   test "the default Mix scope is a 32-byte identifier":
     check defaultTestWakuNodeConf().mixRlnIdentifierHex.hexToSeqByte().len == 32
 
-  asyncTest "shared Mix refuses to start without Relay RLN":
-    let node = WakuNode(ports: BoundPorts.init(), wakuMixRln: ModuleRlnProtection())
+  asyncTest "a relay node's Mix refuses to start without Relay RLN":
+    # Only the relay matters here, so the relay is never started.
+    let node = WakuNode(
+      ports: BoundPorts.init(),
+      wakuMixRln: ModuleRlnProtection(),
+      wakuRelay: WakuRelay(),
+    )
     let started = await node.startMixRln()
     check:
       started.isErr()

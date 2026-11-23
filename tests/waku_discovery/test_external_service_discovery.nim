@@ -1,11 +1,14 @@
 {.used.}
 
-import std/[atomics, os, sequtils, strutils]
+import std/[atomics, base64, json, os, sequtils, strutils]
 import chronos, chronos/threadsync, results, testutils/unittests
 import brokers/broker_context
 import libp2p/[peerid, peerinfo, multiaddress, crypto/crypto, extended_peer_record]
+import libp2p_mix/pool
 import
   logos_delivery/waku/discovery/external_service_discovery,
+  logos_delivery/waku/discovery/delivery_advert,
+  logos_delivery/waku/waku_enr/capabilities,
   logos_delivery/waku/requests/node_state_requests,
   logos_delivery/waku/node/peer_manager/peer_manager,
   logos_delivery/waku/waku_core,
@@ -43,8 +46,16 @@ type FakeState = object
   lastKey: array[128, char]
   lastData: array[32, uint8]
   lastRecord: array[512, uint8]
+  peersJsonLen: Atomic[int] ## when non-zero, lookups return `peersJson`
+  peersJson: array[1024, char]
 
 var fake: ptr FakeState
+
+proc setPeersJson(s: string) =
+  doAssert s.len <= fake.peersJson.len
+  for i in 0 ..< s.len:
+    fake.peersJson[i] = s[i]
+  fake.peersJsonLen.store(s.len)
 
 proc setKey(s: cstring) =
   var n = 0
@@ -100,9 +111,13 @@ const FakePeersJson =
 
 proc emitJson(outJson: ptr cstring) =
   ## Hands out a heap copy the way a real plugin would; freed via freeString.
-  let n = FakePeersJson.len
+  let custom = fake.peersJsonLen.load()
+  let n = if custom > 0: custom else: FakePeersJson.len
   let buf = cast[cstring](allocShared0(n + 1))
-  copyMem(buf, FakePeersJson.cstring, n)
+  if custom > 0:
+    copyMem(buf, fake.peersJson[0].addr, n)
+  else:
+    copyMem(buf, FakePeersJson.cstring, n)
   outJson[] = buf
 
 proc fakeLookup(
@@ -282,7 +297,7 @@ suite "ExternalServiceDiscovery":
     ## Advertising publishes a record the node signs; without the node's
     ## identity the backend refuses rather than letting the plugin publish
     ## its own.
-    check (await iface.startAdvertising("service:x", @[1'u8, 2])).isErr()
+    check (await iface.startAdvertising("service:x", @[1'u8, 2], @[])).isErr()
     check fake.lastRecordLen.load() == 0
     let nodeKey = generateSecp256k1Key()
     let peerInfo = PeerInfo.new(nodeKey)
@@ -291,7 +306,7 @@ suite "ExternalServiceDiscovery":
       ok(peerInfo)
     discard GetNodeKey.reprovideIt(ctx):
       ok(nodeKey)
-    check (await iface.startAdvertising("service:x", @[1'u8, 2])).isOk()
+    check (await iface.startAdvertising("service:x", @[1'u8, 2], @[])).isOk()
     check eventually(fake.advertTaken.load() == 1)
     check:
       lastKey() == "service:x"
@@ -308,7 +323,7 @@ suite "ExternalServiceDiscovery":
       record.data.services.len == 1
       record.data.services[0].id == "x"
       record.data.services[0].data == Opt.some(@[1'u8, 2])
-    check (await iface.startAdvertising("topic:/waku/2/rs/0/0", @[])).isErr()
+    check (await iface.startAdvertising("topic:/waku/2/rs/0/0", @[], @[])).isErr()
 
     check (await iface.registerInterest("service:y")).isOk()
     check eventually(fake.interestTaken.load() == 1)
@@ -514,6 +529,68 @@ suite "ExternalServiceDiscovery":
     check (await iface.lookupRandom()).isOk()
     check (await iface.stopDiscovery()).isOk()
 
+  asyncTest "a delivery record that claims no mix removes the peer's mix key":
+    ## The peer lost its Mix RLN membership and advertises as a delivery node.
+    proc peersJson(caps: CapabilitiesBitfield, withKey: bool, seqNo = 7): string =
+      ## Service data travels base64-encoded, and the delivery payload is
+      ## base64 text itself.
+      let payload = base64.encode(@[AdvertFormatVersion, 0'u8, 0'u8, byte(caps)])
+      var services = %*[{"id": LogosDeliveryServiceId, "data": base64.encode(payload)}]
+      if withKey:
+        services.add(%*{"id": "/mix/1.0.0", "data": base64.encode(newSeq[byte](32))})
+      $(
+        %*[
+          {
+            "peerId": FakePeerId,
+            "seqNo": seqNo,
+            "addrs": ["/ip4/1.2.3.4/tcp/60000"],
+            "services": services,
+          }
+        ]
+      )
+
+    let backend = ExternalServiceDiscovery.create()
+    let ctx = globalBrokerContext()
+    check (await SetServiceDiscoveryPlugin.request(ctx, fakePlugin())).isOk()
+    let peerManager = PeerManager.new(switch = newTestSwitch(), storage = nil)
+    discard GetNodePeerManager.reprovideIt(ctx):
+      ok(peerManager)
+    let iface: IPeerDiscovery = backend
+    check (await iface.startDiscovery()).isOk()
+    let pid = PeerId.init(FakePeerId).get()
+
+    setPeersJson(peersJson(CapabilitiesBitfield.init(relay = true, mix = true), true))
+    check (await iface.lookupServicePeers("service:/logos/delivery", 1)).isOk()
+    check pid in peerManager.switch.peerStore[MixPubKeyBook]
+
+    setPeersJson(peersJson(CapabilitiesBitfield.init(relay = true), false))
+    check (await iface.lookupServicePeers("service:/logos/delivery", 1)).isOk()
+    check pid notin peerManager.switch.peerStore[MixPubKeyBook]
+
+    ## A registrar serves the record it was handed until that expires, so a
+    ## lookup can return a record older than one seen before. A mix node
+    ## advertises without a key until its Mix RLN membership is usable: that
+    ## older record must not take the key away again.
+    let mixNode = CapabilitiesBitfield.init(relay = true, mix = true)
+    setPeersJson(peersJson(mixNode, true, seqNo = 9))
+    check (await iface.lookupServicePeers("service:/logos/delivery", 1)).isOk()
+    check pid in peerManager.switch.peerStore[MixPubKeyBook]
+
+    setPeersJson(peersJson(CapabilitiesBitfield.init(relay = true), false, seqNo = 8))
+    check (await iface.lookupServicePeers("service:/logos/delivery", 1)).isOk()
+    check pid in peerManager.switch.peerStore[MixPubKeyBook]
+
+    ## Nor does an older record bring a key back that a newer one removed.
+    setPeersJson(peersJson(CapabilitiesBitfield.init(relay = true), false, seqNo = 10))
+    check (await iface.lookupServicePeers("service:/logos/delivery", 1)).isOk()
+    check pid notin peerManager.switch.peerStore[MixPubKeyBook]
+
+    setPeersJson(peersJson(mixNode, true, seqNo = 9))
+    check (await iface.lookupServicePeers("service:/logos/delivery", 1)).isOk()
+    check pid notin peerManager.switch.peerStore[MixPubKeyBook]
+
+    check (await iface.stopDiscovery()).isOk()
+
   asyncTest "the first service lookup does not wait a whole interval":
     ## The loop opens on the eager schedule and only then settles into the
     ## configured interval. With ten minutes configured, a lookup that lands
@@ -570,7 +647,7 @@ suite "ExternalServiceDiscovery":
     fake.refuseVerbs.store(3)
 
     ## Taken on, not yet published: ok although the plugin refuses.
-    check (await iface.startAdvertising("service:x", @[1'u8, 2])).isOk()
+    check (await iface.startAdvertising("service:x", @[1'u8, 2], @[])).isOk()
     check (await iface.registerInterest("service:y")).isOk()
 
     ## Taken once and left alone: with nothing pending the loop is parked, and
@@ -598,7 +675,7 @@ suite "ExternalServiceDiscovery":
     check (await iface.startDiscovery()).isOk()
     fake.advertDelayMs.store(2500) # past the fake's 2 s requestTimeoutMs
 
-    check (await iface.startAdvertising("service:x", @[1'u8, 2])).isOk()
+    check (await iface.startAdvertising("service:x", @[1'u8, 2], @[])).isOk()
 
     ## Taken through "already advertised": no stop, no republish, and nothing
     ## left pending that could call again.
@@ -621,7 +698,7 @@ suite "ExternalServiceDiscovery":
 
     let iface: IPeerDiscovery = backend
     check (await iface.startDiscovery()).isOk()
-    check (await iface.startAdvertising("service:x", @[1'u8, 2])).isOk()
+    check (await iface.startAdvertising("service:x", @[1'u8, 2], @[])).isOk()
     check eventually(fake.advertTaken.load() == 1)
     check fake.stopAdvertCalls.load() == 0
 
@@ -644,23 +721,35 @@ suite "ExternalServiceDiscovery":
 
     let iface: IPeerDiscovery = backend
     check (await iface.startDiscovery()).isOk()
-    check (await iface.startAdvertising("service:x", @[1'u8, 2])).isOk()
+    check (await iface.startAdvertising("service:x", @[1'u8, 2], @[])).isOk()
     check eventually(fake.advertTaken.load() == 1)
 
-    check (await iface.startAdvertising("service:x", @[1'u8, 2])).isOk()
+    check (await iface.startAdvertising("service:x", @[1'u8, 2], @[])).isOk()
     ## The same data leaves the advert taken, so there is nothing to send.
     check:
       backend.pendingAnnouncements() == 0
       fake.advertTaken.load() == 1
       fake.stopAdvertCalls.load() == 0
 
-    check (await iface.startAdvertising("service:x", @[7'u8])).isOk()
+    check (await iface.startAdvertising("service:x", @[7'u8], @[])).isOk()
     check eventually(fake.advertTaken.load() == 2)
     check:
       fake.stopAdvertCalls.load() == 1
       fake.lastDataLen.load() == 1
       fake.lastData[0] == 7'u8
       fake.advertRefusedAsHeld.load() == 0
+
+    ## The secondary services are part of the record the plugin holds, so a
+    ## change in them alone is sent again too.
+    let secondary = @[DiscoveredService(id: "/y/1.0.0", data: @[9'u8])]
+    check (await iface.startAdvertising("service:x", @[7'u8], secondary)).isOk()
+    check eventually(fake.advertTaken.load() == 3)
+    check fake.stopAdvertCalls.load() == 2
+
+    check (await iface.startAdvertising("service:x", @[7'u8], secondary)).isOk()
+    check:
+      backend.pendingAnnouncements() == 0
+      fake.advertTaken.load() == 3
 
     check (await iface.stopDiscovery()).isOk()
 
@@ -674,7 +763,7 @@ suite "ExternalServiceDiscovery":
     check (await iface.startDiscovery()).isOk()
     fake.refuseVerbs.store(1000)
 
-    check (await iface.startAdvertising("service:x", @[1'u8, 2])).isOk()
+    check (await iface.startAdvertising("service:x", @[1'u8, 2], @[])).isOk()
     ## Once it has been tried, the plugin may hold it, so it gets withdrawn.
     check eventually(fake.refuseVerbs.load() < 1000)
     check (await iface.stopAdvertising("service:x")).isOk()
@@ -697,7 +786,7 @@ suite "ExternalServiceDiscovery":
     discard provideNodeIdentity(ctx)
 
     let iface: IPeerDiscovery = backend
-    check (await iface.startAdvertising("service:x", @[1'u8, 2])).isOk()
+    check (await iface.startAdvertising("service:x", @[1'u8, 2], @[])).isOk()
     check (await iface.registerInterest("service:y")).isOk()
     check:
       fake.advertTaken.load() == 0
@@ -718,7 +807,7 @@ suite "ExternalServiceDiscovery":
 
     let iface: IPeerDiscovery = backend
     check (await iface.startDiscovery()).isOk()
-    check (await iface.startAdvertising("service:x", @[1'u8, 2])).isOk()
+    check (await iface.startAdvertising("service:x", @[1'u8, 2], @[])).isOk()
     check eventually(fake.advertTaken.load() == 1)
 
     proc publishedAddrs(): seq[string] =
@@ -759,8 +848,8 @@ suite "ExternalServiceDiscovery":
 
     let iface: IPeerDiscovery = backend
     ## Both wanted before start, so the first pass has both in its snapshot.
-    check (await iface.startAdvertising("service:a", @[1'u8])).isOk()
-    check (await iface.startAdvertising("service:b", @[2'u8])).isOk()
+    check (await iface.startAdvertising("service:a", @[1'u8], @[])).isOk()
+    check (await iface.startAdvertising("service:b", @[2'u8], @[])).isOk()
     fake.advertDelayMs.store(500)
     check (await iface.startDiscovery()).isOk()
 
@@ -792,7 +881,7 @@ suite "ExternalServiceDiscovery":
 
     ## Occupy the worker: the advert call sits in the plugin for 1.5 s.
     fake.advertDelayMs.store(1500)
-    check (await iface.startAdvertising("service:x", @[1'u8, 2])).isOk()
+    check (await iface.startAdvertising("service:x", @[1'u8, 2], @[])).isOk()
     check eventually(fake.advertDelayMs.load() == 0)
 
     ## Queued behind it, then cancelled while still queued. The yield only

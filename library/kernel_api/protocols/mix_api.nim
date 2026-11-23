@@ -12,7 +12,8 @@ proc waku_mix_get_peer_record(
   let mix = self.waku.node.wakuMix
   if mix.isNil():
     return err("Mix is not enabled")
-  let info = mix.localMixPubInfo()
+  let info = mix.localMixPubInfo().valueOr:
+    return err("Mix has no key for this node's record: " & error)
   return ok(
     $(
       %*{
@@ -57,6 +58,10 @@ proc waku_mix_add_peer(
         peerId, @[address], publicKey = publicKey, mixPubKey = Opt.some(key)
       )
     )
+    if mix.nodePool.get(peerId).isNone():
+      return err(
+        "Mix has no usable address for this peer. A private, a loopback or a circuit relay address needs mix-allow-all-addresses"
+      )
     return ok("{}")
   except CatchableError as exc:
     return err("Invalid Mix peer record: " & exc.msg)

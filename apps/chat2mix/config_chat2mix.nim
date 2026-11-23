@@ -91,6 +91,20 @@ type
       name: "mixnode"
     .}: seq[MixNodePubInfo]
 
+    mixAllowAllAddresses* {.
+      desc:
+        "Let mix paths use a mix node at a private, a loopback or a circuit relay address. Without it, mix uses a mix node only at a public address. Set it on a node of a local simulation, a test or a private network.",
+      defaultValue: false,
+      name: "mix-allow-all-addresses"
+    .}: bool
+
+    mixKeyRotation* {.
+      desc:
+        "Rotate the mix key on a timer, as the Mix Key Rotation spec describes. The node then ignores --mixnode, and takes mix keys from discovery only. Set it on every node of a network, or on none.",
+      defaultValue: false,
+      name: "mix-key-rotation"
+    .}: bool
+
     keepAlive* {.
       desc: "Enable keep-alive for idle connections: true|false",
       defaultValue: false,

@@ -20,6 +20,8 @@ type MixConfBuilder* = object
   enabled: Opt[bool]
   mixKey: Opt[string]
   mixNodes: seq[MixNodePubInfo]
+  allowAllAddresses: bool
+  keyRotation: bool
   mixRlnConfig: Opt[ModuleRlnConfig]
 
 proc init*(T: type MixConfBuilder): MixConfBuilder =
@@ -36,6 +38,15 @@ proc withMixNodes*(b: var MixConfBuilder, mixNodes: seq[MixNodePubInfo]) =
   ## both end up in the pool.
   b.mixNodes = concat(b.mixNodes, mixNodes)
 
+proc withAllowAllAddresses*(b: var MixConfBuilder, allowAllAddresses: bool) =
+  b.allowAllAddresses = allowAllAddresses
+
+proc withKeyRotation*(b: var MixConfBuilder, keyRotation: bool) =
+  b.keyRotation = keyRotation
+
+func keyRotation*(b: MixConfBuilder): bool =
+  b.keyRotation
+
 proc withMixRln*(b: var MixConfBuilder, config: ModuleRlnConfig) =
   b.mixRlnConfig = Opt.some(config)
 
@@ -45,29 +56,23 @@ proc build*(b: MixConfBuilder): Result[Opt[MixConf], string] =
       return err("Mix-RLN requires Mix to be enabled")
     return ok(Opt.none(MixConf))
   else:
-    if b.mixKey.isSome():
-      let mixPrivKey = intoCurve25519Key(ncrutils.fromHex(b.mixKey.get()))
-      let mixPubKey = public(mixPrivKey)
-      return ok(
-        Opt.some(
-          MixConf(
-            mixKey: mixPrivKey,
-            mixPubKey: mixPubKey,
-            mixNodes: b.mixNodes,
-            mixRlnConfig: b.mixRlnConfig,
-          )
+    let mixPrivKey =
+      if b.mixKey.isSome():
+        if b.keyRotation:
+          warn "Ignoring the configured mix key: with mix key rotation, the node generates each mix key"
+        intoCurve25519Key(ncrutils.fromHex(b.mixKey.get()))
+      else:
+        let keys = generateKeyPair().valueOr:
+          return err("Generate key pair error: " & $error)
+        keys.privateKey
+    return ok(
+      Opt.some(
+        MixConf(
+          mixKey: mixPrivKey,
+          mixNodes: b.mixNodes,
+          allowAllAddresses: b.allowAllAddresses,
+          keyRotation: b.keyRotation,
+          mixRlnConfig: b.mixRlnConfig,
         )
       )
-    else:
-      let (mixPrivKey, mixPubKey) = generateKeyPair().valueOr:
-        return err("Generate key pair error: " & $error)
-      return ok(
-        Opt.some(
-          MixConf(
-            mixKey: mixPrivKey,
-            mixPubKey: mixPubKey,
-            mixNodes: b.mixNodes,
-            mixRlnConfig: b.mixRlnConfig,
-          )
-        )
-      )
+    )

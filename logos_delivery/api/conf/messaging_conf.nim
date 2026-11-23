@@ -68,8 +68,19 @@ type MessagingClientConf* = object
     ## Disable RLN message proof validation.
   reliabilityEnabled* {.name: "reliability".}: Opt[bool]
     ## Enable store-based send reliability.
+  mix* {.name: "mix".}: Opt[bool]
+    ## Mount mix. Unset, Core mode and an anonymity level above `None` mount
+    ## it. `false` turns it off, and with no level the level is then `None`.
   anonymityLevel* {.name: "anonymity-level".}: Opt[AnonymityLevel]
     ## Sender anonymity level. A level above `None` mounts and uses mix.
+    ## Default `DefaultAnonymityLevel`, or `None` with `mix=false`.
+  mixAllowAllAddresses* {.name: "mix-allow-all-addresses".}: Opt[bool]
+    ## Let mix paths use a mix node at a private, a loopback or a circuit relay address. For a
+    ## local simulation, a test or a private network.
+  mixKeyRotation* {.name: "mix-key-rotation".}: Opt[bool]
+    ## Rotate the mix key on a timer. Mix keys then come from discovery only.
+    ## Set it on every node of a network, or on none.
+    ## See: https://lip.logos.co/anoncomms/raw/mix-key-rotation.html
   store*: Opt[bool] ## Enable the store protocol.
   storenode* {.name: "storenode".}: Opt[string]
   configuredStoreNodesOnly* {.name: "configured-store-nodes-only".}: Opt[bool]
@@ -162,6 +173,12 @@ proc toWakuNodeConf*(
     conf.kadServiceLookupIntervalSec = self.kadServiceLookupIntervalSec.get()
   if self.maxPureLibp2pPeers.isSome():
     conf.maxPureLibp2pPeers = self.maxPureLibp2pPeers
+  if self.mix.isSome():
+    conf.mix = self.mix
+  if self.mixAllowAllAddresses.isSome():
+    conf.mixAllowAllAddresses = self.mixAllowAllAddresses.get()
+  if self.mixKeyRotation.isSome():
+    conf.mixKeyRotation = self.mixKeyRotation.get()
   if self.ethRpcEndpoints.isSome():
     conf.ethClientUrls = self.ethRpcEndpoints.get()
   if self.rlnContractAddress.isSome():
