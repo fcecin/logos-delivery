@@ -178,8 +178,11 @@ proc selectHopAddress(
   return Opt.some(hop.multiAddr)
 
 proc addPeer*(mix: WakuMix, node: MixPubInfo): Result[void, string] =
-  ## Adds a mix node to the pool and to the peer manager.
-  ## Stores nothing when no path can use the node.
+  ## Adds a configured mix node.
+  ## Stores nothing for this node itself, or when no path can use the node.
+  if node.peerId == mix.peerManager.switch.peerInfo.peerId:
+    # Mix could draw this node as a hop or an exit and route a packet to itself.
+    return err("Mix peer is this node")
   var addrs = @[node.multiAddr]
   if mix.selectHopAddress(node, addrs).isNone():
     # A path can still use a stored address, so the write keeps it.
@@ -189,7 +192,7 @@ proc addPeer*(mix: WakuMix, node: MixPubInfo): Result[void, string] =
     addrs.add(usable)
 
   mix.nodePool.add(node)
-  mix.peerManager.addPeer(
+  mix.peerManager.addConfiguredMixNode(
     RemotePeerInfo.init(
       node.peerId,
       addrs,
@@ -238,7 +241,7 @@ proc processBootNodes(
     count.inc()
     added.add((peerId, node.multiAddr))
 
-    peermgr.addPeer(
+    peermgr.addConfiguredMixNode(
       RemotePeerInfo.init(
         peerId, @[multiAddr], publicKey = peerPubKey, mixPubKey = Opt.some(node.pubKey)
       )
