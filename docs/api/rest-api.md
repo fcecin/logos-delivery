@@ -70,7 +70,7 @@ logosdeliverynode --entry-layer=messaging --mode=core --preset=logos.test \
 A send is asynchronous. `200` means that the node accepted the message and gives its message hash, which is final. The result arrives as send events grouped by that `messageHash`:
 
 * `propagated`: the message reached at least one peer
-* `sent`: a Store peer confirmed that it holds the message, or, for a send over mix, the mix exit replied
+* `sent`: a Store peer confirmed that it holds the message, or, for a send over mix, the mix exit replied or the node received a copy of the message
 * `error`: the send failed. Its `errorKind` is `NotPropagated` when no peer took the message within 15 s of the send, or a peer rejected it, and `NotStored` when no Store peer reported the propagated message within about 30 s
 
 After a `sent` or `error` event, no more events come for that message.

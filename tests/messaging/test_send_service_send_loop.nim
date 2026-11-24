@@ -9,7 +9,7 @@ import
   logos_delivery/waku/node/waku_node,
   logos_delivery/waku/rln/[rln_api, rln_plugin],
   logos_delivery/api/types,
-  logos_delivery/api/events/messaging_client_events,
+  logos_delivery/api/events/[kernel_events, messaging_client_events],
   logos_delivery/waku/factory/waku_conf,
   logos_delivery/messaging/rate_limit_manager/rate_limit_manager,
   logos_delivery/messaging/delivery_service/send_service/
@@ -184,6 +184,76 @@ method isValidProcessor(
     self: NeverValidProcessor, task: DeliveryTask
 ): bool {.gcsafe.} =
   return false
+
+type MixThenFallbackProcessor = ref object of BaseSendProcessor
+  ## The first pass is a mix attempt with no answer.
+  ## Each later pass hands the task to the plain path, as after the mix window.
+  calls: int
+
+method isValidProcessor(
+    self: MixThenFallbackProcessor, task: DeliveryTask
+): bool {.gcsafe.} =
+  return true
+
+method sendImpl(
+    self: MixThenFallbackProcessor, task: DeliveryTask
+): Future[void] {.async.} =
+  inc self.calls
+  if self.calls > 1:
+    task.state = DeliveryState.FallbackRetry
+    return
+  task.anonymized = true
+  task.tryCount.inc()
+  task.state = DeliveryState.NextRoundRetry
+
+type RefusedProofProcessor = ref object of BaseSendProcessor
+  ## Leaves each task for a retry with a new RLN proof, as after a refused proof.
+  calls: int
+
+method isValidProcessor(
+    self: RefusedProofProcessor, task: DeliveryTask
+): bool {.gcsafe.} =
+  return true
+
+method sendImpl(
+    self: RefusedProofProcessor, task: DeliveryTask
+): Future[void] {.async.} =
+  inc self.calls
+  task.tryCount.inc()
+  task.msg.proof = @[]
+  task.firstAdmittedTime = Opt.none(Moment)
+  task.state = DeliveryState.NextRoundRetry
+
+type CopyThenFailProcessor = ref object of BaseSendProcessor
+  ## The copy of the message comes during the attempt, and then the attempt fails.
+
+method isValidProcessor(
+    self: CopyThenFailProcessor, task: DeliveryTask
+): bool {.gcsafe.} =
+  return true
+
+method sendImpl(
+    self: CopyThenFailProcessor, task: DeliveryTask
+): Future[void] {.async.} =
+  task.tryCount.inc()
+  MessageSeenEvent.emit(self.brokerCtx, task.pubsubTopic, task.msg)
+  task.state = DeliveryState.FailedToDeliver
+  task.errorDesc = "scripted failure"
+
+type CopyThenFallbackProcessor = ref object of BaseSendProcessor
+  ## The copy comes during the attempt, and then the attempt falls back.
+
+method isValidProcessor(
+    self: CopyThenFallbackProcessor, task: DeliveryTask
+): bool {.gcsafe.} =
+  return true
+
+method sendImpl(
+    self: CopyThenFallbackProcessor, task: DeliveryTask
+): Future[void] {.async.} =
+  task.tryCount.inc()
+  MessageSeenEvent.emit(self.brokerCtx, task.pubsubTopic, task.msg)
+  task.state = DeliveryState.FallbackRetry
 
 type OutcomeLog = ref object
   ## The message hashes of the propagation and error events, in order.
@@ -900,6 +970,202 @@ suite "SendService - deliver":
     check:
       log.propagated == @[task.hex()]
       log.errors.len == 0
+
+  proc receiveCopy(task: DeliveryTask) =
+    ## The network gives this node the message of `task`, through relay or filter.
+    MessageSeenEvent.emit(waku.brokerCtx, task.pubsubTopic, task.msg)
+
+  asyncTest "a copy after a mix attempt completes the send with no plain attempt":
+    ## With no copy, the next pass sends the message again in the clear.
+    privateAccess(SendService)
+    let mix = MixThenFallbackProcessor()
+    let plain = FakePropagatingProcessor()
+    mix.chain(plain)
+    let service = newService(mix, interval = chronos.hours(1))
+    let task = buildTask("copy-after-mix")
+    check (service.enqueue(task)).isOk()
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
+      service.attempts == 1
+
+    receiveCopy(task)
+    service.retryNow()
+
+    check await log.waitPropagated(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
+    check:
+      mix.calls == 1
+      plain.calls == 0
+
+  asyncTest "a copy before the first attempt completes nothing":
+    ## No attempt of this node sent the message.
+    privateAccess(SendService)
+    let service = newService(NeverValidProcessor(), interval = chronos.hours(1))
+    let task = buildTask("copy-before-attempt")
+    check (service.enqueue(task)).isOk()
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
+      service.attempts == 1
+
+    receiveCopy(task)
+    service.retryNow()
+
+    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
+      service.attempts == 2
+    check:
+      task.state == DeliveryState.NextRoundRetry
+      log.propagated.len == 0
+
+  asyncTest "a copy during the wait for a new RLN proof completes the send":
+    ## The attempt after that wait can be a plain one.
+    privateAccess(SendService)
+    let reply = newFuture[void]("proof-reply")
+    let proofCalls = new int
+    proc generate(message: WakuMessage): Future[Result[seq[byte], RlnError]] {.async.} =
+      proofCalls[].inc()
+      if proofCalls[] > 1:
+        await reply
+      return ok(@[4'u8, 5, 6])
+
+    waku.node.rlnPlugin =
+      Opt.some(RlnPlugin(name: "fake", generateProof: generate, proofSize: Opt.some(3)))
+    let processor = RefusedProofProcessor()
+    let service = newService(processor, interval = chronos.hours(1))
+    let task = buildTask("copy-during-proof")
+    check (service.enqueue(task)).isOk()
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
+      service.attempts == 1
+    service.retryNow()
+    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
+      proofCalls[] == 2
+
+    receiveCopy(task)
+    reply.complete()
+
+    check await log.waitPropagated(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
+    check processor.calls == 1
+
+  asyncTest "a copy during the wait for the admission lock draws no RLN proof":
+    ## A new proof uses one more RLN message id, for a message that the network has.
+    privateAccess(SendService)
+    let reply = newFuture[void]("proof-reply")
+    let proofCalls = new int
+    proc generate(message: WakuMessage): Future[Result[seq[byte], RlnError]] {.async.} =
+      proofCalls[].inc()
+      if proofCalls[] > 2:
+        await reply
+      return ok(@[4'u8, 5, 6])
+
+    waku.node.rlnPlugin =
+      Opt.some(RlnPlugin(name: "fake", generateProof: generate, proofSize: Opt.some(3)))
+    let service = newService(RefusedProofProcessor(), interval = chronos.hours(1))
+    let first = buildTask("first")
+    let second = buildTask("second")
+    check (service.enqueue(first)).isOk()
+    check (service.enqueue(second)).isOk()
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
+      service.attempts == 2
+    service.retryNow()
+    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
+      proofCalls[] == 3
+
+    # The new proof of `first` holds the lock, and `second` waits for the lock.
+    receiveCopy(second)
+    reply.complete()
+
+    check await log.waitPropagated(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
+    check:
+      log.propagated == @[second.hex()]
+      proofCalls[] == 3
+
+  asyncTest "a copy during an attempt skips the fallback attempt":
+    ## The fallback attempt would send the message again, also in the clear.
+    let processor = CopyThenFallbackProcessor(brokerCtx: waku.brokerCtx)
+    let fallback = FakePropagatingProcessor()
+    processor.chain(fallback)
+    let service = newService(processor)
+    check (service.enqueue(buildTask("copy-then-fallback"))).isOk()
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+
+    check await log.waitPropagated(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
+    check fallback.calls == 0
+
+  asyncTest "a copy during an attempt that fails completes the send":
+    let service = newService(CopyThenFailProcessor(brokerCtx: waku.brokerCtx))
+    let task = buildTask("copy-then-fail")
+    check (service.enqueue(task)).isOk()
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+
+    check await log.waitPropagated(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
+    check log.errors.len == 0
+
+  asyncTest "a copy completes a send whose delivery window ends before its next attempt":
+    privateAccess(SendService)
+    let service = newService(MixThenFallbackProcessor(), interval = chronos.hours(1))
+    let task = buildTask("copy-in-window")
+    check (service.enqueue(task)).isOk()
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
+      service.attempts == 1
+
+    receiveCopy(task)
+    service.deliveryWindow = ZeroDuration
+    service.retryNow()
+
+    check await log.waitPropagated(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
+    check log.errors.len == 0
+
+  asyncTest "a copy right before a stop completes the send at the restart":
+    ## The stop cuts the attempt before the send loop reads the copy.
+    let stalling = StallingProcessor()
+    let service = newService(stalling)
+    let task = buildTask("copy-then-stop")
+    check (service.enqueue(task)).isOk()
+    service.startSendService()
+    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
+      stalling.replies.len == 1
+
+    receiveCopy(task)
+    await service.stopSendService()
+    check log.propagated.len == 0
+
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+    check await log.waitPropagated(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
+    check stalling.replies.len == 1
+
+  asyncTest "a copy after a restart completes the send":
+    privateAccess(SendService)
+    let service = newService(MixThenFallbackProcessor(), interval = chronos.hours(1))
+    let task = buildTask("copy-after-restart")
+    check (service.enqueue(task)).isOk()
+    service.startSendService()
+    checkUntilTimeoutCustom(FUTURE_TIMEOUT_MEDIUM, PollInterval):
+      service.attempts == 1
+    await service.stopSendService()
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+
+    receiveCopy(task)
+
+    check await log.waitPropagated(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
 
   asyncTest "a second start while the service runs changes nothing":
     privateAccess(SendService)

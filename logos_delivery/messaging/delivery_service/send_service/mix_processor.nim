@@ -178,6 +178,26 @@ method checkBeforeSend*(
     )
   return ok()
 
+proc publishUntilNetworkHasMessage(
+    self: MixSendProcessor, task: DeliveryTask
+): Future[Opt[WakuLightPushResult]] {.async.} =
+  ## Publishes the message over mix, and stops when the network has it.
+  ## Returns the result of the publish, or none when the network had the message first.
+  let publish =
+    self.waku.lightpushPublishToAny(task.pubsubTopic, task.msg, mixify = true)
+  let networkHasMessageWait = task.waitForNetworkHasMessage()
+  try:
+    discard await race(FutureBase(publish), FutureBase(networkHasMessageWait))
+  except CancelledError as exc:
+    await publish.cancelAndWait()
+    raise exc
+  finally:
+    networkHasMessageWait.cancelSoon()
+  if not publish.finished():
+    await publish.cancelAndWait()
+    return Opt.none(WakuLightPushResult)
+  return Opt.some(await publish)
+
 method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.async.} =
   # No wait can make the message fit, so check the size before the reasons that
   # a wait can clear. A task that is too large has no mix attempt, so it must not
@@ -215,9 +235,11 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
   debug "Trying message delivery via Mix",
     msgHash = task.msgHash.to0xHex(), tryCount = task.tryCount
 
-  let numLightpushServers = (
-    await self.waku.lightpushPublishToAny(task.pubsubTopic, task.msg, mixify = true)
-  ).valueOr:
+  let published = (await self.publishUntilNetworkHasMessage(task)).valueOr:
+    # The network has the message, so the send service completes the task.
+    return
+
+  let numLightpushServers = published.valueOr:
     debug "MixSendProcessor.sendImpl failed", error = error.desc.get($error.code)
 
     if error.isRlnRejection():

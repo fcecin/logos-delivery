@@ -15,5 +15,6 @@ import
   ./test_wakunode_peer_manager,
   ./test_wakunode_health_monitor,
   ./test_wakunode_restart,
+  ./test_wakunode_send_copy,
   ./test_wakunode_sharding,
   ./peer_manager/test_all

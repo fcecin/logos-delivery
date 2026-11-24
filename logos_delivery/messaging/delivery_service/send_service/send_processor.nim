@@ -54,6 +54,11 @@ proc resend*(
       return
     currentProcessor = currentProcessor.fallbackProcessor
 
+proc markPropagated*(task: DeliveryTask) =
+  task.state = DeliveryState.SuccessfullyPropagated
+  if task.firstPropagatedTime.isNone():
+    task.firstPropagatedTime = Opt.some(Moment.now())
+
 proc parkForRlnProofRefresh*(task: DeliveryTask, waku: Waku, errorDesc: string) =
   ## The service refused the task's proof as RLN-invalid: its proof went stale
   ## against a moved merkle root. Schedules a background merkle-path refresh and
@@ -79,7 +84,8 @@ method process*(
     if currentProcessor.isValidProcessor(task):
       await currentProcessor.sendImpl(task)
     currentProcessor = currentProcessor.fallbackProcessor
-    keepTrying = task.state == DeliveryState.FallbackRetry
+    keepTrying =
+      task.state == DeliveryState.FallbackRetry and not task.networkHasMessage()
 
   # A task still in `FallbackRetry` exhausted the chain without delivering, and
   # one still in `Entry` was never attempted because no processor had a usable

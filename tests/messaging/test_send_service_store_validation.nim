@@ -15,7 +15,7 @@ import
   logos_delivery/messaging/rate_limit_manager/rate_limit_manager,
   logos_delivery/messaging/delivery_service/send_service/
     [send_service, send_processor, lightpush_processor, delivery_task],
-  logos_delivery/api/events/messaging_client_events
+  logos_delivery/api/events/[kernel_events, messaging_client_events]
 import ../testlib/[futures, testasync, wakunodeconf, wakucore, wakunode]
 import ../waku_store/store_utils
 import ../waku_lightpush/lightpush_utils
@@ -139,6 +139,29 @@ method process(self: ScriptedProc, task: DeliveryTask): Future[void] {.async.} =
     task.firstPropagatedTime = Opt.some(Moment.now())
   task.state = DeliveryState.SuccessfullyPropagated
 
+type UnansweredProc = ref object of BaseSendProcessor
+  ## An attempt with no answer, each time, over mix or in the clear.
+  overMix: bool
+
+method process(self: UnansweredProc, task: DeliveryTask): Future[void] {.async.} =
+  task.anonymized = self.overMix
+  task.tryCount.inc()
+  task.state = DeliveryState.NextRoundRetry
+
+type MixThenPlainProc = ref object of BaseSendProcessor
+  ## The first attempt is over mix, with no answer.
+  ## The copy comes during the second one, which succeeds in the clear.
+
+method process(self: MixThenPlainProc, task: DeliveryTask): Future[void] {.async.} =
+  task.tryCount.inc()
+  if task.tryCount == 1:
+    task.anonymized = true
+    task.state = DeliveryState.NextRoundRetry
+    return
+  MessageSeenEvent.emit(self.brokerCtx, task.pubsubTopic, task.msg)
+  task.state = DeliveryState.SuccessfullyPropagated
+  task.firstPropagatedTime = Opt.some(Moment.now())
+
 type PropagateAllProc = ref object of BaseSendProcessor
   ## Propagates each task at its first attempt.
 
@@ -259,6 +282,67 @@ suite "SendService - mix completion":
       await service.stopSendService()
     check await sent.waitCount(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
     check not await sent.waitCount(2).withTimeout(FUTURE_TIMEOUT_SHORT)
+
+  asyncTest "a copy completes a mixed send with MessageSent":
+    ## A Store query would name the message from this node's own address.
+    let sent = EventCounter()
+    let listener = countSent(sent)
+    defer:
+      await MessageSentEvent.dropListener(waku.brokerCtx, listener)
+    let service = waku.reliableService(UnansweredProc(overMix: true))
+    let task = newTask("mixed-copy")
+    check (service.enqueue(task)).isOk()
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+    checkUntilTimeout:
+      task.tryCount >= 1
+
+    MessageSeenEvent.emit(waku.brokerCtx, task.pubsubTopic, task.msg)
+
+    check await sent.waitCount(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
+    check not service.awaitsStoreValidation(task)
+
+  asyncTest "a copy during a plain attempt after a mix attempt asks no Store node":
+    ## Mix can have carried the message, so the query would name it.
+    let sent = EventCounter()
+    let listener = countSent(sent)
+    defer:
+      await MessageSentEvent.dropListener(waku.brokerCtx, listener)
+    let service = waku.reliableService(MixThenPlainProc(brokerCtx: waku.brokerCtx))
+    let task = newTask("mix-then-plain")
+    check (service.enqueue(task)).isOk()
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+
+    check await sent.waitCount(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
+    check:
+      task.tryCount == 2
+      not service.awaitsStoreValidation(task)
+
+  asyncTest "a copy propagates a plain send that still waits for a Store confirmation":
+    let sent = EventCounter()
+    let listener = countSent(sent)
+    defer:
+      await MessageSentEvent.dropListener(waku.brokerCtx, listener)
+    let service = waku.reliableService(UnansweredProc(overMix: false))
+    let task = newTask("plain-copy")
+    check (service.enqueue(task)).isOk()
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+    checkUntilTimeout:
+      task.tryCount >= 1
+
+    MessageSeenEvent.emit(waku.brokerCtx, task.pubsubTopic, task.msg)
+
+    checkUntilTimeout:
+      task.propagatedEventEmitted
+      not task.storeAnswer.isNil()
+    check:
+      service.awaitsStoreValidation(task)
+      sent.value == 0
 
   asyncTest "reliability off: a mixed send ends the same as a plain one (no MessageSent)":
     ## With store reliability off, a plain and a mixed send both end at

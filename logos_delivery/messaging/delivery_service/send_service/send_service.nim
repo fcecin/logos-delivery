@@ -11,7 +11,7 @@ import
   logos_delivery/waku/waku,
   logos_delivery/waku/api/[store, publish],
   logos_delivery/messaging/rate_limit_manager/rate_limit_manager
-import logos_delivery/api/events/messaging_client_events
+import logos_delivery/api/events/[kernel_events, messaging_client_events]
 import logos_delivery/api/conf/modes
 import logos_delivery/messaging/messaging_metrics
 
@@ -68,6 +68,8 @@ type SendService* = ref object of RootObj
     ## Chronos wakes the waiters in the order that they started to wait, so the
     ## waiting tasks reach `admissionLock` in the order that they started to wait.
   retryLoopHandle: Future[void] ## The `retryLoop`, nil while the service does not run.
+  messageSeenListener: MessageSeenEventListener
+    ## Finds the copies of queued messages in what this node receives.
   attempts: int
     ## The number of attempts that ended, in admission or in a send. Only tests
     ## read it.
@@ -404,9 +406,9 @@ proc reportPropagated(self: SendService, task: DeliveryTask) =
   MessagePropagatedEvent.emit(self.brokerCtx, task.msgHash.to0xHex())
   task.propagatedEventEmitted = true
   if task.propagatedAnonymously and self.storeConfirmationExpected(task):
-    # The exit's reply completes a mixed send when a plain send would wait for
-    # a store confirmation, so both paths end with the same event. The INFO line
-    # omits the hash.
+    # The exit's reply, or a copy from the network, completes a mixed send when a
+    # plain send would wait for a store confirmation, so both paths end with the
+    # same event. The INFO line omits the hash.
     info "Message successfully sent over mix"
     MessageSentEvent.emit(self.brokerCtx, task.msgHash.to0xHex())
 
@@ -455,8 +457,9 @@ proc runAdmission(
   await self.admissionLock.acquire()
   try:
     # The wait for the lock can use the rest of the window. A task past its
-    # window gets no proof, so it draws no RLN message id.
-    if task.isDeliveryTimedOut(self.deliveryWindow):
+    # window gets no proof, so it draws no RLN message id. Neither does a task whose
+    # message came back from the network in that wait.
+    if task.isDeliveryTimedOut(self.deliveryWindow) or task.networkHasMessage():
       return false
     return await self.admitAndProve(task)
   except CancelledError as exc:
@@ -478,17 +481,33 @@ proc retryLoop(self: SendService) {.async: (raises: [CancelledError]).} =
     await sleepAsync(self.retryInterval)
     self.retryNow()
 
+proc setPropagatedIfNetworkHasMessage(task: DeliveryTask): bool =
+  ## Marks the task propagated when the network has its message.
+  ## Call it after each wait, before code that can send again or fail the task.
+  if not task.networkHasMessage():
+    return false
+  debug "The network has the message of a send", msgHash = task.msgHash.to0xHex()
+  task.markPropagated()
+  # Mix can have carried the message, so no Store query may name it from this node.
+  task.propagatedAnonymously = task.anonymized
+  return true
+
 proc sendUntilPropagated(
     self: SendService, task: DeliveryTask
 ): Future[bool] {.async: (raises: [CancelledError]).} =
   ## Makes the first attempt at once, then one attempt at each tick of
   ## `retryLoop`, until the task propagates. Returns false when the task failed.
   while true:
+    # An earlier attempt can have sent the message, also one that a stop cancelled.
+    if task.setPropagatedIfNetworkHasMessage():
+      self.reportPropagated(task)
+      return true
     # A restart can come after the window, and validators would refuse the
     # message then, so the window is checked before each attempt too.
     if self.failExpired(task):
       return false
-    if not self.needsAdmission(task) or await self.runAdmission(task):
+    let admitted = not self.needsAdmission(task) or await self.runAdmission(task)
+    if admitted and not task.networkHasMessage():
       # A slow RLN proof can use the rest of the window, and validators would
       # refuse the message after it.
       if self.failExpired(task):
@@ -509,6 +528,7 @@ proc sendUntilPropagated(
         if task.tryCount > triesBefore:
           task.admissionRefundable = false
     self.attempts.inc()
+    discard task.setPropagatedIfNetworkHasMessage()
     case task.state
     of DeliveryState.SuccessfullyPropagated:
       self.reportPropagated(task)
@@ -668,12 +688,30 @@ proc enqueue*(
   self.startDeliverSoon(task)
   return ok(task.msgHash)
 
+proc onMessageSeen(self: SendService, pubsubTopic: PubsubTopic, msg: WakuMessage) =
+  ## Marks the queued task of `msg`, a message that comes from the network.
+  ## Before the first attempt the task sent nothing, so `msg` is no copy of a send.
+  ## The filter client drops a push that this node did not ask for, see `isRequested`.
+  if self.deliveryTasks.len == 0:
+    return
+  let task = self.deliveryTasks.getOrDefault(computeMessageHash(pubsubTopic, msg))
+  if not task.isNil() and task.tryCount > 0:
+    task.setNetworkHasMessage()
+
 proc startSendService*(self: SendService) =
   ## Starts each task. Call it after `stopSendService` ends. A call while the
   ## service runs does nothing.
   if self.running:
     return
   self.running = true
+  self.messageSeenListener = MessageSeenEvent.listen(
+    self.brokerCtx,
+    proc(event: MessageSeenEvent) {.async: (raises: []).} =
+      self.onMessageSeen(event.topic, event.message),
+  ).valueOr:
+    # Without the listener, a copy of a message completes no send.
+    error "Failed to set MessageSeenEvent listener", error = error
+    MessageSeenEventListener()
   for task in self.deliveryTasks.values:
     self.startDeliverSoon(task)
   self.retryLoopHandle = self.retryLoop()
@@ -682,9 +720,11 @@ proc startSendService*(self: SendService) =
 
 proc stopSendService*(self: SendService) {.async: (raises: []).} =
   ## Cancels each `deliver`, `retryLoop`, the Store validation loop and each
-  ## resend. The tasks stay in the send queue with no event, and
-  ## `startSendService` starts them again.
+  ## resend, and drops the `MessageSeenEvent` listener. The tasks stay in the send
+  ## queue with no event, and `startSendService` starts them again.
   self.running = false
+  let messageSeenListener = self.messageSeenListener
+  self.messageSeenListener = MessageSeenEventListener()
   var handles: seq[Future[void]]
   for handle in [self.retryLoopHandle, self.storeValidationHandle]:
     if not handle.isNil():
@@ -699,3 +739,4 @@ proc stopSendService*(self: SendService) {.async: (raises: []).} =
     if task.isRunning():
       handles.add(task.deliverHandle)
   await cancelAndWait(handles)
+  await MessageSeenEvent.dropListener(self.brokerCtx, messageSeenListener)

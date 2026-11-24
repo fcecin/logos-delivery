@@ -47,8 +47,12 @@ type DeliveryTask* = ref object
     ## Set at the first anonymous send attempt and never cleared; from then on,
     ## the INFO and ERROR records of this task withhold the hash.
   propagatedAnonymously*: bool
-    ## Set when an anonymous path propagated the message. No store node confirms
-    ## it: the query would name the message from this node's own address.
+    ## Set when an anonymous path propagated the message, or when a copy completed
+    ## an anonymized task. No store node confirms it: the query would name the
+    ## message from this node's own address.
+  networkHasMessageEvent: AsyncEvent
+    ## Fires when a copy of the message comes to this node from the network.
+    ## It never clears, and it is nil until the first use.
   lastStoreQueryTime*: Opt[Moment]
     ## When a Store peer was last asked about this task, none before the first query.
   storeValidationWaited*: timer.Duration
@@ -114,6 +118,24 @@ proc isDeliveryTimedOut*(self: DeliveryTask, window: timer.Duration): bool =
   ## timestamp. Store and RLN validators refuse a message far off their clock, so
   ## a later attempt would be refused anyway.
   return self.firstPropagatedTime.isNone() and self.messageAge() > window
+
+proc getOrCreateNetworkHasMessageEvent(self: DeliveryTask): AsyncEvent =
+  if self.networkHasMessageEvent.isNil():
+    self.networkHasMessageEvent = newAsyncEvent()
+  return self.networkHasMessageEvent
+
+proc setNetworkHasMessage*(self: DeliveryTask) =
+  ## Records a copy of the message that relay or filter delivered to this node.
+  ## A send of this node is no copy, and neither is the answer of another node.
+  self.getOrCreateNetworkHasMessageEvent().fire()
+
+proc networkHasMessage*(self: DeliveryTask): bool =
+  return not self.networkHasMessageEvent.isNil() and self.networkHasMessageEvent.isSet()
+
+proc waitForNetworkHasMessage*(
+    self: DeliveryTask
+): Future[void] {.async: (raises: [CancelledError], raw: true).} =
+  return self.getOrCreateNetworkHasMessageEvent().wait()
 
 proc isEphemeral*(self: DeliveryTask): bool =
   return self.msg.ephemeral

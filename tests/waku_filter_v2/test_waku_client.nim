@@ -1,13 +1,20 @@
 {.used.}
 
-import std/[sequtils, json], testutils/unittests, results, chronos, metrics
+import
+  std/[sequtils, json],
+  testutils/unittests,
+  results,
+  chronos,
+  metrics,
+  libp2p/protocols/protocol,
+  libp2p/stream/connection
 
 import
   logos_delivery/waku/node/peer_manager,
   logos_delivery/waku/waku_node,
   logos_delivery/waku/waku_core,
   logos_delivery/waku/waku_filter_v2/
-    [common, client, subscriptions, protocol, protocol_metrics, rpc_codec],
+    [common, client, subscriptions, protocol, protocol_metrics, rpc, rpc_codec],
   ../testlib/[wakucore, testasync, testutils, futures, sequtils, wakunode],
   ./waku_filter_utils,
   ../resources/payloads
@@ -2644,3 +2651,312 @@ suite "Waku Filter - End to End":
           ]
         )
       ).allIt(not it.read())
+
+suite "Waku Filter client pushes":
+  ## The client accepts only the pushes that it asked a service node for.
+  const OtherTopic = ContentTopic("/test/1/other/proto")
+
+  var clientSwitch {.threadvar.}: Switch
+  var client {.threadvar.}: WakuFilterClient
+  var received {.threadvar.}: seq[WakuMessage]
+
+  asyncSetup:
+    received = @[]
+    clientSwitch = newStandardSwitch()
+    client = await newTestWakuFilterClient(clientSwitch)
+    client.registerPushHandler(
+      proc(
+          pubsubTopic: PubsubTopic, message: WakuMessage
+      ): Future[void] {.async, closure, gcsafe.} =
+        received.add(message)
+    )
+    await clientSwitch.start()
+
+  asyncTeardown:
+    await allFutures(client.stop(), clientSwitch.stop())
+
+  proc push(
+      service: Switch,
+      contentTopic = DefaultContentTopic,
+      pubsubTopic = DefaultPubsubTopic,
+  ) {.async.} =
+    ## Returns when the client has handled the push.
+    let stream = await service.dial(
+      clientSwitch.peerInfo.peerId, clientSwitch.peerInfo.addrs, WakuFilterPushCodec
+    )
+    let msgPush = MessagePush(
+      pubsubTopic: pubsubTopic,
+      wakuMessage: fakeWakuMessage(contentTopic = contentTopic),
+    )
+    await stream.writeLp(msgPush.encode())
+    await stream.closeWithEOF()
+
+  proc newFakeService(
+      answer: proc(request: int): Future[uint32] {.async, gcsafe.}
+  ): Future[Switch] {.async.} =
+    ## A filter service node.
+    ## `answer` gets the number of each request, and returns the status code.
+    let service = newStandardSwitch()
+    var requests = 0
+    proc handle(conn: Connection, proto: string) {.async: (raises: [CancelledError]).} =
+      requests.inc()
+      try:
+        let buf = await conn.readLp(DefaultMaxSubscribeSize.int)
+        var response = FilterSubscribeResponse.ok(
+          FilterSubscribeRequest.decode(buf).expect("a request").requestId
+        )
+        response.statusCode = await answer(requests)
+        await conn.writeLp(response.encode())
+      except CancelledError as exc:
+        raise exc
+      except CatchableError as exc:
+        checkpoint("the service node failed: " & exc.msg)
+      finally:
+        await conn.close()
+
+    service.mount(LPProtocol.new(@[WakuFilterSubscribeCodec], handle))
+    await service.start()
+    return service
+
+  const
+    Accepted = 200'u32
+    Refused = FilterSubscribeErrorKind.SERVICE_UNAVAILABLE.uint32
+
+  proc acceptAll(request: int): Future[uint32] {.async, gcsafe.} =
+    return Accepted
+
+  proc subscribeTo(
+      service: Switch, contentTopic = DefaultContentTopic
+  ): Future[FilterSubscribeResult] {.async.} =
+    return await client.subscribe(
+      service.peerInfo.toRemotePeerInfo(), DefaultPubsubTopic, contentTopic
+    )
+
+  asyncTest "client drops a push that it did not ask for":
+    let service = await newFakeService(acceptAll)
+    let otherService = await newFakeService(acceptAll)
+    defer:
+      await allFutures(service.stop(), otherService.stop())
+    check (await service.subscribeTo()).isOk()
+
+    await otherService.push()
+    await service.push(contentTopic = OtherTopic)
+    await service.push(pubsubTopic = "/waku/2/rs/0/1")
+    check received.len == 0
+
+    await service.push()
+    check received.len == 1
+
+  asyncTest "client drops a push after an unsubscribe":
+    let service = await newFakeService(acceptAll)
+    defer:
+      await service.stop()
+    let servicePeer = service.peerInfo.toRemotePeerInfo()
+    check (await service.subscribeTo()).isOk()
+    check (await service.subscribeTo(OtherTopic)).isOk()
+
+    check (
+      await client.unsubscribe(servicePeer, DefaultPubsubTopic, DefaultContentTopic)
+    ).isOk()
+    await service.push()
+    check received.len == 0
+
+    await service.push(contentTopic = OtherTopic)
+    check received.len == 1
+
+    check (await client.unsubscribeAll(servicePeer)).isOk()
+    await service.push(contentTopic = OtherTopic)
+    check received.len == 1
+
+  asyncTest "client receives a push after a refused unsubscribe":
+    ## A service node that refuses the unsubscribe still pushes.
+    proc acceptFirst(request: int): Future[uint32] {.async, gcsafe.} =
+      return if request == 1: Accepted else: Refused
+
+    let service = await newFakeService(acceptFirst)
+    defer:
+      await service.stop()
+    let servicePeer = service.peerInfo.toRemotePeerInfo()
+    check (await service.subscribeTo()).isOk()
+
+    check (
+      await client.unsubscribe(servicePeer, DefaultPubsubTopic, DefaultContentTopic)
+    ).isErr()
+    check (await client.unsubscribe(servicePeer, DefaultPubsubTopic, OtherTopic)).isErr()
+    await service.push()
+    check received.len == 1
+
+    check (await client.unsubscribeAll(servicePeer)).isErr()
+    await service.push()
+    check received.len == 2
+
+    await service.push(contentTopic = OtherTopic)
+    check received.len == 2
+
+  asyncTest "client drops a push after an unsubscribe that finds no subscription":
+    ## The service node holds no subscription, so it has nothing to push.
+    proc notFound(request: int): Future[uint32] {.async, gcsafe.} =
+      return if request == 1: Accepted else: FilterSubscribeErrorKind.NOT_FOUND.uint32
+
+    let service = await newFakeService(notFound)
+    defer:
+      await service.stop()
+    check (await service.subscribeTo()).isOk()
+
+    check (await client.unsubscribeAll(service.peerInfo.toRemotePeerInfo())).isErr()
+    await service.push()
+    check received.len == 0
+
+  asyncTest "client receives a push after a lost unsubscribe response":
+    ## The service node can still have the subscription.
+    proc loseSecond(request: int): Future[uint32] {.async, gcsafe.} =
+      if request == 2:
+        raise newException(CatchableError, "the response gets lost")
+      return Accepted
+
+    let service = await newFakeService(loseSecond)
+    defer:
+      await service.stop()
+    check (await service.subscribeTo()).isOk()
+
+    check (await client.unsubscribeAll(service.peerInfo.toRemotePeerInfo())).isErr()
+    await service.push()
+    check received.len == 1
+
+  asyncTest "client receives a push after a subscribe during an unsubscribe":
+    ## The answer of the unsubscribe comes after the answer of the subscribe.
+    let unsubscribeRequest = newFuture[void]("unsubscribe-request")
+    let subscribed = newFuture[void]("subscribed")
+    proc answerUnsubscribeLast(request: int): Future[uint32] {.async, gcsafe.} =
+      if request == 2:
+        unsubscribeRequest.complete()
+        await subscribed
+      return Accepted
+
+    let service = await newFakeService(answerUnsubscribeLast)
+    defer:
+      await service.stop()
+    check (await service.subscribeTo()).isOk()
+    let unsubscribe = client.unsubscribe(
+      service.peerInfo.toRemotePeerInfo(), DefaultPubsubTopic, DefaultContentTopic
+    )
+    check await unsubscribeRequest.withTimeout(FUTURE_TIMEOUT_MEDIUM)
+    check (await service.subscribeTo()).isOk()
+    subscribed.complete()
+    check (await unsubscribe).isOk()
+
+    await service.push()
+    check received.len == 1
+
+  asyncTest "client receives a push after a refused refresh":
+    proc acceptFirst(request: int): Future[uint32] {.async, gcsafe.} =
+      return if request == 1: Accepted else: Refused
+
+    let service = await newFakeService(acceptFirst)
+    defer:
+      await service.stop()
+    check (await service.subscribeTo()).isOk()
+    check (await service.subscribeTo()).isErr()
+
+    await service.push()
+    check received.len == 1
+
+  asyncTest "client receives a push that comes before the subscribe response":
+    var service: Switch
+    proc pushThenAccept(request: int): Future[uint32] {.async, gcsafe.} =
+      await service.push()
+      return Accepted
+
+    service = await newFakeService(pushThenAccept)
+    defer:
+      await service.stop()
+
+    check (await service.subscribeTo()).isOk()
+    check received.len == 1
+
+  asyncTest "client receives a push after a lost subscribe response":
+    ## The service node can have the subscription, also when the client has no answer.
+    proc loseResponse(request: int): Future[uint32] {.async, gcsafe.} =
+      raise newException(CatchableError, "the response gets lost")
+
+    let service = await newFakeService(loseResponse)
+    defer:
+      await service.stop()
+
+    check (await service.subscribeTo()).isErr()
+    await service.push()
+    check received.len == 1
+
+  proc disconnectFrom(service: Switch) {.async.} =
+    ## A push can reuse a connection that only one side closed.
+    await clientSwitch.disconnect(service.peerInfo.peerId)
+    checkUntilTimeout:
+      not service.isConnected(clientSwitch.peerInfo.peerId)
+
+  asyncTest "client keeps the criteria of a subscribe that dials":
+    ## libp2p deletes the address of a peer some time after its last connection.
+    let service = await newFakeService(acceptAll)
+    let otherService = await newFakeService(acceptAll)
+    defer:
+      await allFutures(service.stop(), otherService.stop())
+    check (await service.subscribeTo()).isOk()
+    await service.disconnectFrom()
+    discard clientSwitch.peerStore[AddressBook].del(service.peerInfo.peerId)
+
+    # A server that accepts TCP and never answers keeps the dial of `service` open.
+    var accepted: seq[StreamTransport]
+    proc mute(server: StreamServer, conn: StreamTransport) {.async: (raises: []).} =
+      accepted.add(conn)
+
+    let listener = createStreamServer(initTAddress("127.0.0.1:0"), mute, {ReuseAddr})
+    listener.start()
+    defer:
+      for conn in accepted:
+        await conn.closeWait()
+      listener.stop()
+      await listener.closeWait()
+    let address =
+      MultiAddress.init("/ip4/127.0.0.1/tcp/" & $listener.localAddress().port).tryGet()
+    let dialing = client.subscribe(
+      RemotePeerInfo.init(service.peerInfo.peerId, @[address]),
+      DefaultPubsubTopic,
+      DefaultContentTopic,
+    )
+
+    check (await otherService.subscribeTo()).isOk()
+    check not dialing.finished()
+    await service.push()
+    check received.len == 1
+    await dialing.cancelAndWait()
+
+  asyncTest "client receives a push of a connected service node that the peer store deleted":
+    let service = await newFakeService(acceptAll)
+    let otherService = await newFakeService(acceptAll)
+    defer:
+      await allFutures(service.stop(), otherService.stop())
+    check (await service.subscribeTo()).isOk()
+    clientSwitch.peerStore.del(service.peerInfo.peerId)
+
+    check (await otherService.subscribeTo()).isOk()
+    await service.push()
+    check received.len == 1
+
+  asyncTest "client forgets a service node that the peer store deleted":
+    ## The table of the criteria has no other limit.
+    let service = await newFakeService(acceptAll)
+    let otherService = await newFakeService(acceptAll)
+    defer:
+      await allFutures(service.stop(), otherService.stop())
+    check (await service.subscribeTo()).isOk()
+
+    # A disconnect alone does not end the subscription.
+    await service.disconnectFrom()
+    check (await otherService.subscribeTo()).isOk()
+    await service.push()
+    check received.len == 1
+
+    await service.disconnectFrom()
+    clientSwitch.peerStore.del(service.peerInfo.peerId)
+    check (await otherService.subscribeTo()).isOk()
+    await service.push()
+    check received.len == 1
