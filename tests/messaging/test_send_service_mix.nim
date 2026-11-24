@@ -5,7 +5,7 @@ import chronos, testutils/unittests, results, stew/byteutils
 
 import
   libp2p_mix,
-  libp2p_mix/curve25519,
+  libp2p_mix/[curve25519, mix_protocol],
   mix_rln_spam_protection/module_api,
   logos_delivery/waku/node/waku_node,
   logos_delivery/waku/net/bound_ports,
@@ -61,6 +61,29 @@ method process(self: PassCounter, task: DeliveryTask): Future[void] {.async.} =
   except CancelledError as exc:
     inc self.cancelled
     raise exc
+
+type UnresponsiveServer = ref object
+  ## A TCP server that accepts each connection and never answers.
+  listener: StreamServer
+  clients: seq[StreamTransport]
+
+proc newUnresponsiveServer(): UnresponsiveServer =
+  let server = UnresponsiveServer()
+  proc keep(listener: StreamServer, client: StreamTransport) {.async: (raises: []).} =
+    server.clients.add(client)
+
+  server.listener = createStreamServer(initTAddress("127.0.0.1:0"), keep, {ReuseAddr})
+  server.listener.start()
+  return server
+
+proc port(server: UnresponsiveServer): int =
+  return int(server.listener.localAddress().port)
+
+proc stop(server: UnresponsiveServer) {.async.} =
+  for client in server.clients:
+    await client.closeWait()
+  server.listener.stop()
+  await server.listener.closeWait()
 
 type RetryingProcessor = ref object of BaseSendProcessor
   ## Leaves every task for a retry, with `reason` as the outcome's `desc`.
@@ -965,21 +988,13 @@ suite "SendService - anonymity level with a mounted mix":
 
   asyncTest "a restart makes no mix attempt inside MixRetryInterval":
     ## The stop cancels an attempt that waits for a first hop that does not answer.
-    var held: seq[StreamTransport]
-    proc mute(server: StreamServer, client: StreamTransport) {.async: (raises: []).} =
-      held.add(client)
-
-    let listener = createStreamServer(initTAddress("127.0.0.1:0"), mute, {ReuseAddr})
-    listener.start()
+    let firstHops = newUnresponsiveServer()
     defer:
-      for client in held:
-        await client.closeWait()
-      listener.stop()
-      await listener.closeWait()
+      await firstHops.stop()
 
     await waku.node.start()
     for i in 0 ..< MinMixPoolSize:
-      addMixPeer(int(listener.localAddress().port), lightpush = true)
+      addMixPeer(firstHops.port(), lightpush = true)
 
     let mix = MixSendProcessor.new(
       waku, waku.brokerCtx, AnonymityLevel.Required, chronos.minutes(1)
@@ -1004,6 +1019,28 @@ suite "SendService - anonymity level with a mounted mix":
     checkUntilTimeout:
       counter.passes >= 5
     check task.tryCount == 1
+
+  asyncTest "a publish cancelled in its send leaves no reply credentials":
+    ## The first hops accept the connection and do not answer.
+    let firstHops = newUnresponsiveServer()
+    defer:
+      await firstHops.stop()
+
+    await waku.node.start()
+    for i in 0 ..< MinMixPoolSize:
+      addMixPeer(firstHops.port(), lightpush = true)
+
+    let publishFut = waku.lightpushPublishToAny(
+      shard, fakeWakuMessage(contentTopic = "/test/1/anonymity/proto"), mixify = true
+    )
+    checkUntilTimeout:
+      waku.node.wakuMix.surbCredsLen() == 1
+      firstHops.clients.len > 0
+
+    await publishFut.cancelAndWait()
+    check:
+      publishFut.cancelled()
+      waku.node.wakuMix.surbCredsLen() == 0
 
   asyncTest "a mix attempt marks the task before it can know whether it worked":
     ## The exit publishes before it replies, so the mark must be set before any
@@ -1324,6 +1361,7 @@ suite "Mix send path - the reply budget":
     if not publishFut.finished():
       publishFut.cancelSoon()
       raiseAssert "publishOverMix did not return, so its send would never end"
+    check conn.wasResetLocally()
     return await publishFut
 
   asyncTest "the mix size check counts the bytes that the lightpush client writes":
@@ -1341,6 +1379,24 @@ suite "Mix send path - the reply budget":
     check:
       conn.writes == @[size] # one write, so one mix message
       limit == getMaxMessageSizeForCodec(WakuLightPushCodec, MixLightpushSurbs).get()
+
+  asyncTest "a publish cancelled in its reply wait resets the connection":
+    let conn = newStubMixConn()
+    let publishFut = waku.node.publishOverMix(
+      Connection(conn),
+      PubsubTopic("/waku/2/rs/3/0"),
+      fakeWakuMessage(contentTopic = "/test/1/anonymity/proto"),
+      FUTURE_TIMEOUT_LONG,
+    )
+    check:
+      conn.writes.len == 1 # the send ended
+      not publishFut.finished()
+
+    await publishFut.cancelAndWait()
+    check:
+      publishFut.cancelled()
+      conn.wasResetLocally()
+      conn.replyReceivedFut.completed() # the reset ended the wait for the reply
 
   asyncTest "a dropped reply is given up on instead of waited on forever":
     let res = await givesUpOn(stallInSend = false)
