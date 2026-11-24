@@ -14,11 +14,13 @@ import
   libp2p/crypto/crypto,
   libp2p/peerid,
   libp2p/multiaddress,
-  libp2p_mix/[curve25519, key_rotation, mix_protocol, mix_metrics]
+  libp2p_mix/[curve25519, key_rotation, mix_protocol, mix_metrics],
+  brokers/broker_context
 
 import
   logos_delivery/waku/
     [waku_core, node/peer_manager, waku_node, waku_mix, waku_lightpush],
+  logos_delivery/waku/node/subscription_manager,
   logos_delivery/waku/node/peer_manager/waku_peer_store,
   logos_delivery/waku/waku,
   logos_delivery/waku/api/publish,
@@ -452,7 +454,10 @@ suite "Waku Mix - end to end transport":
     nodeConf.clusterId = Opt.some(DefaultClusterId)
     let conf = nodeConf.toWakuConf().valueOr:
       raiseAssert error
-    let waku = (await Waku.new(conf)).expect("Waku.new")
+    # Its own broker context keeps the relay events of the cores from its send service.
+    var waku: Waku
+    lockNewGlobalBrokerContext:
+      waku = (await Waku.new(conf)).expect("Waku.new")
     defer:
       discard await waku.stop()
     let kp = generateKeyPair().expect("mix key pair")
@@ -466,6 +471,8 @@ suite "Waku Mix - end to end transport":
     ).isOkOr:
       raiseAssert "mountMix sender: " & $error
     (await waku.start()).expect("start")
+    # No copy reaches the sender, so only the answer of the exit completes the send.
+    waku.node.subscriptionManager.unsubscribeShard(shard).expect("unsubscribe")
     await waku.node.connectToNodes(
       (0 ..< NumCore).toSeq().mapIt(mixnet.nodes[it].peerInfo.toRemotePeerInfo())
     )
@@ -513,6 +520,7 @@ suite "Waku Mix - end to end transport":
       task.state == DeliveryState.SuccessfullyPropagated
       task.propagatedAnonymously # no store query for this task
       task.anonymized # set at the attempt
+      not task.networkHasMessage()
       after.exited - before.exited >= 1.0
 
 suite "Waku Mix - end to end key rotation":

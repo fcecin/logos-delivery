@@ -28,3 +28,4 @@ const
   pushTimeoutFailure* = "push_timeout_failure"
   writeFailure* = "write_failure"
   readFailure* = "read_failure"
+  unsolicitedPush* = "unsolicited_push"

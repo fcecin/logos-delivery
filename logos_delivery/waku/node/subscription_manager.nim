@@ -85,8 +85,9 @@ proc registerRelayHandler(
       topic: PubsubTopic, msg: WakuMessage
   ): Future[void] {.async, gcsafe.} =
     await traceHandler(topic, msg)
-    await serveHandler(topic, msg)
+    # A send can wait for this event, so it goes out before the push and the write.
     await internalHandler(topic, msg)
+    await serveHandler(topic, msg)
 
     if node.legacyAppHandlers.hasKey(topic) and not node.legacyAppHandlers[topic].isNil():
       await node.legacyAppHandlers[topic](topic, msg)
