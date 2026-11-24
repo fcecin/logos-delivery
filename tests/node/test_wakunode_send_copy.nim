@@ -204,6 +204,32 @@ suite "Copies of sent messages":
       await seen.withTimeout(FUTURE_TIMEOUT_MEDIUM)
     archive.release.complete()
 
+  asyncTest "a mix attempt whose answer is lost marks the task":
+    ## The exit published the message, so a plain send of it would show the sender.
+    let net = await startMixNodes()
+    defer:
+      await net.stop(@[])
+    net.exit.dropAnswers()
+    let waku = await newSender()
+    defer:
+      discard await waku.stop()
+    await waku.connectTo(net)
+    # No copy comes, so the attempt ends at `MixReplyTimeout`.
+    waku.node.subscriptionManager.unsubscribeShard(DefaultPubsubTopic).expect(
+      "unsubscribe"
+    )
+    let service = newService(waku, AnonymityLevel.Preferred)
+    defer:
+      await service.stopSendService()
+    let task = newTask("lost-answer-no-copy")
+    check service.enqueue(task).isOk()
+
+    checkUntilTimeout:
+      task.mixMayHavePublished
+    check:
+      task.tryCount == 1
+      task.state == DeliveryState.NextRoundRetry
+
   asyncTest "a stop during a mix attempt ends its publish":
     ## A publish that continues keeps its reply credentials until its time limit.
     let net = await startMixNodes()

@@ -28,6 +28,7 @@ const DeliveryWindow* = chronos.seconds(15)
 const MixWindow* = chronos.seconds(10)
   ## The part of `DeliveryWindow` that a `Preferred` task spends on mix before it
   ## takes the plain path, which keeps the rest of the window.
+  ## A task with the `mixMayHavePublished` mark stays on mix for `DeliveryWindow`.
 
 const StoreValidationWindow* = chronos.seconds(30)
   ## The default wait for a Store node to report a propagated message. The
@@ -559,8 +560,9 @@ proc waitForStoreValidation(
   try:
     if left > ZeroDuration and await task.storeAnswer.withTimeout(left):
       task.state = DeliveryState.SuccessfullyValidated
-      # An anonymized task gets here only through the clear republish of a
-      # `Preferred` send whose mix reply was lost.
+      # An anonymized task gets here only through the plain fallback of a
+      # `Preferred` send, after mix attempts that the exit refused or that never
+      # left this node.
       info "Message successfully sent", msgHash = task.loggedHash()
       self.finish(task)
       MessageSentEvent.emit(self.brokerCtx, task.msgHash.to0xHex())
