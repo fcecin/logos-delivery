@@ -90,9 +90,9 @@ method isValidProcessor*(self: MixSendProcessor, task: DeliveryTask): bool {.gcs
   return true
 
 proc mixWindowElapsed(self: MixSendProcessor, task: DeliveryTask): bool =
-  ## True once `task` has spent its whole mix window, which bounds failed mix
-  ## attempts at either level. The window runs from the message timestamp, as
-  ## the delivery window does, so a new RLN proof does not start it again.
+  ## True once `task` has spent its whole mix window. The window runs from the
+  ## message timestamp, as the delivery window does, so a new RLN proof does not
+  ## start it again.
   return task.messageAge() > self.mixWindow
 
 proc mixUnusable(self: MixSendProcessor, task: DeliveryTask): MixUnusable =
@@ -119,6 +119,7 @@ proc decideWithoutMix(
   ## Hands a `Preferred` task to the plain path at once. Fails a `Required` task
   ## with the reason, once its message is older than `MixUnusableGrace` while
   ## mix is mounted.
+  ## A `Preferred` task with the `mixMayHavePublished` mark waits for mix.
   if not self.fallbackAllowed:
     if self.waku.mixMounted() and task.messageAge() <= MixUnusableGrace:
       task.errorDesc = unusable.reason()
@@ -128,6 +129,15 @@ proc decideWithoutMix(
       msgHash = task.msgHash.to0xHex(), reason = unusable.reason()
     task.state = DeliveryState.FailedToDeliver
     task.errorDesc = unusable.reason()
+    return
+
+  # The network can have the message from an earlier mix attempt.
+  # A plain send of it shows the address of this node.
+  if task.mixMayHavePublished:
+    debug "Mix cannot attempt the task, and an earlier mix attempt can have published it, so the task waits for mix",
+      msgHash = task.msgHash.to0xHex(), reason = unusable.reason()
+    task.errorDesc = unusable.reason()
+    task.state = DeliveryState.NextRoundRetry
     return
 
   if self.fellBackReason != unusable:
@@ -142,7 +152,8 @@ proc decideWithoutMix(
 proc decideTooLarge(self: MixSendProcessor, task: DeliveryTask, size, limit: int) =
   ## Fails a `Required` task at once, because no later pass can make the message
   ## fit. Hands a `Preferred` task to the plain path at once.
-  if not self.fallbackAllowed:
+  ## A task with the `mixMayHavePublished` mark fails as a `Required` task does.
+  if not self.fallbackAllowed or task.mixMayHavePublished:
     debug "Message too large for mix, failing the task",
       msgHash = task.msgHash.to0xHex(), size, limit
     task.state = DeliveryState.FailedToDeliver
@@ -154,6 +165,26 @@ proc decideTooLarge(self: MixSendProcessor, task: DeliveryTask, size, limit: int
     msgHash = task.msgHash.to0xHex(), size, limit
   task.errorDesc = "" # the plain path reports its own outcome
   task.state = DeliveryState.FallbackRetry
+
+proc mixFailed*(task: DeliveryTask, waku: Waku, error: ErrorStatus) =
+  ## Sets the state of `task` after a mix publish that failed with `error`.
+  ## Marks the task when the network can have the message.
+  if error.isRlnRejection():
+    task.parkForRlnProofRefresh(waku, error.desc.get($error.code))
+    return
+  # On the mix path, only the exit gives NO_PEERS_TO_RELAY.
+  # Such an exit gives the message to its store and filter clients before it answers.
+  if error.isUnanswered() or error.code == LightPushErrorCode.NO_PEERS_TO_RELAY:
+    task.mixMayHavePublished = true
+
+  case error.code
+  of LightPushErrorCode.NO_PEERS_TO_RELAY, LightPushErrorCode.TOO_MANY_REQUESTS,
+      LightPushErrorCode.OUT_OF_RLN_PROOF, LightPushErrorCode.SERVICE_NOT_AVAILABLE,
+      LightPushErrorCode.INTERNAL_SERVER_ERROR:
+    task.state = DeliveryState.NextRoundRetry
+  else:
+    task.state = DeliveryState.FailedToDeliver
+    task.errorDesc = error.desc.get($error.code)
 
 method checkBeforeSend*(
     self: MixSendProcessor, task: DeliveryTask
@@ -218,7 +249,9 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
     self.fellBackReason = MixUnusable.None
     info "Mix can carry messages again"
 
-  if self.fallbackAllowed and self.mixWindowElapsed(task):
+  # A task with the `mixMayHavePublished` mark stays on mix for the delivery window.
+  if self.fallbackAllowed and not task.mixMayHavePublished and
+      self.mixWindowElapsed(task):
     debug "Mix window elapsed, handing the task to the plain send path",
       msgHash = task.msgHash.to0xHex(), messageAge = task.messageAge()
     task.errorDesc = ""
@@ -235,25 +268,20 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
   debug "Trying message delivery via Mix",
     msgHash = task.msgHash.to0xHex(), tryCount = task.tryCount
 
-  let published = (await self.publishUntilNetworkHasMessage(task)).valueOr:
+  let attempt =
+    try:
+      await self.publishUntilNetworkHasMessage(task)
+    except CancelledError as exc:
+      # A stop ends this attempt with no answer, and the network can have its message.
+      task.mixMayHavePublished = true
+      raise exc
+  let published = attempt.valueOr:
     # The network has the message, so the send service completes the task.
     return
 
   let numLightpushServers = published.valueOr:
     debug "MixSendProcessor.sendImpl failed", error = error.desc.get($error.code)
-
-    if error.isRlnRejection():
-      task.parkForRlnProofRefresh(self.waku, error.desc.get($error.code))
-      return
-
-    case error.code
-    of LightPushErrorCode.NO_PEERS_TO_RELAY, LightPushErrorCode.TOO_MANY_REQUESTS,
-        LightPushErrorCode.OUT_OF_RLN_PROOF, LightPushErrorCode.SERVICE_NOT_AVAILABLE,
-        LightPushErrorCode.INTERNAL_SERVER_ERROR:
-      task.state = DeliveryState.NextRoundRetry
-    else:
-      task.state = DeliveryState.FailedToDeliver
-      task.errorDesc = error.desc.get($error.code)
+    task.mixFailed(self.waku, error)
     return
 
   if numLightpushServers > 0:

@@ -39,6 +39,10 @@ logScope:
 
 const MountWithoutRelayError* = "cannot mount lightpush because relay is not mounted"
 
+const MixTimedOutDesc* = "Waku lightpush over mix timed out"
+  ## The result text of a mix publish that did not end within `replyTimeout`.
+  ## Its write can still be open then.
+
 const MixReplyTimeout* = chronos.seconds(5)
   ## Time limit for one mix-routed lightpush, so a broken path costs one
   ## attempt.
@@ -92,9 +96,8 @@ proc publishOverMix*(
     await conn.reset()
     publishFut.cancelSoon()
     debug "Mix lightpush timed out", pubsubTopic = pubsubTopic, timeout = replyTimeout
-    return lighpushErrorResult(
-      LightPushErrorCode.SERVICE_NOT_AVAILABLE, "Waku lightpush over mix timed out"
-    )
+    return
+      lighpushErrorResult(LightPushErrorCode.SERVICE_NOT_AVAILABLE, MixTimedOutDesc)
 
   await deadline.cancelAndWait()
   return await publishFut
