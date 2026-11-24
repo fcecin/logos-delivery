@@ -15,41 +15,48 @@ import
   logos_delivery/waku/waku_enr/capabilities
 
 const
-  AdvertFormatVersion* = 1'u8
+  AdvertFormatVersion* = 2'u8
     ## Bumped whenever the layout changes, so a reader can refuse a payload it
     ## does not understand instead of misreading it.
 
-  AdvertHeaderLen* = 4
-    ## [0] format version, [1..2] cluster id, [3] capabilities bitfield. The
+  AdvertHeaderLen* = 5
+    ## [0] format version, [1..2] cluster id, [3..4] capabilities bitfield. The
     ## shard bitmap follows. See `selfAdvertisementData`.
+
+func decodeAdvert(data: openArray[byte]): Opt[seq[byte]] =
+  ## A `/logos/delivery` payload in the layout of version 2.
+  ## None when this node cannot read it.
+  let raw =
+    try:
+      cast[seq[byte]](base64.decode(cast[string](@data)))
+    except ValueError:
+      return Opt.none(seq[byte])
+  # Version 1 has one byte of capabilities.
+  # v0.39.0 is the first release that writes it.
+  let advert =
+    if raw.len >= 4 and raw[0] == 1'u8:
+      @[2'u8] & raw[1 .. 2] & @[0'u8] & raw[3 .. ^1]
+    else:
+      raw
+  if advert.len < AdvertHeaderLen or advert[0] != AdvertFormatVersion:
+    return Opt.none(seq[byte])
+  Opt.some(advert)
 
 func advertisedCapabilities*(data: openArray[byte]): Opt[CapabilitiesBitfield] =
   ## The capabilities of a `/logos/delivery` payload, or none when it is not
   ## one this version reads.
-  let raw =
-    try:
-      base64.decode(cast[string](@data))
-    except ValueError:
-      return Opt.none(CapabilitiesBitfield)
-  if raw.len < AdvertHeaderLen or raw[0].byte != AdvertFormatVersion:
-    return Opt.none(CapabilitiesBitfield)
-  Opt.some(CapabilitiesBitfield(raw[3].byte))
+  let advert = ?decodeAdvert(data)
+  Opt.some(CapabilitiesBitfield(advert[4]))
 
 func advertisedShards*(data: openArray[byte]): Opt[(uint16, seq[uint16])] =
   ## The cluster id and the shards of a `/logos/delivery` payload, or none
   ## when it is not one this version reads.
-  let raw =
-    try:
-      base64.decode(cast[string](@data))
-    except ValueError:
-      return Opt.none((uint16, seq[uint16]))
-  if raw.len < AdvertHeaderLen or raw[0].byte != AdvertFormatVersion:
-    return Opt.none((uint16, seq[uint16]))
-  let cluster = (uint16(raw[1].byte) shl 8) or uint16(raw[2].byte)
+  let advert = ?decodeAdvert(data)
+  let cluster = (uint16(advert[1]) shl 8) or uint16(advert[2])
   var shards: seq[uint16]
-  for byteIdx in AdvertHeaderLen ..< raw.len:
+  for byteIdx in AdvertHeaderLen ..< advert.len:
     for bit in 0 .. 7:
-      if (raw[byteIdx].byte and byte(1'u8 shl bit)) != 0:
+      if (advert[byteIdx] and byte(1'u8 shl bit)) != 0:
         shards.add(uint16((byteIdx - AdvertHeaderLen) * 8 + bit))
   Opt.some((cluster, shards))
 
@@ -78,15 +85,10 @@ func advertisedServing*(
 func withoutMixClaim*(data: seq[byte]): seq[byte] =
   ## The `/logos/delivery` payload `data` with the Mix capability cleared.
   ## A payload this version does not read is returned as it is.
-  var raw =
-    try:
-      base64.decode(cast[string](data))
-    except ValueError:
-      return data
-  if raw.len < AdvertHeaderLen or raw[0].byte != AdvertFormatVersion:
+  var advert = decodeAdvert(data).valueOr:
     return data
-  raw[3] = char(raw[3].byte and not byte(1'u8 shl ord(Capabilities.Mix)))
-  cast[seq[byte]](base64.encode(raw))
+  advert[4] = advert[4] and not byte(1'u8 shl ord(Capabilities.Mix))
+  cast[seq[byte]](base64.encode(advert))
 
 func advertisedMixKey*(services: openArray[DiscoveredService]): Opt[Curve25519Key] =
   ## The mix key of a peer whose record lists these services.
