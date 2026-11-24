@@ -1,6 +1,6 @@
 {.used.}
 
-import std/json
+import std/[json, sets]
 import chronos, results, stew/byteutils, testutils/unittests
 import libp2p/[crypto/crypto, crypto/secp, multiaddress, peerid, peerstore]
 import libp2p_mix/[curve25519, pool], brokers/broker_context
@@ -128,3 +128,31 @@ suite "waku_mix_add_peer":
     check:
       accepted.isOk()
       delivery.waku.node.getMixNodePoolSize() == 1
+
+  asyncTest "an accepted mix peer is a configured mix node":
+    let delivery = await newDelivery()
+    defer:
+      discard await delivery.stop()
+    let key = generateSecp256k1Key()
+
+    let accepted =
+      await delivery.waku_mix_add_peer(mixRecord(key, newMixKey(), PublicAddr))
+
+    check:
+      accepted.isOk()
+      PeerId.init(key).tryGet() in delivery.waku.node.peerManager.configuredMixNodes
+
+  asyncTest "a record of this node is refused":
+    ## Mix could draw this node as a hop or an exit and route a packet to itself.
+    let delivery = await newDelivery()
+    defer:
+      discard await delivery.stop()
+    let node = delivery.waku.node
+
+    let refused = await delivery.waku_mix_add_peer(
+      mixRecord(node.switch.peerInfo.privateKey, newMixKey(), PrivateAddr)
+    )
+
+    check:
+      refused == Result[string, string].err("Mix peer is this node")
+      node.wakuMix.nodePool.len == 0
