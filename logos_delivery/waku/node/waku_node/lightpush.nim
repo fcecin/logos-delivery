@@ -74,15 +74,22 @@ proc publishOverMix*(
     replyTimeout: Duration = MixReplyTimeout,
 ): Future[lightpush_protocol.WakuLightPushResult] {.async.} =
   ## Publishes on a mix connection and returns within `replyTimeout`. The mix
-  ## connection limits its wait for the reply, but not the first-hop dial.
+  ## connection limits its wait for the reply, but not the first-hop dial. A cancel
+  ## of this call ends the publish too.
   let publishFut =
     node.wakuLightpushClient.publish(Opt.some(pubsubTopic), message, conn)
   let deadline = sleepAsync(replyTimeout)
-  discard await race(FutureBase(publishFut), FutureBase(deadline))
+  try:
+    discard await race(FutureBase(publishFut), FutureBase(deadline))
+  except CancelledError as exc:
+    # `race` does not cancel the publish. The reset ends it, in its send and in its
+    # wait for the reply.
+    await conn.reset()
+    deadline.cancelSoon()
+    raise exc
 
   if not publishFut.finished():
     await conn.reset()
-    publishFut.cancelSoon()
     debug "Mix lightpush timed out", pubsubTopic = pubsubTopic, timeout = replyTimeout
     return lighpushErrorResult(
       LightPushErrorCode.SERVICE_NOT_AVAILABLE, "Waku lightpush over mix timed out"
