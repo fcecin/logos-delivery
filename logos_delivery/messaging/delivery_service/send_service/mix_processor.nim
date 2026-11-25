@@ -39,8 +39,8 @@ type
     fallbackAllowed: bool
     mixWindow: timer.Duration
     fellBackReason: MixUnusable
-      ## Why the last task went to the plain path; `None` once mix can attempt
-      ## a task again. INFO logs each change.
+      ## Why mix could not carry a `Preferred` task at the last `mixUnusable` check.
+      ## It is `None` once mix can carry a task again, and INFO logs each change.
 
 proc reason*(unusable: MixUnusable): string =
   ## The text written to `errorDesc` and the log lines.
@@ -51,8 +51,8 @@ proc reason*(unusable: MixUnusable): string =
   of MixUnusable.NoExit: MixNoExitReason
 
 proc fellBackFor*(self: MixSendProcessor): MixUnusable =
-  ## Why the last task went to the plain path, or `None` once mix can attempt a
-  ## task again.
+  ## Why mix could not carry a `Preferred` task at the last `mixUnusable` check.
+  ## It is `None` once mix can carry a task again.
   self.fellBackReason
 
 proc new*(
@@ -159,6 +159,14 @@ method checkBeforeSend*(
   return ok()
 
 method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.async.} =
+  # The plain attempt may already have linked this message to the sender's address.
+  if self.fallbackAllowed and task.deanonymized:
+    debug "The task had a plain attempt, so it stays on the plain send path",
+      msgHash = task.msgHash.to0xHex()
+    task.errorDesc = ""
+    task.state = DeliveryState.FallbackRetry
+    return
+
   # No wait can make the message fit, so check the size before the reasons that
   # a wait can clear. A task that is too large has no mix attempt, so it must not
   # get the `anonymized` mark.
@@ -177,14 +185,6 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
   if self.fellBackReason != MixUnusable.None:
     self.fellBackReason = MixUnusable.None
     info "Mix can carry messages again"
-
-  # The plain attempt may already have linked this message to the sender's address.
-  if self.fallbackAllowed and task.deanonymized:
-    debug "The task had a plain attempt, so it stays on the plain send path",
-      msgHash = task.msgHash.to0xHex()
-    task.errorDesc = ""
-    task.state = DeliveryState.FallbackRetry
-    return
 
   if self.fallbackAllowed and self.mixWindowElapsed(task):
     debug "Mix window elapsed, handing the task to the plain send path",
