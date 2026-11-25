@@ -21,6 +21,7 @@ import
   logos_delivery/waku/node/waku_node/lightpush,
   logos_delivery/waku/rln/rln_plugin,
   logos_delivery/waku/rln/types as rln_types,
+  logos_delivery/waku/waku_lightpush/client,
   logos_delivery/waku/waku_lightpush/common,
   logos_delivery/waku/waku_core,
   logos_delivery/api/types,
@@ -619,6 +620,24 @@ suite "SendService - anonymity level with a mounted mix":
       not task.propagatedAnonymously
       mix.fellBackFor() == MixUnusable.None # a size hand-over records no mix outage
 
+  asyncTest "a marked Preferred task too large for mix fails and never takes the plain path":
+    for i in 0 ..< MinMixPoolSize:
+      addMixPeer(60430 + i, lightpush = true)
+    check waku.mixReady()
+    let plain = PlainSendProcessor()
+    let mix = MixSendProcessor.new(
+      waku, waku.brokerCtx, AnonymityLevel.Preferred, chronos.minutes(1)
+    )
+    mix.chain(plain)
+
+    let task = sizedTask("too-large-marked", mixLimit() + 1)
+    task.mixMayHavePublished = true
+    check await mix.process(task).withTimeout(FUTURE_TIMEOUT)
+    check:
+      plain.calls == 0
+      task.state == DeliveryState.FailedToDeliver
+      task.errorDesc.startsWith(MixTooLargeReason)
+
   asyncTest "a Required task waits with no exit on the shard during its grace, then fails":
     ## A full pool with no lightpush member on the shard has no exit, as in a
     ## seeded pool before identify and waku-metadata fill its books.
@@ -1024,6 +1043,187 @@ suite "SendService - anonymity level with a mounted mix":
       task.state != DeliveryState.SuccessfullyPropagated # no reply ever came
       task.anonymized # ... and it was marked anyway
 
+  asyncTest "a Preferred task with an unanswered mix attempt never goes to the plain path":
+    ## The exit can have published the message of an attempt with no answer, and
+    ## a plain send of it then shows the address of this node.
+    # A full pool where no member serves lightpush, so mix cannot attempt a task.
+    for i in 0 ..< MinMixPoolSize:
+      addMixPeer(60190 + i, lightpush = false)
+    check waku.mixReady()
+
+    let plain = PlainSendProcessor()
+    let mix = MixSendProcessor.new(
+      waku, waku.brokerCtx, AnonymityLevel.Preferred, chronos.minutes(1)
+    )
+    mix.chain(plain)
+
+    let held = buildTask("unanswered-no-exit", chronos.seconds(5))
+    held.mixMayHavePublished = true
+    check await mix.process(held).withTimeout(FUTURE_TIMEOUT)
+    check:
+      held.state == DeliveryState.NextRoundRetry
+      held.errorDesc == MixNoExitReason
+      plain.calls == 0
+
+    # The same processor hands over a task with no such attempt.
+    let free = buildTask("no-mix-attempt", chronos.seconds(5))
+    check await mix.process(free).withTimeout(FUTURE_TIMEOUT)
+    check:
+      free.state == DeliveryState.SuccessfullyPropagated
+      plain.calls == 1
+
+    # With an exit, the end of the mix window does not hand the task over.
+    addMixPeer(60190 + MinMixPoolSize, lightpush = true)
+    check waku.selectMixLightpushPeer(shard).isSome()
+    let late = buildTask("unanswered-past-mix-window", chronos.seconds(90))
+    late.mixMayHavePublished = true
+    let attempt = mix.process(late)
+    check:
+      late.tryCount == 1 # mix attempts it again
+      plain.calls == 1
+    await attempt.cancelAndWait()
+
+  asyncTest "a mix publish marks the task when the network can have its message":
+    ## An exit with no relay peers can still give the message to its store and
+    ## filter clients, so its answer marks the task, as no answer does.
+    let unanswered = buildTask("no-answer", ZeroDuration)
+    unanswered.mixFailed(
+      waku, (LightPushErrorCode.SERVICE_NOT_AVAILABLE, Opt.some(MixTimedOutDesc))
+    )
+    let noRelayPeers = buildTask("no-relay-peers", ZeroDuration)
+    noRelayPeers.mixFailed(
+      waku, (LightPushErrorCode.NO_PEERS_TO_RELAY, Opt.some("no peers"))
+    )
+    let refused = buildTask("refused", ZeroDuration)
+    refused.mixFailed(
+      waku, (LightPushErrorCode.SERVICE_NOT_AVAILABLE, Opt.some("no relay"))
+    )
+    check:
+      unanswered.mixMayHavePublished
+      unanswered.state == DeliveryState.NextRoundRetry
+      noRelayPeers.mixMayHavePublished
+      noRelayPeers.state == DeliveryState.NextRoundRetry
+      not refused.mixMayHavePublished
+      refused.state == DeliveryState.NextRoundRetry
+
+  asyncTest "a stop that ends a mix attempt marks the task":
+    ## The exit can have published the message of an attempt that a stop ended.
+    for i in 0 ..< MinMixPoolSize:
+      addMixPeer(60230 + i, lightpush = true)
+    check waku.mixReady()
+
+    let mix = MixSendProcessor.new(
+      waku, waku.brokerCtx, AnonymityLevel.Preferred, chronos.minutes(1)
+    )
+    let task = buildTask("stopped-mix-attempt", chronos.seconds(5))
+    let attempt = mix.process(task)
+    check:
+      task.tryCount == 1 # the attempt started
+      not attempt.finished()
+      not task.mixMayHavePublished
+    await attempt.cancelAndWait()
+    check task.mixMayHavePublished
+
+  asyncTest "a mix attempt with no first hop leaves no mark":
+    ## No peer listens on these ports, so the dial of the first hop fails and no
+    ## packet leaves the node. A `Preferred` task keeps its plain fallback.
+    for i in 0 ..< MinMixPoolSize:
+      addMixPeer(60250 + i, lightpush = true)
+    check waku.mixReady()
+
+    let mix = MixSendProcessor.new(
+      waku, waku.brokerCtx, AnonymityLevel.Preferred, chronos.minutes(1)
+    )
+    let task = buildTask("no-first-hop", chronos.seconds(5))
+    # Longer than the longest send delay of mix, about 1.4 s, and shorter than
+    # `MixReplyTimeout`.
+    check await mix.process(task).withTimeout(chronos.seconds(3))
+    check:
+      task.tryCount == 1
+      task.state == DeliveryState.NextRoundRetry
+      not task.mixMayHavePublished
+
+  asyncTest "a mix attempt with no answer in time marks the task":
+    ## Each pool member accepts the connection and never answers, so the attempt
+    ## ends at `MixReplyTimeout` with its write still open.
+    proc holdConnection(
+        server: StreamServer, transp: StreamTransport
+    ) {.async: (raises: []).} =
+      await noCancel transp.join()
+
+    var silent: seq[StreamServer]
+    for _ in 0 ..< MinMixPoolSize:
+      let server = createStreamServer(
+        initTAddress("127.0.0.1:0"), holdConnection, flags = {ServerFlags.ReuseAddr}
+      )
+      server.start()
+      silent.add(server)
+      addMixPeer(int(server.localAddress().port), lightpush = true)
+    defer:
+      for server in silent:
+        server.stop()
+        await server.closeWait()
+    check waku.mixReady()
+
+    let mix = MixSendProcessor.new(
+      waku, waku.brokerCtx, AnonymityLevel.Preferred, chronos.minutes(1)
+    )
+    let task = buildTask("silent-first-hop", chronos.seconds(5))
+    check await mix.process(task).withTimeout(MixReplyTimeout + chronos.seconds(3))
+    check:
+      task.tryCount == 1
+      task.state == DeliveryState.NextRoundRetry
+      task.mixMayHavePublished
+
+  asyncTest "the send service ends a marked Preferred task with no plain send, also after a restart":
+    ## The task waits for mix until its delivery window ends, then fails with
+    ## `NotPropagated`. A stop and a start of the service keep the mark.
+    for i in 0 ..< MinMixPoolSize:
+      addMixPeer(60450 + i, lightpush = false) # so mix cannot attempt the task
+    check waku.mixReady()
+
+    let kinds = new seq[MessageErrorKind]
+    let errors = EventCounter()
+    let listener = MessageErrorEvent
+      .listen(
+        waku.brokerCtx,
+        proc(e: MessageErrorEvent) {.async: (raises: []).} =
+          kinds[].add(e.kind)
+          errors.inc(),
+      )
+      .expect("listen")
+    defer:
+      await MessageErrorEvent.dropListener(waku.brokerCtx, listener)
+
+    let plain = PlainSendProcessor()
+    let mix =
+      MixSendProcessor.new(waku, waku.brokerCtx, AnonymityLevel.Preferred, MixWindow)
+    mix.chain(plain)
+    let manager =
+      RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
+    let service = SendService
+      .new(false, waku, manager, mix, retryInterval = chronos.milliseconds(50))
+      .expect("SendService.new")
+
+    # Past the mix window, and 2 s before the end of the delivery window.
+    let task = buildTask("marked-in-service", DeliveryWindow - chronos.seconds(2))
+    task.mixMayHavePublished = true
+    service.startSendService()
+    check service.enqueue(task).isOk()
+    await sleepAsync(chronos.milliseconds(200))
+    await service.stopSendService()
+    check errors.value == 0
+    service.startSendService()
+    defer:
+      await service.stopSendService()
+
+    check await errors.waitCount(1).withTimeout(FUTURE_TIMEOUT_MEDIUM)
+    check:
+      kinds[] == @[MessageErrorKind.NotPropagated]
+      plain.calls == 0
+      task.state == DeliveryState.FailedToDeliver
+      task.errorDesc == MixNoExitReason
+
   asyncTest "a usable mix is attempted, not decided against":
     ## A routable pool with an exit passes the pre-check. `tryCount` grows before
     ## the first await; the test then cancels the attempt.
@@ -1237,6 +1437,7 @@ type StubMixConn = ref object of Connection
   stallInSend: bool
   cached: seq[byte]
   writes: seq[int] ## the bytes of each `write`
+  failsWrite: bool ## Each `write` raises, as mix does when no packet leaves the node.
 
 method readOnce(
     s: StubMixConn, pbytes: pointer, nbytes: int
@@ -1265,6 +1466,8 @@ method write(
 ): Future[void] {.async: (raises: [CancelledError, LPStreamError]).} =
   # `stallInSend` models the first-hop dial. Mix dials with `switch.dial`, so
   # `DefaultDialTimeout` does not apply.
+  if s.failsWrite:
+    raise (ref LPStreamError)(msg: "the stub does not write")
   s.writes.add(msg.len)
   if s.stallInSend:
     await s.sendStall
@@ -1347,6 +1550,7 @@ suite "Mix send path - the reply budget":
     check:
       res.isErr()
       res.error.code == LightPushErrorCode.SERVICE_NOT_AVAILABLE
+      res.isErr() and res.error.isUnanswered() # the exit can have the message
 
   asyncTest "a stalled first-hop dial is given up on too":
     ## A stall in the send leaves the reply future pending. The close of the
@@ -1355,6 +1559,44 @@ suite "Mix send path - the reply budget":
     check:
       res.isErr()
       res.error.code == LightPushErrorCode.SERVICE_NOT_AVAILABLE
+      res.isErr() and res.error.isUnanswered()
+
+  test "only a publish with no answer that the node can read is unanswered":
+    let unanswered = [
+      (LightPushErrorCode.SERVICE_NOT_AVAILABLE, MixTimedOutDesc),
+      (LightPushErrorCode.INTERNAL_SERVER_ERROR, ReadResponseFailedDesc & ": closed"),
+      (LightPushErrorCode.INTERNAL_SERVER_ERROR, ResponseNotDecodedDesc),
+      (LightPushErrorCode.INTERNAL_SERVER_ERROR, RequestIdMismatchDesc),
+    ]
+    for (code, desc) in unanswered:
+      check (code, Opt.some(desc)).isUnanswered()
+    # The service answered each of these, or the request never left the node.
+    let answered = [
+      (LightPushErrorCode.INTERNAL_SERVER_ERROR, "Failed to dial to next hop"),
+      (LightPushErrorCode.SERVICE_NOT_AVAILABLE, "no relay"),
+      (LightPushErrorCode.INTERNAL_SERVER_ERROR, "a fault of the service"),
+      (LightPushErrorCode.TOO_MANY_REQUESTS, MixTimedOutDesc),
+      (LightPushErrorCode.NO_PEERS_TO_RELAY, "no peers"),
+    ]
+    for (code, desc) in answered:
+      check not (code, Opt.some(desc)).isUnanswered()
+
+  asyncTest "a mix request that cannot go out fails at once, with no wait for a reply":
+    ## Mix builds and sends the packet in `write`, so a failed `write` means that
+    ## no packet left the node. The close of the stream must not wait for a reply.
+    let conn = newStubMixConn()
+    conn.failsWrite = true
+    var raised = ""
+    try:
+      discard await waku.node.publishOverMix(
+        Connection(conn),
+        PubsubTopic("/waku/2/rs/3/0"),
+        fakeWakuMessage(contentTopic = "/test/1/anonymity/proto"),
+        ReplyBudget,
+      )
+    except LPStreamError as exc:
+      raised = exc.msg
+    check raised == "the stub does not write" # not the end of the reply budget
 
 suite "Mix send path - the node's own hop":
   ## `mixReady()` is false while mix cannot encode this node's own hop: every

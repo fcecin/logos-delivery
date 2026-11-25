@@ -5,7 +5,10 @@ import logos_delivery/api/types as api_types
 export event_broker, api_types
 
 type MessageErrorKind* {.pure.} = enum
-  NotPropagated ## No peer took the message within the delivery window.
+  NotPropagated
+    ## No peer took the message within the delivery window. After a mix attempt
+    ## that got no answer, or whose exit had no relay peers, the network can
+    ## still have the message.
   NotStored ## No Store node reported the propagated message within its window.
 
 EventBroker:
