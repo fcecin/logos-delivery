@@ -61,7 +61,7 @@ method sendImpl*(self: RelaySendProcessor, task: DeliveryTask) {.async.} =
   let noOfPublishedPeers = (await self.publishProc(task.pubsubTopic, task.msg)).valueOr:
     let errorMessage = error.desc.get($error.code)
     error "Failed to publish message with relay",
-      msgHash = task.msgHash.to0xHex(), error = errorMessage
+      msgHash = task.loggedHash(), error = errorMessage
 
     if error.isRlnRejection():
       task.parkForRlnProofRefresh(self.waku, errorMessage)

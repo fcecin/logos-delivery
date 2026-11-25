@@ -1,7 +1,7 @@
 {.used.}
 
 import std/[sequtils, sets, strutils]
-import chronos, testutils/unittests, results, stew/byteutils
+import chronos, chronicles, testutils/unittests, results, stew/byteutils
 
 import
   libp2p_mix,
@@ -27,8 +27,10 @@ import
   logos_delivery/api/events/messaging_client_events,
   logos_delivery/waku/factory/waku_conf,
   logos_delivery/messaging/rate_limit_manager/rate_limit_manager,
-  logos_delivery/messaging/delivery_service/send_service/
-    [send_service, send_processor, mix_processor, delivery_task]
+  logos_delivery/messaging/delivery_service/send_service/[
+    send_service {.all.}, send_processor, mix_processor, delivery_task, relay_processor,
+    lightpush_processor,
+  ]
 import ../testlib/[futures, testasync, wakucore, wakunodeconf]
 
 ## Tests for the anonymity levels of the send path. The first suite mounts no
@@ -73,6 +75,75 @@ method sendImpl(self: RetryingProcessor, task: DeliveryTask): Future[void] {.asy
   task.tryCount.inc()
   task.state = DeliveryState.NextRoundRetry
   task.errorDesc = self.reason
+
+type RaisingProcessor = ref object of BaseSendProcessor
+  ## Raises an exception each time that it sends, as a local fault does.
+
+method isValidProcessor(self: RaisingProcessor, task: DeliveryTask): bool {.gcsafe.} =
+  return true
+
+method sendImpl(self: RaisingProcessor, task: DeliveryTask): Future[void] {.async.} =
+  task.tryCount.inc()
+  raise newException(ValueError, "scripted local fault")
+
+proc failedPublish(
+    pubsubTopic: PubsubTopic, message: WakuMessage
+): Future[WakuLightPushResult] {.async.} =
+  ## A relay publish that fails.
+  return lightpushResultInternalError("scripted relay failure")
+
+proc noPeerPublish(
+    pubsubTopic: PubsubTopic, message: WakuMessage
+): Future[WakuLightPushResult] {.async.} =
+  ## A relay publish with no peer in the mesh of the shard.
+  return err((LightPushErrorCode.NO_PEERS_TO_RELAY, Opt.some("no relay peer")))
+
+type CapturedRecord = tuple[level: LogLevel, text: string]
+
+var capturedRecords {.threadvar.}: seq[CapturedRecord]
+
+proc captureRecord(logLevel: LogLevel, record: LogOutputStr) {.gcsafe, raises: [].} =
+  capturedRecords.add((logLevel, record))
+
+proc startCapture(): typeof(defaultChroniclesStream.outputs[0]) {.gcsafe.} =
+  ## Sends each record of the text output to `capturedRecords`, with no colors.
+  ## Returns the text output as it was.
+  {.cast(gcsafe).}:
+    let output = defaultChroniclesStream.outputs[0]
+    capturedRecords.setLen(0)
+    defaultChroniclesStream.outputs[0].writer = captureRecord
+    defaultChroniclesStream.outputs[0].colors = false
+    return output
+
+proc stopCapture(output: typeof(defaultChroniclesStream.outputs[0])) {.gcsafe.} =
+  ## Gives the text output its writer and its colors again.
+  {.cast(gcsafe).}:
+    defaultChroniclesStream.outputs[0] = output
+
+template recordsOf(body: untyped): seq[CapturedRecord] =
+  ## The records that `body` writes, with their levels. The text output writes
+  ## no record while `body` runs. The log level and the log output do not change.
+  let output = startCapture()
+  try:
+    body
+  finally:
+    stopCapture(output)
+  move(capturedRecords)
+
+proc hashesIn(
+    records: seq[CapturedRecord], level: LogLevel, message: string
+): seq[string] =
+  ## The `msgHash` value of each record in `records` at `level` with `message`.
+  var hashes: seq[string]
+  for record in records:
+    let start = record.text.find("msgHash=")
+    if record.level == level and message in record.text and start >= 0:
+      hashes.add(record.text[start + "msgHash=".len ..^ 1].splitWhitespace()[0])
+  return hashes
+
+proc showsHash(records: seq[CapturedRecord], hash: WakuMessageHash): bool =
+  ## True when an INFO or higher record in `records` has `hash`.
+  return records.anyIt(it.level >= LogLevel.INFO and hash.to0xHex() in it.text)
 
 proc testConf(): WakuConf =
   defaultTestWakuNodeConf().toWakuConf().valueOr:
@@ -483,6 +554,291 @@ suite "SendService - anonymity level":
     check:
       task.state == DeliveryState.FailedToDeliver
       errors.value == 1 # ... and exactly one later
+
+suite "Send path - the hash in INFO and ERROR records":
+  ## When the send chain starts with mix, no INFO or ERROR record of the send
+  ## service or of the relay and lightpush processors shows the hash of a task.
+  ## These processors also show no hash of a task with the `anonymized` mark.
+  ## Each test compares the records of a plain task with the records of a mixed
+  ## task. The node of each test does not mount mix.
+  var waku {.threadvar.}: Waku
+
+  asyncSetup:
+    waku = (await Waku.new(testConf())).expect("Waku.new")
+
+  asyncTeardown:
+    discard await waku.stop()
+
+  proc serviceWith(
+      chain: BaseSendProcessor, maxSendsInFlight = MaxSendsInFlight
+  ): SendService =
+    let manager =
+      RateLimitManager.new(DefaultRateLimitConfig).expect("RateLimitManager.new")
+    return SendService
+      .new(false, waku, manager, chain, maxSendsInFlight = maxSendsInFlight)
+      .expect("SendService.new")
+
+  proc serviceAt(level: AnonymityLevel): SendService =
+    return
+      serviceWith(setupSendProcessorChain(waku, level).expect("send processor chain"))
+
+  proc mixChain(level = AnonymityLevel.Preferred): MixSendProcessor =
+    return MixSendProcessor.new(waku, waku.brokerCtx, level, MixWindow)
+
+  asyncTest "a node that sends over mix withholds the hash of a task from its first record":
+    ## Mix did not try to send the tasks. Thus they have no `anonymized` mark.
+    ## A node with no mix writes the hash.
+    let plainService = serviceAt(AnonymityLevel.None)
+    let preferredService = serviceAt(AnonymityLevel.Preferred)
+    let requiredService = serviceAt(AnonymityLevel.Required)
+    let plain = buildTask("first-record-plain", ZeroDuration)
+    let preferred = buildTask("first-record-preferred", ZeroDuration)
+    let required = buildTask("first-record-required", ZeroDuration)
+    let records = recordsOf:
+      check:
+        plainService.enqueue(plain).isOk()
+        preferredService.enqueue(preferred).isOk()
+        requiredService.enqueue(required).isOk()
+    check:
+      not preferred.anonymized
+      not required.anonymized
+      records.hashesIn(LogLevel.INFO, "Task added to the send queue") ==
+        @[plain.msgHash.to0xHex(), "withheld", "withheld"]
+      not records.showsHash(preferred.msgHash)
+      not records.showsHash(required.msgHash)
+
+  asyncTest "a node that sends over mix withholds the hash of a task that a full send queue refuses":
+    let plainService = serviceWith(PlainSendProcessor(), maxSendsInFlight = 1)
+    let mixService = serviceWith(mixChain(), maxSendsInFlight = 1)
+    let plain = buildTask("refused-plain", ZeroDuration)
+    let mixed = buildTask("refused-mixed", ZeroDuration)
+    check:
+      plainService.enqueue(buildTask("queued", ZeroDuration)).isOk()
+      mixService.enqueue(buildTask("queued", ZeroDuration)).isOk()
+    let records = recordsOf:
+      check:
+        plainService.enqueue(plain).isErr()
+        mixService.enqueue(mixed).isErr()
+    check:
+      records.hashesIn(LogLevel.INFO, "Send queue full, message refused") ==
+        @[plain.msgHash.to0xHex(), "withheld"]
+      not records.showsHash(mixed.msgHash)
+
+  asyncTest "a node that sends over mix withholds the hash of a task past its delivery window":
+    let plainService = serviceWith(PlainSendProcessor())
+    let mixService = serviceWith(mixChain())
+    let plain = buildTask("expired-plain", DeliveryWindow + chronos.seconds(1))
+    let mixed = buildTask("expired-mixed", DeliveryWindow + chronos.seconds(1))
+    check:
+      plainService.enqueue(plain).isOk()
+      mixService.enqueue(mixed).isOk()
+    let records = recordsOf:
+      check:
+        plainService.failExpired(plain)
+        mixService.failExpired(mixed)
+    check:
+      records.hashesIn(LogLevel.ERROR, "Failed to send message") ==
+        @[plain.msgHash.to0xHex(), "withheld"]
+      not records.showsHash(mixed.msgHash)
+
+  asyncTest "a node that sends over mix withholds the hash of a task that fails":
+    ## With no mix, a `Required` task fails, and mix does not try to send it.
+    let plainService =
+      serviceWith(RelaySendProcessor.new(false, failedPublish, waku, waku.brokerCtx))
+    let mixService = serviceWith(mixChain(AnonymityLevel.Required))
+    let plain = buildTask("failed-plain", ZeroDuration)
+    let mixed = buildTask("failed-mixed", ZeroDuration)
+    check:
+      plainService.enqueue(plain).isOk()
+      mixService.enqueue(mixed).isOk()
+    var sends: seq[Future[bool]]
+    let records = recordsOf:
+      sends.add(plainService.sendUntilPropagated(plain))
+      sends.add(mixService.sendUntilPropagated(mixed))
+      check await allFutures(sends).withTimeout(FUTURE_TIMEOUT)
+    check:
+      sends.allIt(it.completed() and not it.read())
+      plain.errorDesc == "scripted relay failure"
+      mixed.errorDesc == MixUnavailableReason
+      records.hashesIn(LogLevel.ERROR, "Failed to send message") ==
+        @[plain.msgHash.to0xHex(), "withheld"]
+      not records.showsHash(mixed.msgHash)
+
+  asyncTest "a node that sends over mix withholds the hash of a task whose admission raises":
+    ## The RLN backend raises an exception when it makes a proof.
+    proc generate(
+        message: WakuMessage
+    ): Future[Result[seq[byte], rln_types.RlnError]] {.async.} =
+      raise newException(ValueError, "scripted proof failure")
+
+    waku.node.rlnPlugin =
+      Opt.some(RlnPlugin(generateProof: generate, proofSize: Opt.some(289)))
+    let plainService = serviceWith(PlainSendProcessor())
+    let mixService = serviceWith(mixChain())
+    let plain = buildTask("admission-plain", ZeroDuration)
+    let mixed = buildTask("admission-mixed", ZeroDuration)
+    check:
+      plainService.enqueue(plain).isOk()
+      mixService.enqueue(mixed).isOk()
+    let records = recordsOf:
+      check:
+        not await plainService.runAdmission(plain)
+        not await mixService.runAdmission(mixed)
+    check:
+      records.hashesIn(LogLevel.ERROR, "Exception in admission") ==
+        @[plain.msgHash.to0xHex(), "withheld"]
+      not records.showsHash(mixed.msgHash)
+
+  asyncTest "a node that sends over mix withholds the hash of a task whose send attempt raises":
+    ## With no mix, the `Preferred` chain gives the task to the next processor,
+    ## and mix does not try to send it. After the exception, each task waits for
+    ## the next round.
+    let mix = mixChain()
+    mix.chain(RaisingProcessor())
+    let plainService = serviceWith(RaisingProcessor())
+    let mixService = serviceWith(mix)
+    let plain = buildTask("raising-plain", ZeroDuration)
+    let mixed = buildTask("raising-mixed", ZeroDuration)
+    check:
+      plainService.enqueue(plain).isOk()
+      mixService.enqueue(mixed).isOk()
+    var sends: seq[Future[bool]]
+    let records = recordsOf:
+      sends.add(plainService.sendUntilPropagated(plain))
+      sends.add(mixService.sendUntilPropagated(mixed))
+      checkUntilTimeout:
+        plain.state == DeliveryState.NextRoundRetry
+        mixed.state == DeliveryState.NextRoundRetry
+    for send in sends:
+      await send.cancelAndWait()
+    check:
+      not mixed.anonymized
+      records.hashesIn(LogLevel.ERROR, "Exception in a send attempt") ==
+        @[plain.msgHash.to0xHex(), "withheld"]
+      not records.showsHash(mixed.msgHash)
+
+  asyncTest "a Preferred chain withholds the hash from a failed relay attempt before mix tries the task":
+    ## With no mix, the `Preferred` chain gives the task to relay, and mix does
+    ## not try to send it. Relay finds no peer. Thus the task waits for the next
+    ## round, in which mix can try to send it.
+    let mix = mixChain()
+    mix.chain(RelaySendProcessor.new(true, noPeerPublish, waku, waku.brokerCtx))
+    let plainService =
+      serviceWith(RelaySendProcessor.new(true, noPeerPublish, waku, waku.brokerCtx))
+    let mixService = serviceWith(mix)
+    let plain = buildTask("handed-over-plain", ZeroDuration)
+    let mixed = buildTask("handed-over-mixed", ZeroDuration)
+    check:
+      plainService.enqueue(plain).isOk()
+      mixService.enqueue(mixed).isOk()
+    var sends: seq[Future[bool]]
+    let records = recordsOf:
+      sends.add(plainService.sendUntilPropagated(plain))
+      sends.add(mixService.sendUntilPropagated(mixed))
+      checkUntilTimeout:
+        plain.state == DeliveryState.NextRoundRetry
+        mixed.state == DeliveryState.NextRoundRetry
+    for send in sends:
+      await send.cancelAndWait()
+    check:
+      not mixed.anonymized
+      records.hashesIn(LogLevel.ERROR, "Failed to publish message with relay") ==
+        @[plain.msgHash.to0xHex(), "withheld"]
+      not records.showsHash(mixed.msgHash)
+
+  asyncTest "a node that sends over mix withholds the hash of a propagated task":
+    let plainService = serviceWith(PlainSendProcessor())
+    let mixService = serviceWith(mixChain())
+    let plain = buildTask("propagated-plain", ZeroDuration)
+    let mixed = buildTask("propagated-mixed", ZeroDuration)
+    check:
+      plainService.enqueue(plain).isOk()
+      mixService.enqueue(mixed).isOk()
+    let records = recordsOf:
+      plainService.reportPropagated(plain)
+      mixService.reportPropagated(mixed)
+    check:
+      records.hashesIn(LogLevel.INFO, "Message successfully propagated") ==
+        @[plain.msgHash.to0xHex(), "withheld"]
+      not records.showsHash(mixed.msgHash)
+
+  asyncTest "a node that sends over mix withholds the hash of a task that a Store node confirms":
+    let plainService = serviceWith(PlainSendProcessor())
+    let mixService = serviceWith(mixChain())
+    let plain = buildTask("stored-plain", ZeroDuration)
+    let mixed = buildTask("stored-mixed", ZeroDuration)
+    check:
+      plainService.enqueue(plain).isOk()
+      mixService.enqueue(mixed).isOk()
+    let records = recordsOf:
+      for (service, task) in [(plainService, plain), (mixService, mixed)]:
+        let validation = service.waitForStoreValidation(task)
+        task.storeAnswer.complete()
+        check await validation.withTimeout(FUTURE_TIMEOUT)
+    check:
+      plain.state == DeliveryState.SuccessfullyValidated
+      mixed.state == DeliveryState.SuccessfullyValidated
+      records.hashesIn(LogLevel.INFO, "Message successfully sent") ==
+        @[plain.msgHash.to0xHex(), "withheld"]
+      not records.showsHash(mixed.msgHash)
+
+  asyncTest "a node that sends over mix withholds the hash of a task that no Store node confirms":
+    ## Each task has used all of its Store validation window.
+    let plainService = serviceWith(PlainSendProcessor())
+    let mixService = serviceWith(mixChain())
+    let plain = buildTask("unstored-plain", ZeroDuration)
+    let mixed = buildTask("unstored-mixed", ZeroDuration)
+    check:
+      plainService.enqueue(plain).isOk()
+      mixService.enqueue(mixed).isOk()
+    let records = recordsOf:
+      for (service, task) in [(plainService, plain), (mixService, mixed)]:
+        task.storeValidationWaited = service.maxValidationAge
+        await service.waitForStoreValidation(task)
+    check:
+      plain.state == DeliveryState.FailedToDeliver
+      mixed.state == DeliveryState.FailedToDeliver
+      records.hashesIn(
+        LogLevel.INFO, "Message propagated but not validated by a store node"
+      ) == @[plain.msgHash.to0xHex(), "withheld"]
+      not records.showsHash(mixed.msgHash)
+
+  asyncTest "a relay processor withholds the hash of a mixed task from its error record":
+    ## A task gets the `anonymized` mark when mix tries to send it, and the
+    ## `hashWithheld` mark when a chain that starts with mix queues it.
+    let relay = RelaySendProcessor.new(false, failedPublish, waku, waku.brokerCtx)
+    let plain = buildTask("relay-plain", ZeroDuration)
+    let anonymized = buildTask("relay-anonymized", ZeroDuration)
+    let queued = buildTask("relay-queued", ZeroDuration)
+    anonymized.anonymized = true
+    check serviceWith(mixChain()).enqueue(queued).isOk()
+    let records = recordsOf:
+      for task in [plain, anonymized, queued]:
+        await relay.sendImpl(task)
+    check:
+      not queued.anonymized
+      records.hashesIn(LogLevel.ERROR, "Failed to publish message with relay") ==
+        @[plain.msgHash.to0xHex(), "withheld", "withheld"]
+      not records.showsHash(anonymized.msgHash)
+      not records.showsHash(queued.msgHash)
+
+  asyncTest "a lightpush processor withholds the hash of a mixed task from its error record":
+    ## The node knows no lightpush peer. Thus each send fails.
+    let lightpush = LightpushSendProcessor.new(waku, waku.brokerCtx)
+    let plain = buildTask("lightpush-plain", ZeroDuration)
+    let anonymized = buildTask("lightpush-anonymized", ZeroDuration)
+    let queued = buildTask("lightpush-queued", ZeroDuration)
+    anonymized.anonymized = true
+    check serviceWith(mixChain()).enqueue(queued).isOk()
+    let records = recordsOf:
+      for task in [plain, anonymized, queued]:
+        await lightpush.sendImpl(task)
+    check:
+      not queued.anonymized
+      records.hashesIn(LogLevel.ERROR, "LightpushSendProcessor.sendImpl failed") ==
+        @[plain.msgHash.to0xHex(), "withheld", "withheld"]
+      not records.showsHash(anonymized.msgHash)
+      not records.showsHash(queued.msgHash)
 
 suite "SendService - anonymity level with a mounted mix":
   ## Mix is mounted before start, as the node factory does. The tests fill the
