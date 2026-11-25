@@ -25,7 +25,8 @@ import
   logos_delivery/api/types,
   logos_delivery/api/conf/modes,
   logos_delivery/messaging/rate_limit_manager/rate_limit_manager,
-  logos_delivery/messaging/delivery_service/send_service/[send_service, delivery_task],
+  logos_delivery/messaging/delivery_service/send_service/
+    [send_service, send_processor, mix_processor, delivery_task],
   ../testlib/[testasync, wakucore, wakunode, wakunodeconf]
 
 const
@@ -162,6 +163,44 @@ proc setupMixNet(
 proc teardownMixNet(mixnet: MixNet) {.async.} =
   for n in mixnet.nodes:
     await n.stop()
+
+proc newMixSender(): Future[Waku] {.async.} =
+  ## A `Waku` in the cluster of the cores. With another cluster, waku-metadata
+  ## disconnects the cores, and the pool becomes empty.
+  var nodeConf = defaultTestWakuNodeConf()
+  nodeConf.clusterId = Opt.some(DefaultClusterId)
+  let conf = nodeConf.toWakuConf().valueOr:
+    raiseAssert error
+  return (await Waku.new(conf)).expect("Waku.new")
+
+proc startMixSender(mixnet: MixNet, waku: Waku, shard: PubsubTopic) {.async.} =
+  ## Mounts mix on `waku` with the cores in its pool, starts `waku` and connects
+  ## it to the cores. It waits until `waku` has an exit for `shard`, for a
+  ## maximum of 5 s.
+  let kp = generateKeyPair().expect("mix key pair")
+  (
+    await waku.node.mountMix(
+      DefaultClusterId, kp.privateKey, mixnet.pubInfos[0 ..< NumCore]
+    )
+  ).isOkOr:
+    raiseAssert "mountMix sender: " & $error
+  (await waku.start()).expect("start")
+  await waku.node.connectToNodes(
+    (0 ..< NumCore).toSeq().mapIt(mixnet.nodes[it].peerInfo.toRemotePeerInfo())
+  )
+  # Identify also gets the shards of each core from waku-metadata. The helper
+  # sets them here. Thus the exit scan does not wait for identify.
+  let shardInfo = RelayShard.parse(shard).expect("shard")
+  for i in 0 ..< NumCore:
+    waku.node.peerManager.switch.peerStore.setShardInfo(
+      mixnet.nodes[i].peerInfo.peerId, @[shardInfo.shardId]
+    )
+  # Identify adds the lightpush codec of each core after the connection. Thus
+  # the helper waits for the exit scan.
+  let deadline = Moment.now() + chronos.seconds(5)
+  while not (waku.mixReady() and waku.selectMixLightpushPeer(shard).isSome()) and
+      Moment.now() < deadline:
+    await sleepAsync(chronos.milliseconds(50))
 
 suite "Waku Mix - end to end transport":
   asyncTest "a message crosses the mixnet and the reply comes back":
@@ -465,3 +504,73 @@ suite "Waku Mix - end to end transport":
       task.propagatedAnonymously # no store query for this task
       task.anonymized # set at the attempt
       after.exited - before.exited >= 1.0
+
+  asyncTest "a mix attempt that the exit rejects as a duplicate propagates the task anonymously":
+    ## The exit has the message before the attempt, as after a previous attempt
+    ## that got no reply. Its relay rejects the attempt as `DuplicateMessage`.
+    let mixnet = await setupMixNet(23920)
+    defer:
+      await teardownMixNet(mixnet)
+    let shard = DefaultPubsubTopic
+    mixnet.subscribeCores(shard)
+
+    let waku = await newMixSender()
+    defer:
+      discard await waku.stop()
+    await mixnet.startMixSender(waku, shard)
+
+    # The service slot makes core 0 the exit of each attempt.
+    let exit = mixnet.nodes[0]
+    waku.node.peerManager.addServicePeer(
+      exit.peerInfo.toRemotePeerInfo(), WakuLightPushCodec
+    )
+    let selected = waku.selectMixLightpushPeer(shard)
+    check:
+      waku.mixReady()
+      selected.isSome() and selected.get().peerId == exit.peerInfo.peerId
+
+    let msg = WakuMessage(
+      payload: toBytes("mix-e2e-duplicate over mix"),
+      contentTopic: "/mix-e2e/1/probe/proto",
+      version: 2,
+      timestamp: getNowInNanosecondTime(),
+    )
+    # The exit publishes the message, as for the previous attempt. Its relay
+    # records the message only after it publishes the message to a peer.
+    var published = false
+    let deadline = Moment.now() + chronos.seconds(5)
+    while not published and Moment.now() < deadline:
+      published = (await exit.publish(Opt.some(shard), msg)).isOk()
+      if not published:
+        await sleepAsync(chronos.milliseconds(50))
+    check published
+
+    # The lightpush service of the exit records each result that it gives.
+    var exitAnswers: seq[WakuLightPushResult]
+    let servePush = exit.wakuLightPush.pushHandler
+    exit.wakuLightPush.pushHandler = proc(
+        pubsubTopic: PubsubTopic, message: WakuMessage
+    ): Future[WakuLightPushResult] {.async.} =
+      let answer = await servePush(pubsubTopic, message)
+      exitAnswers.add(answer)
+      return answer
+
+    let mix =
+      MixSendProcessor.new(waku, waku.brokerCtx, AnonymityLevel.Required, MixWindow)
+    let task = DeliveryTask(
+      pubsubTopic: shard,
+      msg: msg,
+      msgHash: computeMessageHash(shard, msg),
+      state: DeliveryState.Entry,
+    )
+    let before = hopCounts()
+    check await mix.process(task).withTimeout(MixReplyTimeout + chronos.seconds(5))
+    let after = hopCounts()
+    check:
+      after.exited - before.exited >= 1.0 # the exit received the retry
+      exitAnswers ==
+        @[lighpushErrorResult(LightPushErrorCode.INVALID_MESSAGE, DuplicateMessageDesc)]
+      task.tryCount == 1
+      task.state == DeliveryState.SuccessfullyPropagated
+      task.propagatedAnonymously
+      task.firstPropagatedTime.isSome()

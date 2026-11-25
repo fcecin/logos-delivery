@@ -226,6 +226,14 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
   let numLightpushServers = (
     await self.waku.lightpushPublishToAny(task.pubsubTopic, task.msg, mixify = true)
   ).valueOr:
+    if error.isDuplicateMessage():
+      # The relay of the exit already has the message, so the network has it.
+      debug "The mix exit already has the message, the task propagated",
+        msgHash = task.msgHash.to0xHex()
+      task.markPropagated()
+      task.propagatedAnonymously = true
+      return
+
     debug "MixSendProcessor.sendImpl failed", error = error.desc.get($error.code)
 
     if error.isRlnRejection():
@@ -244,10 +252,8 @@ method sendImpl*(self: MixSendProcessor, task: DeliveryTask): Future[void] {.asy
 
   if numLightpushServers > 0:
     debug "Message propagated via Mix", msgHash = task.msgHash.to0xHex()
-    task.state = DeliveryState.SuccessfullyPropagated
+    task.markPropagated()
     task.propagatedAnonymously = true
-    if task.firstPropagatedTime.isNone():
-      task.firstPropagatedTime = Opt.some(Moment.now())
   else:
     debug "Mix publish returned zero peers, the task waits for a retry",
       msgHash = task.loggedHash()
