@@ -158,9 +158,12 @@ proc lightpushPublishToAny*(
   let peer = peerOpt.valueOr:
     if mixify:
       return lightpushResultServiceUnavailable(
-        "no mix-capable lightpush peer available for shard"
+        "no mix-capable lightpush peer available for shard",
+        LightPushLocalErrorCode.NoServicePeer,
       )
-    return lightpushResultServiceUnavailable("no lightpush peer available for shard")
+    return lightpushResultServiceUnavailable(
+      "no lightpush peer available for shard", LightPushLocalErrorCode.NoServicePeer
+    )
   try:
     return
       await self.node.lightpushPublish(Opt.some(shard), message, Opt.some(peer), mixify)
@@ -169,4 +172,4 @@ proc lightpushPublishToAny*(
     # again, so that `deliver` ends with the cancel and counts no failed attempt.
     raise exc
   except CatchableError as e:
-    return lightpushResultInternalError(e.msg)
+    return lightpushResultInternalError(e.msg, LightPushLocalErrorCode.OtherError)
