@@ -26,7 +26,6 @@ type ModeProtocolFlags* = object
   filter*: Opt[bool]
   lightpush*: Opt[bool]
   store*: Opt[bool]
-  discv5Discovery*: Opt[bool]
   peerExchange*: Opt[bool]
   rendezvous*: Opt[bool]
   mix*: Opt[bool]
@@ -45,7 +44,6 @@ proc protocolFlags*(mode: LogosDeliveryMode): ModeProtocolFlags =
       relay: Opt.some(true),
       filter: Opt.some(true),
       lightpush: Opt.some(true),
-      discv5Discovery: Opt.some(true),
       peerExchange: Opt.some(true),
       mix: CoreModeMix,
     )
@@ -74,7 +72,6 @@ proc applyModeFlags*[T](conf: var T, flags: ModeProtocolFlags) =
   apply(conf.filter, flags.filter)
   apply(conf.lightpush, flags.lightpush)
   apply(conf.store, flags.store)
-  apply(conf.discv5Discovery, flags.discv5Discovery)
   apply(conf.peerExchange, flags.peerExchange)
   apply(conf.rendezvous, flags.rendezvous)
   apply(conf.mix, flags.mix)

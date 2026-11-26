@@ -57,6 +57,7 @@ const NodeEnvvarPrefix* = "logos_delivery_node"
 const
   DefaultCLIRelay* = true
   DefaultCLIPeerExchange* = true
+  DefaultCLIDiscv5Discovery* = true
   DefaultCLINat* = "any"
   DefaultCliRestMessagingCacheCapacity* = DefaultRestMessagingCacheCapacity
     ## Exported because confutils expands `defaultValue` where `load` is called.
@@ -69,7 +70,6 @@ const DefaultKernelModeFlags* = ModeProtocolFlags(
   filter: Opt.some(true),
   lightpush: Opt.some(true),
   store: Opt.some(false),
-  discv5Discovery: Opt.some(true),
   peerExchange: Opt.some(DefaultCLIPeerExchange),
 )
 
@@ -1492,6 +1492,8 @@ proc toWakuConf*(n: WakuNodeConf): ConfResult[WakuConf] =
 
   if n.discv5Discovery.isSome():
     b.discv5Conf.withEnabled(n.discv5Discovery.get())
+  elif networkPresetConf.isNone():
+    b.discv5Conf.withEnabled(DefaultCLIDiscv5Discovery)
 
   b.discv5Conf.withUdpPort(n.discv5UdpPort)
   b.discv5Conf.withBootstrapNodes(n.discv5BootstrapNodes)

@@ -5,7 +5,7 @@ import libp2p/multiaddress
 import brokers/broker_context
 import logos_delivery
 import logos_delivery/api/conf/logos_delivery_conf_json
-import logos_delivery/waku/factory/[waku_conf, networks_config]
+import logos_delivery/waku/factory/[waku_conf, networks_config, preset_registry]
 import logos_delivery/waku/waku_mix
 import logos_delivery/waku/common/rate_limit/setting
 import tools/confutils/cli_args
@@ -19,6 +19,18 @@ const TestMixKey = repeat("11", 32)
 const TestMixNode =
   "/ip4/203.0.113.9/tcp/30303/p2p/16Uiu2HAmTUbnxLGT9JvV6mu9oPyDjqHK4Phs1VDJNUgESgNSkuby:c288a425a6209c74ec07e2e8b6816e9b6995d1cd59b1ab482317c3dfb3ba200f"
 
+proc registerDiscv5OffPreset() =
+  registerPreset(
+    "test.discv5-off",
+    """{"clusterId": 16, "maxMessageSize": "1024KiB", "shardingConf": [32], "discv5Discovery": false}""",
+  ).isOkOr:
+    raiseAssert error
+
+proc discv5Enabled(kc: WakuNodeConf): bool =
+  let wakuConf = kc.toWakuConf().valueOr:
+    raiseAssert error
+  return wakuConf.discv5Conf.isSome()
+
 suite "MessagingClientConf - mode expansion (toWakuNodeConf)":
   test "Core mode enables relay + service protocols":
     let kc = MessagingClientConf().toWakuNodeConf(LogosDeliveryMode.Core).valueOr:
@@ -27,7 +39,7 @@ suite "MessagingClientConf - mode expansion (toWakuNodeConf)":
       kc.relay == Opt.some(true)
       kc.filter == Opt.some(true)
       kc.lightpush == Opt.some(true)
-      kc.discv5Discovery == Opt.some(true)
+      kc.discv5Enabled()
       kc.peerExchange == Opt.some(true)
       kc.rendezvous.isNone()
         # the conf builder decides: on only with relay and without service discovery
@@ -41,8 +53,7 @@ suite "MessagingClientConf - mode expansion (toWakuNodeConf)":
       kc.lightpush == Opt.some(false)
       kc.store == Opt.some(false)
       kc.peerExchange == Opt.some(true)
-      kc.discv5Discovery == Opt.some(true)
-        # discovery stays on; mode does not force it off
+      kc.discv5Enabled() # discovery stays on; mode does not force it off
 
   test "an explicit discv5Discovery=false survives mode expansion":
     var kc = defaultKernelConf().valueOr:
@@ -128,6 +139,33 @@ suite "MessagingClientConf - mix override":
     ).valueOr:
       raiseAssert error
     check WakuNodeConf(lc.kernelConf).mix == Opt.some(false)
+
+suite "WakuNodeConf - discv5Discovery precedence (toWakuConf)":
+  test "discv5 is on by default":
+    let kc = defaultKernelConf().valueOr:
+      raiseAssert error
+    check kc.discv5Enabled()
+
+  test "a preset discv5Discovery=false turns discv5 off":
+    registerDiscv5OffPreset()
+    var kc = defaultKernelConf().valueOr:
+      raiseAssert error
+    kc.preset = "test.discv5-off"
+    check not kc.discv5Enabled()
+
+  test "an explicit discv5Discovery=true has priority over the preset":
+    registerDiscv5OffPreset()
+    var kc = defaultKernelConf().valueOr:
+      raiseAssert error
+    kc.preset = "test.discv5-off"
+    kc.discv5Discovery = Opt.some(true)
+    check kc.discv5Enabled()
+
+  test "an explicit discv5Discovery=false has priority over the default":
+    var kc = defaultKernelConf().valueOr:
+      raiseAssert error
+    kc.discv5Discovery = Opt.some(false)
+    check not kc.discv5Enabled()
 
 suite "MessagingClientConf - field mapping + transport policy":
   test "set fields are written to their kernel counterparts":
@@ -298,6 +336,12 @@ suite "parseLogosDeliveryConf - JSON parsing":
     check:
       kc.preset == "logostest"
       kc.relay == Opt.some(false) # Edge disables relay
+
+  test "a structured config's preset discv5Discovery has priority over the mode":
+    registerDiscv5OffPreset()
+    let lc = parseLogosDeliveryConf("""{"mode": "Core", "preset": "test.discv5-off"}""").valueOr:
+      raiseAssert error
+    check not WakuNodeConf(lc.kernelConf).discv5Enabled()
 
   test "messaging overrides split: kernel fields to the kernel, reliability to the record":
     let lc = parseLogosDeliveryConf(
@@ -664,6 +708,14 @@ suite "parseLogosDeliveryConf - JSON parsing":
       kc.relay == Opt.some(false)
       kc.maxMessageSize == "150KiB"
 
+  test "kernel entry layer: a preset discv5Discovery has priority over the default":
+    registerDiscv5OffPreset()
+    let lc = parseLogosDeliveryConf(
+      """{"entryLayer": "kernel", "kernelConf": {"preset": "test.discv5-off"}}"""
+    ).valueOr:
+      raiseAssert error
+    check not WakuNodeConf(lc.kernelConf).discv5Enabled()
+
   test "kernel entry layer requires a kernelConf":
     check parseLogosDeliveryConf("""{"entrylayer": "kernel"}""").isErr()
 
@@ -953,6 +1005,14 @@ suite "parseLogosDeliveryConf - flat WakuNodeConf shape (interop compatibility)"
       raiseAssert error
     check lc.messagingConf.get().reliabilityEnabled == fromPreset.reliabilityEnabled
 
+  test "a flat blob's preset discv5Discovery has priority over the mode":
+    registerDiscv5OffPreset()
+    let lc = parseLogosDeliveryConf(
+      """{"mode": "Core", "preset": "test.discv5-off", "relay": true}"""
+    ).valueOr:
+      raiseAssert error
+    check not WakuNodeConf(lc.kernelConf).discv5Enabled()
+
   test "port 0 (auto-allocate) is accepted in a flat blob":
     let lc = parseLogosDeliveryConf(
       """{"relay": true, "tcpPort": 0, "discv5UdpPort": 0}"""
@@ -1033,6 +1093,20 @@ suite "LogosDeliveryNodeConf - CLI frontend translation (resolveCliConf)":
     let plan = resolveCliConf(conf).expect("translate")
     check WakuNodeConf(plan.kernelConf).relay == Opt.some(false)
       # explicit wins over Core
+
+  test "channels entry: a preset discv5Discovery has priority over the mode":
+    registerDiscv5OffPreset()
+    var conf = cliConf(EntryLayer.channels)
+    conf.kernel.preset = "test.discv5-off"
+    let plan = resolveCliConf(conf).expect("translate")
+    check not WakuNodeConf(plan.kernelConf).discv5Enabled()
+
+  test "kernel entry: a preset discv5Discovery has priority over the default":
+    registerDiscv5OffPreset()
+    var conf = cliConf(EntryLayer.kernel)
+    conf.kernel.preset = "test.discv5-off"
+    let plan = resolveCliConf(conf).expect("translate")
+    check not WakuNodeConf(plan.kernelConf).discv5Enabled()
 
   test "the preset's messaging fields reach the messaging layer":
     var conf = cliConf(EntryLayer.messaging)
