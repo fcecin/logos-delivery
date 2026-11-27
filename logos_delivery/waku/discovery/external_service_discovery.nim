@@ -95,7 +95,7 @@ type ExternalServiceDiscovery* = ref object of IPeerDiscovery
   adverts: Table[string, Advert]
   interests: Table[string, bool] ## key -> taken by the plugin
   ownClusterId: uint16
-    ## The records of other clusters claim no codecs, shards or mix key, see
+    ## The records of other clusters give no codecs, shards or mix key, see
     ## `advertisedServing` and `advertisedMixKey`.
   announceWanted: AsyncEvent
   announceLoop: Future[void]

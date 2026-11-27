@@ -54,7 +54,7 @@ type WakuKademlia* = ref object
   serviceLookupInterval: Duration
   servicesToDiscover: HashSet[string]
   ownClusterId: uint16
-    ## The records of other clusters claim no codecs, shards or mix key, see
+    ## The records of other clusters give no codecs, shards or mix key, see
     ## `advertisedServing` and `advertisedMixKey`.
   servicesToAdvertise: Table[string, AdvertisedService]
     ## Keyed by service id: libp2p keeps one record per service. In production

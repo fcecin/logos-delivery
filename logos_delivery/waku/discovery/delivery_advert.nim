@@ -93,8 +93,10 @@ func withoutMixClaim*(data: seq[byte]): seq[byte] =
   raw[3] = raw[3] and not byte(1'u8 shl ord(Capabilities.Mix))
   cast[seq[byte]](base64.encode(raw))
 
-func claimsMixNode(data: openArray[byte], ownClusterId: uint16): Result[bool, string] =
-  ## Whether a `/logos/delivery` payload claims Relay and Mix on `ownClusterId`.
+func advertisesMixNode(
+    data: openArray[byte], ownClusterId: uint16
+): Result[bool, string] =
+  ## Whether a `/logos/delivery` payload advertises Relay and Mix on `ownClusterId`.
   ## An error for a payload that this version does not read.
   let caps = ?advertisedCapabilities(data)
   let (cluster, _) = ?advertisedShards(data)
@@ -114,40 +116,40 @@ func advertisedMixKey*(
   ## The mix key of a peer whose record lists these services.
   ##
   ## A mix node is a delivery node with relay mounted. Its record is the
-  ## delivery record: the payload claims Relay and Mix, and a `/mix/1.0.0`
-  ## entry carries the key. A key without that claim is not taken, so the pool
+  ## delivery record: the payload advertises Relay and Mix, and a `/mix/1.0.0`
+  ## entry carries the key. A key in any other record is not taken, so the pool
   ## holds no node that does not say it relays for the network.
   ##
-  ## Only a claim on `ownClusterId` counts, because nodes of two clusters disconnect.
+  ## Only a record of `ownClusterId` counts, because nodes of two clusters disconnect.
   var
-    claimed = false
+    mixNode = false
     key = Opt.none(Curve25519Key)
   for service in services:
     if service.id == LogosDeliveryServiceId:
-      claimed = claimsMixNode(service.data, ownClusterId).valueOr:
+      mixNode = advertisesMixNode(service.data, ownClusterId).valueOr:
         continue
     elif key.isNone() and service.id == MixProtocolID and
         service.data.len == Curve25519KeySize:
       key = Opt.some(intoCurve25519Key(service.data))
-  if not claimed:
+  if not mixNode:
     return Opt.none(Curve25519Key)
   key
 
 func disclaimsMix*(services: openArray[DiscoveredService], ownClusterId: uint16): bool =
   ## Whether a record listing these services says that its peer is no mix
   ## node of `ownClusterId`: its delivery payload is one this version reads and
-  ## claims not both Relay and Mix on that cluster. Only such a record removes
-  ## a mix key stored before.
+  ## does not advertise both Relay and Mix on that cluster. Only such a record
+  ## removes a mix key stored before.
   ##
   ## A record without a delivery payload, or with one this version cannot read,
-  ## says nothing. Nor does a payload on `ownClusterId` that claims Mix but comes
-  ## without a key: the record libp2p publishes under a node's own peer id,
+  ## says nothing. Nor does a payload on `ownClusterId` that advertises Mix but
+  ## comes without a key: the record libp2p publishes under a node's own peer id,
   ## which a random lookup returns, lists the delivery service with its payload
   ## but not the `/mix/1.0.0` entry of the record the node signs for its advert.
   var disclaimed = false
   for service in services:
     if service.id == LogosDeliveryServiceId:
-      let claimed = claimsMixNode(service.data, ownClusterId).valueOr:
+      let mixNode = advertisesMixNode(service.data, ownClusterId).valueOr:
         continue
-      disclaimed = not claimed
+      disclaimed = not mixNode
   disclaimed

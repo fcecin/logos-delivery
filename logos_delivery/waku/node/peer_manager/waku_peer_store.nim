@@ -124,7 +124,7 @@ proc removeMixPubKey*(peerStore: PeerStore, peerId: PeerId) =
   ## it is no mix node (any more): it lost its Mix RLN membership, it stopped
   ## relaying, or it is on another cluster. See `disclaimsMix`.
   if peerStore[MixPubKeyBook].del(peerId):
-    debug "Removed the mix pub key of a peer whose record disclaims mix",
+    debug "Removed the mix pub key of a peer that is not a mix node any more",
       peer_id = $peerId
 
 proc admitMixRecord*(peerStore: PeerStore, peerId: PeerId, seqNo: uint64): bool =
