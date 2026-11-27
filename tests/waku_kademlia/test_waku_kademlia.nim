@@ -1,7 +1,7 @@
 {.used.}
 
 import
-  std/[base64, sequtils, strutils],
+  std/[base64, strutils],
   results,
   chronos,
   testutils/unittests,
@@ -57,129 +57,87 @@ suite "Waku Kademlia service discovery":
         b[i] = byte(i)
       b
 
-    proc services(
-        caps: CapabilitiesBitfield, mixId: string, key: seq[byte]
-    ): seq[DiscoveredService] =
-      @[
-        DiscoveredService(id: LogosDeliveryServiceId, data: deliveryPayload(caps)),
-        DiscoveredService(id: mixId, data: key),
-      ]
+    proc delivery(caps: CapabilitiesBitfield, cluster = 0'u8): DiscoveredService =
+      DiscoveredService(
+        id: LogosDeliveryServiceId, data: deliveryPayload(caps, cluster)
+      )
+
+    proc mixKey(key = validKeyBytes(), id = MixProtocolID): DiscoveredService =
+      DiscoveredService(id: id, data: key)
+
+    proc kindOf(
+        services: seq[DiscoveredService], ownClusterId = 0'u16
+    ): MixKeyAdvertKind =
+      advertisedMixKey(services, ownClusterId).kind
 
     test "a delivery record claiming relay and mix gives its key":
-      let bytes = validKeyBytes()
-      let res = advertisedMixKey(services(MixNodeCaps, MixProtocolID, bytes), 0'u16)
+      let res = advertisedMixKey(@[delivery(MixNodeCaps), mixKey()], 0'u16)
       require:
-        res.isSome()
+        res.kind == MixKeyAdvertKind.Key
       check:
-        res.get().getBytes() == intoCurve25519Key(bytes).getBytes()
+        res.key.getBytes() == validKeyBytes()
 
-    test "a mix key with no delivery service gives none":
-      check advertisedMixKey(
-        @[DiscoveredService(id: MixProtocolID, data: validKeyBytes())], 0'u16
-      )
-        .isNone()
+    test "multiple mix services, first one wins":
+      var second = validKeyBytes()
+      second[0] = 100
+      let res =
+        advertisedMixKey(@[delivery(MixNodeCaps), mixKey(), mixKey(second)], 0'u16)
+      require:
+        res.kind == MixKeyAdvertKind.Key
+      check:
+        res.key.getBytes() == validKeyBytes()
 
-    test "a delivery record that does not claim mix gives none":
+    test "a record with no delivery service gives none":
+      check:
+        kindOf(@[]) == MixKeyAdvertKind.None
+        kindOf(@[mixKey()]) == MixKeyAdvertKind.None
+        kindOf(@[DiscoveredService(id: "/other/1.0.0", data: @[1'u8])]) ==
+          MixKeyAdvertKind.None
+
+    test "a delivery record that does not claim mix gives NotMixNode":
       let caps = CapabilitiesBitfield.init(relay = true)
-      check advertisedMixKey(services(caps, MixProtocolID, validKeyBytes()), 0'u16)
-        .isNone()
+      check:
+        kindOf(@[delivery(caps), mixKey()]) == MixKeyAdvertKind.NotMixNode
+        kindOf(@[delivery(caps)]) == MixKeyAdvertKind.NotMixNode
 
-    test "a delivery record that claims mix without relay gives none":
+    test "a delivery record that claims mix without relay gives NotMixNode":
       let caps = CapabilitiesBitfield.init(filter = true, mix = true)
-      check advertisedMixKey(services(caps, MixProtocolID, validKeyBytes()), 0'u16)
-        .isNone()
+      check:
+        kindOf(@[delivery(caps), mixKey()]) == MixKeyAdvertKind.NotMixNode
+        kindOf(@[delivery(caps)]) == MixKeyAdvertKind.NotMixNode
+
+    test "a delivery record of another cluster gives NotMixNode":
+      for services in [@[delivery(MixNodeCaps), mixKey()], @[delivery(MixNodeCaps)]]:
+        check kindOf(services, 1'u16) == MixKeyAdvertKind.NotMixNode
+      check kindOf(@[delivery(MixNodeCaps), mixKey()], 0'u16) == MixKeyAdvertKind.Key
 
     test "a delivery payload of another format version gives none":
       let payload = cast[seq[byte]](base64.encode(
         @[AdvertFormatVersion + 1, 0'u8, 0'u8, byte(MixNodeCaps)]
       ))
-      check advertisedMixKey(
-        @[
-          DiscoveredService(id: LogosDeliveryServiceId, data: payload),
-          DiscoveredService(id: MixProtocolID, data: validKeyBytes()),
-        ],
-        0'u16,
-      )
-        .isNone()
+      check kindOf(
+        @[DiscoveredService(id: LogosDeliveryServiceId, data: payload), mixKey()]
+      ) == MixKeyAdvertKind.None
 
     test "a delivery payload that is not base64 gives none":
-      check advertisedMixKey(
+      check kindOf(
         @[
           DiscoveredService(id: LogosDeliveryServiceId, data: @[0xff'u8, 0x00, 0x01]),
-          DiscoveredService(id: MixProtocolID, data: validKeyBytes()),
-        ],
-        0'u16,
-      )
-        .isNone()
+          mixKey(),
+        ]
+      ) == MixKeyAdvertKind.None
+
+    test "a delivery record claiming relay and mix without a key gives none":
+      ## libp2p's own record of a mix node, as a random lookup returns it.
+      check kindOf(@[delivery(MixNodeCaps)]) == MixKeyAdvertKind.None
 
     test "a key of the wrong length gives none":
-      check advertisedMixKey(
-        services(MixNodeCaps, MixProtocolID, @[0u8, 1u8, 2u8]), 0'u16
-      )
-        .isNone()
+      check kindOf(@[delivery(MixNodeCaps), mixKey(@[0u8, 1u8, 2u8])]) ==
+        MixKeyAdvertKind.None
 
     test "a key under another service id gives none":
-      check advertisedMixKey(
-        services(MixNodeCaps, "/foo/1.0.0", validKeyBytes()), 0'u16
-      )
-        .isNone()
-
-    test "a delivery record of another cluster gives none":
-      let services = services(MixNodeCaps, MixProtocolID, validKeyBytes())
-      check:
-        advertisedMixKey(services, 0'u16).isSome()
-        advertisedMixKey(services, 1'u16).isNone()
-
-  suite "disclaimsMix":
-    proc delivery(caps: CapabilitiesBitfield): DiscoveredService =
-      DiscoveredService(id: LogosDeliveryServiceId, data: deliveryPayload(caps))
-
-    proc mixKey(): DiscoveredService =
-      DiscoveredService(id: MixProtocolID, data: newSeq[byte](Curve25519KeySize))
-
-    test "a delivery record that claims no mix disclaims":
-      check disclaimsMix(@[delivery(CapabilitiesBitfield.init(relay = true))], 0'u16)
-
-    test "a delivery record that claims mix without relay disclaims":
-      check disclaimsMix(
-        @[delivery(CapabilitiesBitfield.init(filter = true, mix = true))], 0'u16
-      )
-
-    test "a delivery record claiming relay and mix with its key does not":
-      check not disclaimsMix(@[delivery(MixNodeCaps), mixKey()], 0'u16)
-
-    test "a delivery record of another cluster disclaims":
-      for services in [@[delivery(MixNodeCaps), mixKey()], @[delivery(MixNodeCaps)]]:
-        check:
-          disclaimsMix(services, 1'u16)
-          not disclaimsMix(services, 0'u16)
-
-    test "a delivery record claiming relay and mix without a key does not":
-      ## libp2p's own record of a mix node, as a random lookup returns it.
-      check not disclaimsMix(@[delivery(MixNodeCaps)], 0'u16)
-
-    test "a record with no delivery service does not":
-      check:
-        not disclaimsMix(@[], 0'u16)
-        not disclaimsMix(@[DiscoveredService(id: "/other/1.0.0", data: @[1'u8])], 0'u16)
-
-    test "a delivery payload it cannot read does not":
-      check:
-        not disclaimsMix(
-          @[DiscoveredService(id: LogosDeliveryServiceId, data: @[0xff'u8, 0x00])],
-          0'u16,
-        )
-        not disclaimsMix(
-          @[
-            DiscoveredService(
-              id: LogosDeliveryServiceId,
-              data: cast[seq[byte]](base64.encode(
-                @[AdvertFormatVersion + 1, 0'u8, 0'u8, 0'u8]
-              )),
-            )
-          ],
-          0'u16,
-        )
+      check kindOf(@[delivery(MixNodeCaps), mixKey(id = "/foo/1.0.0")]) ==
+        MixKeyAdvertKind.None
 
   suite "remotePeerInfoFrom":
     proc randomPeerId(): PeerId =
@@ -220,41 +178,6 @@ suite "Waku Kademlia service discovery":
         peerInfo.origin == PeerOrigin.Kademlia
         peerInfo.peerId == pid
 
-    test "mixPubKey extracted from first mix service":
-      let
-        pid = randomPeerId()
-        svc = validMixService()
-        record =
-          buildExtendedPeerRecord(pid, @[testAddr(61600)], @[deliveryService(), svc])
-        res = remotePeerInfoFrom(record, 0)
-      require:
-        res.isSome()
-      let peerInfo = res.get()
-      check:
-        peerInfo.mixPubKey.isSome()
-        peerInfo.mixPubKey.get().getBytes() == svc.data.get(@[])
-
-    test "mixPubKey stays none for a mix service outside a delivery record":
-      let
-        pid = randomPeerId()
-        record = buildExtendedPeerRecord(pid, @[testAddr(61600)], @[validMixService()])
-        res = remotePeerInfoFrom(record, 0)
-      require:
-        res.isSome()
-      check:
-        res.get().mixPubKey.isNone()
-
-    test "mixPubKey stays none when no mix service present":
-      let
-        pid = randomPeerId()
-        svc = ServiceInfo(id: "/other/1.0.0", data: Opt.some(@[1u8]))
-        record = buildExtendedPeerRecord(pid, @[testAddr(61600)], @[svc])
-        res = remotePeerInfoFrom(record, 0)
-      require:
-        res.isSome()
-      check:
-        res.get().mixPubKey.isNone()
-
     test "addresses mapped correctly":
       let
         pid = randomPeerId()
@@ -267,44 +190,6 @@ suite "Waku Kademlia service discovery":
       check:
         peerInfo.addrs.len == 3
         peerInfo.addrs == addrs
-
-    test "multiple mix services, first one wins":
-      let
-        pid = randomPeerId()
-        firstBytes = block:
-          var b = newSeq[byte](Curve25519KeySize)
-          for i in 0 ..< Curve25519KeySize:
-            b[i] = byte(i)
-          b
-        secondBytes = block:
-          var b = newSeq[byte](Curve25519KeySize)
-          for i in 0 ..< Curve25519KeySize:
-            b[i] = byte(i + 100)
-          b
-        record = buildExtendedPeerRecord(
-          pid,
-          @[testAddr(61600)],
-          @[deliveryService(), mixService(firstBytes), mixService(secondBytes)],
-        )
-        res = remotePeerInfoFrom(record, 0)
-      require:
-        res.isSome()
-      check:
-        res.get().mixPubKey.get().getBytes() == firstBytes
-
-    test "mix service with bad key length is skipped silently":
-      let
-        pid = randomPeerId()
-        badSvc = mixService(@[0u8, 1u8, 2u8])
-        record =
-          buildExtendedPeerRecord(pid, @[testAddr(61600)], @[deliveryService(), badSvc])
-        res = remotePeerInfoFrom(record, 0)
-      require:
-        res.isSome()
-      let peerInfo = res.get()
-      check:
-        peerInfo.peerId == pid
-        peerInfo.mixPubKey.isNone()
 
     proc storedMixKey(peerStore: PeerStore, pid: PeerId): Opt[Curve25519Key] =
       if pid in peerStore[MixPubKeyBook]:
@@ -325,12 +210,6 @@ suite "Waku Kademlia service discovery":
       doAssert wk.protocol.switch.peerStore.storedMixKey(pid).isSome()
       wk
 
-    test "mixPubKey stays none for a delivery record of another cluster":
-      let record = mixNodeRecord(randomPeerId())
-      check:
-        remotePeerInfoFrom(record, 0'u16).get().mixPubKey.isSome()
-        remotePeerInfoFrom(record, 1'u16).get().mixPubKey.isNone()
-
     test "a delivery record of another cluster removes the stored key":
       ## The peer moved to cluster 1 with the same peer id and mix key.
       let
@@ -340,17 +219,11 @@ suite "Waku Kademlia service discovery":
           id: LogosDeliveryServiceId,
           data: Opt.some(deliveryPayload(MixNodeCaps, cluster = 1)),
         )
-        found = wk.processRecords(
-          @[
-            buildExtendedPeerRecord(
-              pid, @[testAddr(61600)], @[moved, validMixService()]
-            )
-          ],
-          "test",
-        )
-      check:
-        found.mapIt(it.mixPubKey.isNone()) == @[true]
-        wk.protocol.switch.peerStore.storedMixKey(pid).isNone()
+      discard wk.processRecords(
+        @[buildExtendedPeerRecord(pid, @[testAddr(61600)], @[moved, validMixService()])],
+        "test",
+      )
+      check wk.protocol.switch.peerStore.storedMixKey(pid).isNone()
 
     test "a delivery record that claims no mix removes the stored key":
       ## The peer lost its Mix RLN membership and advertises as a delivery node.
@@ -386,11 +259,17 @@ suite "Waku Kademlia service discovery":
         wk.processRecords(@[buildExtendedPeerRecord(pid, @[testAddr(61600)])], "test")
       check wk.protocol.switch.peerStore.storedMixKey(pid).isSome()
 
+    test "a record of this node itself stores no mix key":
+      let
+        wk = kad_utils.newTestKademlia(newTestSwitch())
+        self = wk.protocol.switch.peerInfo.peerId
+      discard wk.processRecords(@[mixNodeRecord(self)], "test")
+      check wk.protocol.switch.peerStore.storedMixKey(self).isNone()
+
     test "a peer learned another way keeps the stored key":
       let
-        peerStore = PeerStore.new(nil, capacity = 50)
         pid = randomPeerId()
-      peerStore.addPeer(remotePeerInfoFrom(mixNodeRecord(pid), 0).get())
+        peerStore = kademliaWithMixPeer(pid).protocol.switch.peerStore
 
       peerStore.addPeer(
         RemotePeerInfo.init(
@@ -495,7 +374,8 @@ suite "Waku Kademlia advertises records this node signs":
     check:
       delivery[0].peerId == infoA.peerId
       delivery[0].protocols == @[LogosDeliveryServiceId, MixProtocolID, WakuRelayCodec]
-      delivery[0].mixPubKey == Opt.some(intoCurve25519Key(mixKey))
+      switchB.peerStore.getPeer(infoA.peerId).mixPubKey ==
+        Opt.some(intoCurve25519Key(mixKey))
 
     ## Mix is not a service of its own: nothing is filed under it.
     check (await wkB.lookupServicePeers(MixProtocolID)).expect("lookup").len == 0
@@ -567,10 +447,10 @@ suite "Waku Kademlia advertises records this node signs":
         .expect("libp2p takes the record")
 
     proc foundMixKey(): Future[Opt[Opt[Curve25519Key]]] {.async.} =
-      ## The mix key B finds for A; the outer `none` when B does not find A.
+      ## The mix key B stores for A; the outer `none` when B does not find A.
       let res = await wkB.lookupServicePeers(LogosDeliveryServiceId)
       if res.isOk() and res.get().len > 0:
-        return Opt.some(res.get()[0].mixPubKey)
+        return Opt.some(switchB.peerStore.getPeer(infoA.peerId).mixPubKey)
       return Opt.none(Opt[Curve25519Key])
 
     await advertise(mix = false)

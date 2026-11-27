@@ -5,16 +5,13 @@ import
   chronos,
   chronicles,
   results,
-  stew/byteutils,
   libp2p/[peerid, multiaddress, switch, extended_peer_record],
   libp2p/crypto/crypto,
   libp2p/crypto/rng,
-  libp2p/crypto/curve25519,
   libp2p/protocols/service_discovery,
   libp2p/protocols/service_discovery/types,
   libp2p/protocols/kademlia/types,
   libp2p/protocols/kademlia/key_value,
-  libp2p_mix/mix_protocol,
   brokers/broker_context
 
 import
@@ -94,11 +91,6 @@ proc remotePeerInfoFrom*(
   let (codecs, shards) = advertisedServing(record.discoveredServices(), ownClusterId)
   let protocols = deduplicate(record.services.mapIt(it.id) & codecs)
 
-  let mixPubKey = advertisedMixKey(record.discoveredServices(), ownClusterId)
-  if mixPubKey.isSome():
-    trace "Successfully extracted mix pub key",
-      peerId = record.peerId, keyHex = byteutils.toHex(mixPubKey.get())
-
   return Opt.some(
     RemotePeerInfo.init(
       record.peerId,
@@ -106,7 +98,6 @@ proc remotePeerInfoFrom*(
       protocols = protocols,
       advertisedShards = shards,
       origin = PeerOrigin.Kademlia,
-      mixPubKey = mixPubKey,
     )
   )
 
@@ -118,18 +109,12 @@ proc processRecords*(
     let peerInfo = remotePeerInfoFrom(record, self.ownClusterId).valueOr:
       continue
 
-    # An older record than the one that last told this peer's mix key neither
-    # sets nor removes it.
-    let disclaims = disclaimsMix(record.discoveredServices(), self.ownClusterId)
-    let admitted =
-      (peerInfo.mixPubKey.isSome() or disclaims) and
-      self.peerManager.switch.peerStore.admitMixRecord(peerInfo.peerId, record.seqNo)
-    if not admitted:
-      reset(peerInfo.mixPubKey)
-
+    discard self.peerManager.admitMixRecord(
+      peerInfo.peerId,
+      record.seqNo,
+      advertisedMixKey(record.discoveredServices(), self.ownClusterId),
+    )
     self.peerManager.addPeer(peerInfo, PeerOrigin.Kademlia)
-    if admitted and disclaims:
-      self.peerManager.switch.peerStore.removeMixPubKey(peerInfo.peerId)
 
     debug "Peer added via service discovery",
       source,

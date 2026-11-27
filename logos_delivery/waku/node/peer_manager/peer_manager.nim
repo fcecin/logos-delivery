@@ -178,6 +178,15 @@ proc addPeer*(
 
     pm.storage.insertOrReplace(remotePeerInfo)
 
+proc admitMixRecord*(
+    pm: PeerManager, peerId: PeerId, seqNo: uint64, mixKey: MixKeyAdvert
+): bool {.gcsafe.} =
+  ## Sets or removes the mix key of the peer, see `admitMixRecord` of the peer
+  ## store. A record of this node itself changes nothing.
+  if peerId == pm.switch.peerInfo.peerId:
+    return false
+  pm.switch.peerStore.admitMixRecord(peerId, seqNo, mixKey)
+
 proc getPeer*(pm: PeerManager, peerId: PeerId): RemotePeerInfo =
   return pm.switch.peerStore.getPeer(peerId)
 

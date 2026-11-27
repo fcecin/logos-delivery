@@ -124,12 +124,14 @@ suite "Self advertisement":
       kad.advertisedSecondary[0] ==
         @[DiscoveredService(id: MixProtocolID, data: mixKeyBytes())]
       kad.advertisedCaps().supportsCapability(Capabilities.Mix)
-      ## What a reader of this record takes.
-      advertisedMixKey(
-        @[DiscoveredService(id: LogosDeliveryServiceId, data: kad.advertisedData[0])] &
-          kad.advertisedSecondary[0],
-        16'u16,
-      ) == Opt.some(intoCurve25519Key(mixKeyBytes()))
+    ## What a reader of this record takes.
+    let read = advertisedMixKey(
+      @[DiscoveredService(id: LogosDeliveryServiceId, data: kad.advertisedData[0])] &
+        kad.advertisedSecondary[0],
+      16'u16,
+    )
+    require read.kind == MixKeyAdvertKind.Key
+    check read.key == intoCurve25519Key(mixKeyBytes())
 
   asyncTest "a mix node that is not ready advertises as a delivery node only":
     ## With Mix RLN, a node without a usable Mix membership cannot prove a hop.
@@ -342,5 +344,5 @@ suite "Delivery record into the peer store":
     var peer = discovered(confWith(CoreFlags).withMix())
     peer.services.add(DiscoveredService(id: MixProtocolID, data: mixKeyBytes()))
     check:
-      peer.toRemotePeerInfo(16'u16).get().mixPubKey == mixKey()
-      peer.toRemotePeerInfo(7'u16).get().mixPubKey.isNone()
+      advertisedMixKey(peer.services, 16'u16).kind == MixKeyAdvertKind.Key
+      advertisedMixKey(peer.services, 7'u16).kind == MixKeyAdvertKind.NotMixNode

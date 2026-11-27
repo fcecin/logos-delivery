@@ -12,6 +12,7 @@ import libp2p/crypto/curve25519
 import libp2p_mix/mix_protocol
 import
   logos_delivery/waku/discovery/peer_discovery_interface,
+  logos_delivery/waku/waku_core/peers,
   logos_delivery/waku/waku_enr/capabilities
 
 logScope:
@@ -112,8 +113,8 @@ func advertisesMixNode(
 
 func advertisedMixKey*(
     services: openArray[DiscoveredService], ownClusterId: uint16
-): Opt[Curve25519Key] =
-  ## The mix key of a peer whose record lists these services.
+): MixKeyAdvert =
+  ## What a record that lists these services says about the mix key of its peer.
   ##
   ## A mix node is a delivery node with relay mounted. Its record is the
   ## delivery record: the payload advertises Relay and Mix, and a `/mix/1.0.0`
@@ -121,35 +122,31 @@ func advertisedMixKey*(
   ## holds no node that does not say it relays for the network.
   ##
   ## Only a record of `ownClusterId` counts, because nodes of two clusters disconnect.
-  var
-    mixNode = false
-    key = Opt.none(Curve25519Key)
-  for service in services:
-    if service.id == LogosDeliveryServiceId:
-      mixNode = advertisesMixNode(service.data, ownClusterId).valueOr:
-        continue
-    elif key.isNone() and service.id == MixProtocolID and
-        service.data.len == Curve25519KeySize:
-      key = Opt.some(intoCurve25519Key(service.data))
-  if not mixNode:
-    return Opt.none(Curve25519Key)
-  key
-
-func disclaimsMix*(services: openArray[DiscoveredService], ownClusterId: uint16): bool =
-  ## Whether a record listing these services says that its peer is no mix
-  ## node of `ownClusterId`: its delivery payload is one this version reads and
-  ## does not advertise both Relay and Mix on that cluster. Only such a record
-  ## removes a mix key stored before.
+  ##
+  ## The peer is not a mix node when the delivery payload is one this version
+  ## reads and does not advertise both Relay and Mix on that cluster. The peer
+  ## lost its Mix RLN membership, stopped relaying, or is on another cluster.
   ##
   ## A record without a delivery payload, or with one this version cannot read,
   ## says nothing. Nor does a payload on `ownClusterId` that advertises Mix but
   ## comes without a key: the record libp2p publishes under a node's own peer id,
   ## which a random lookup returns, lists the delivery service with its payload
   ## but not the `/mix/1.0.0` entry of the record the node signs for its advert.
-  var disclaimed = false
+  var
+    mixNode = Opt.none(bool)
+    key = Opt.none(Curve25519Key)
   for service in services:
     if service.id == LogosDeliveryServiceId:
-      let mixNode = advertisesMixNode(service.data, ownClusterId).valueOr:
+      let advertised = advertisesMixNode(service.data, ownClusterId).valueOr:
         continue
-      disclaimed = not mixNode
-  disclaimed
+      mixNode = Opt.some(advertised)
+    elif key.isNone() and service.id == MixProtocolID and
+        service.data.len == Curve25519KeySize:
+      key = Opt.some(intoCurve25519Key(service.data))
+  if mixNode.isNone():
+    return MixKeyAdvert(kind: MixKeyAdvertKind.None)
+  if not mixNode.get():
+    return MixKeyAdvert(kind: MixKeyAdvertKind.NotMixNode)
+  let mixKey = key.valueOr:
+    return MixKeyAdvert(kind: MixKeyAdvertKind.None)
+  MixKeyAdvert(kind: MixKeyAdvertKind.Key, key: mixKey)

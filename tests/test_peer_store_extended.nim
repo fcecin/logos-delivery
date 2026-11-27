@@ -4,11 +4,13 @@ import
   std/[sequtils, times],
   chronos,
   libp2p/crypto/crypto,
+  libp2p/crypto/curve25519,
   libp2p/peerid,
   libp2p/peerstore,
   libp2p/multiaddress,
   eth/common/keys as ethkeys,
   eth/p2p/discoveryv5/enr,
+  libp2p_mix/pool,
   testutils/unittests
 import
   logos_delivery/waku/
@@ -406,16 +408,43 @@ suite "Extended nim-libp2p Peer Store":
     var p1: PeerId
     require p1.init("QmeuZJbXrszW2jdT7GdduSjQskPU3S7vvGWKtKgDfkDvW1")
 
+    let
+      key = MixKeyAdvert(
+        kind: MixKeyAdvertKind.Key,
+        key: intoCurve25519Key(newSeqWith(Curve25519KeySize, 1'u8)),
+      )
+      notMixNode = MixKeyAdvert(kind: MixKeyAdvertKind.NotMixNode)
+
     check:
-      peerStore.admitMixRecord(p1, 10)
-      not peerStore.admitMixRecord(p1, 9)
-      peerStore.admitMixRecord(p1, 10)
-      peerStore.admitMixRecord(p1, 11)
-      not peerStore.admitMixRecord(p1, 10)
+      peerStore.admitMixRecord(p1, 10, key)
+      not peerStore.admitMixRecord(p1, 9, notMixNode)
+      p1 in peerStore[MixPubKeyBook]
+      peerStore.admitMixRecord(p1, 10, key)
+      peerStore.admitMixRecord(p1, 11, notMixNode)
+      p1 notin peerStore[MixPubKeyBook]
+      not peerStore.admitMixRecord(p1, 10, key)
+      p1 notin peerStore[MixPubKeyBook]
 
     # A deleted peer starts again: nothing is known about its records.
     peerStore.delete(p1)
-    check peerStore.admitMixRecord(p1, 1)
+    check peerStore.admitMixRecord(p1, 1, key)
+
+  test "admitMixRecord() changes nothing for a record that says nothing about the key":
+    let peerStore = PeerStore.new(nil, capacity = 5)
+    var p1: PeerId
+    require p1.init("QmeuZJbXrszW2jdT7GdduSjQskPU3S7vvGWKtKgDfkDvW1")
+
+    let key = MixKeyAdvert(
+      kind: MixKeyAdvertKind.Key,
+      key: intoCurve25519Key(newSeqWith(Curve25519KeySize, 1'u8)),
+    )
+
+    check:
+      peerStore.admitMixRecord(p1, 10, key)
+      not peerStore.admitMixRecord(p1, 20, MixKeyAdvert(kind: MixKeyAdvertKind.None))
+      p1 in peerStore[MixPubKeyBook]
+      # The record with sequence number 20 did not outdate this one.
+      peerStore.admitMixRecord(p1, 15, MixKeyAdvert(kind: MixKeyAdvertKind.NotMixNode))
 
   test "pruneStaleEnrs() only drops stale, non-connected, discovered ENRs":
     let peerStore = PeerStore.new(nil, capacity = 5)

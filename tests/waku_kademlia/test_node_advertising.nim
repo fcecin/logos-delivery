@@ -262,8 +262,7 @@ suite "Waku Kademlia node advertising":
           DiscoveredService(id: it.id, data: it.data.get(@[]))
         ),
         conf.clusterId,
-      )
-        .isNone()
+      ).kind == MixKeyAdvertKind.None
       node.publishedServices().allIt(it.id != MixProtocolID)
 
   proc newHeldMixNode(

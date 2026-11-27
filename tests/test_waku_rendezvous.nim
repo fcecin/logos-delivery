@@ -7,13 +7,15 @@ import
   testutils/unittests,
   libp2p/builders,
   libp2p/crypto/curve25519,
-  libp2p/protocols/rendezvous
+  libp2p/protocols/rendezvous,
+  libp2p_mix/curve25519 as mix_curve25519
 
 import
   logos_delivery/waku/waku_core/peers,
   logos_delivery/waku/waku_core/codecs,
   logos_delivery/waku/waku_core,
   logos_delivery/waku/node/waku_node,
+  logos_delivery/waku/node/waku_node/relay,
   logos_delivery/waku/node/peer_manager/peer_manager,
   logos_delivery/waku/waku_rendezvous/protocol,
   logos_delivery/waku/waku_rendezvous/common,
@@ -127,6 +129,44 @@ procSuite "Waku Rendezvous":
       records.len == 1
       records[0].peerId == peerInfo1.peerId
       #records[0].mixKey == node1.mixPubKeyHex().get("")
+
+  asyncTest "a rendezvous record sets the mix key of its peer":
+    ## Three nodes: a mix node that registers, a rendezvous point and a client.
+    let
+      clusterId = 10.uint16
+      mixNode = newTestWakuNode(generateSecp256k1Key(), clusterId = clusterId)
+      point = newTestWakuNode(generateSecp256k1Key(), clusterId = clusterId)
+      client = newTestWakuNode(generateSecp256k1Key(), clusterId = clusterId)
+      mixKeys = generateKeyPair().expect("mix key pair")
+    (await mixNode.mountRelay()).isOkOr:
+      raiseAssert "Failed to mount relay: " & $error
+    (
+      await mixNode.mountMix(
+        clusterId, mixKeys.privateKey, @[], allowAllAddresses = true
+      )
+    ).isOkOr:
+      raiseAssert "Failed to mount mix: " & $error
+    await allFutures(
+      [mixNode.mountRendezvous(clusterId), point.mountRendezvous(clusterId)]
+    )
+    await client.mountRendezvousClient(clusterId)
+    await allFutures([mixNode.start(), point.start(), client.start()])
+    defer:
+      await allFutures([mixNode.stop(), point.stop(), client.stop()])
+
+    let pointInfo = point.switch.peerInfo.toRemotePeerInfo()
+    mixNode.peerManager.addPeer(pointInfo)
+    client.peerManager.addPeer(pointInfo)
+    (await mixNode.wakuRendezvous.advertiseAll()).isOkOr:
+      raiseAssert "Failed to advertise: " & error
+
+    # The rendezvous request needs a connection to the rendezvous point.
+    require await client.peerManager.connectPeer(pointInfo)
+    (await client.wakuRendezvousClient.requestAll()).isOkOr:
+      raiseAssert "Failed to request: " & error
+
+    check client.switch.peerStore.getPeer(mixNode.switch.peerInfo.peerId).mixPubKey ==
+      Opt.some(mixKeys.publicKey)
 
   asyncTest "Rendezvous advertises configured shards before relay is active":
     ## Given: A node with configured shards but no relay subscriptions yet

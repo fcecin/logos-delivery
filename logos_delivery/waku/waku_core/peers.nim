@@ -45,6 +45,18 @@ type
     Inbound
     Outbound
 
+  MixKeyAdvertKind* {.pure.} = enum
+    None ## The record says nothing about the mix key of the peer.
+    Key ## The record gives the mix key of the peer.
+    NotMixNode ## The record says that the peer is not a mix node.
+
+  MixKeyAdvert* = object ## What a record of a peer says about the mix key of that peer.
+    case kind*: MixKeyAdvertKind
+    of MixKeyAdvertKind.Key:
+      key*: Curve25519Key
+    else:
+      discard
+
 type RemotePeerInfo* {.proto3.} = ref object
   peerId* {.fieldNumber: 1, ext.}: PeerID
   addrs* {.fieldNumber: 2, ext.}: seq[MultiAddress]
