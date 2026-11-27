@@ -12,6 +12,7 @@ import libp2p/crypto/curve25519
 import libp2p_mix/mix_protocol
 import
   logos_delivery/waku/discovery/peer_discovery_interface,
+  logos_delivery/waku/waku_core/peers,
   logos_delivery/waku/waku_enr/capabilities
 
 const
@@ -90,62 +91,34 @@ func withoutMixClaim*(data: seq[byte]): seq[byte] =
   raw[3] = raw[3] and not byte(1'u8 shl ord(Capabilities.Mix))
   cast[seq[byte]](base64.encode(raw))
 
-func claimsMixNode(
-    data: openArray[byte], ownClusterId: Opt[uint16]
-): Result[bool, string] =
-  ## Whether a `/logos/delivery` payload claims Relay and Mix on `ownClusterId`.
-  ## An error for a payload that this version does not read.
-  ## Any cluster counts when `ownClusterId` is none.
-  let caps = ?advertisedCapabilities(data)
-  let (cluster, _) = ?advertisedShards(data)
-  ok(
-    (ownClusterId.isNone() or ownClusterId.get() == cluster) and
-      caps.supportsCapability(Capabilities.Relay) and
-      caps.supportsCapability(Capabilities.Mix)
-  )
-
-func advertisedMixKey*(
-    services: openArray[DiscoveredService], ownClusterId = Opt.none(uint16)
-): Opt[Curve25519Key] =
-  ## The mix key of a peer whose record lists these services.
-  ##
-  ## A mix node is a delivery node with relay mounted. Its record is the
-  ## delivery record: the payload claims Relay and Mix, and a `/mix/1.0.0`
-  ## entry carries the key. A key without that claim is not taken, so the pool
-  ## holds no node that does not say it relays for the network.
-  ##
-  ## Only a claim on `ownClusterId` counts, because nodes of two clusters disconnect.
+func mixKeyAdvert*(
+    services: openArray[DiscoveredService], ownClusterId: uint16
+): MixKeyAdvert =
+  ## What a record with these services says about the mix key of its peer.
+  ## A mix node advertises Relay and Mix, with its mix key in a `/mix/1.0.0` entry.
   var
-    claimed = false
+    delivery = Opt.none((CapabilitiesBitfield, uint16))
     key = Opt.none(Curve25519Key)
   for service in services:
     if service.id == LogosDeliveryServiceId:
-      claimed = claimsMixNode(service.data, ownClusterId).valueOr:
+      let caps = advertisedCapabilities(service.data).valueOr:
         continue
+      let (cluster, _) = advertisedShards(service.data).valueOr:
+        continue
+      delivery = Opt.some((caps, cluster))
     elif key.isNone() and service.id == MixProtocolID and
         service.data.len == Curve25519KeySize:
       key = Opt.some(intoCurve25519Key(service.data))
-  if not claimed:
-    return Opt.none(Curve25519Key)
-  key
 
-func disclaimsMix*(
-    services: openArray[DiscoveredService], ownClusterId = Opt.none(uint16)
-): bool =
-  ## Whether a record listing these services says that its peer is no mix
-  ## node of `ownClusterId`: its delivery payload is one this version reads and
-  ## claims not both Relay and Mix on that cluster. Only such a record removes
-  ## a mix key stored before.
-  ##
-  ## A record without a delivery payload, or with one this version cannot read,
-  ## says nothing. Nor does a payload on `ownClusterId` that claims Mix but comes
-  ## without a key: the record libp2p publishes under a node's own peer id,
-  ## which a random lookup returns, lists the delivery service with its payload
-  ## but not the `/mix/1.0.0` entry of the record the node signs for its advert.
-  var disclaimed = false
-  for service in services:
-    if service.id == LogosDeliveryServiceId:
-      let claimed = claimsMixNode(service.data, ownClusterId).valueOr:
-        continue
-      disclaimed = not claimed
-  disclaimed
+  let (caps, cluster) = delivery.valueOr:
+    return MixKeyAdvert(kind: MixKeyAdvertKind.None)
+  if cluster != ownClusterId:
+    # A node disconnects from a peer of another cluster.
+    return MixKeyAdvert(kind: MixKeyAdvertKind.OtherCluster)
+  if not caps.supportsCapability(Capabilities.Mix):
+    return MixKeyAdvert(kind: MixKeyAdvertKind.NoMix)
+  if not caps.supportsCapability(Capabilities.Relay):
+    return MixKeyAdvert(kind: MixKeyAdvertKind.NoRelay)
+  if key.isNone():
+    return MixKeyAdvert(kind: MixKeyAdvertKind.NoKey)
+  MixKeyAdvert(kind: MixKeyAdvertKind.Key, key: key.get())

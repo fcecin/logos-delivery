@@ -119,46 +119,47 @@ proc peers*(peerStore: PeerStore): seq[RemotePeerInfo] =
 
   return allKeys.mapIt(peerStore.getPeer(it))
 
-proc removeMixPubKey*(peerStore: PeerStore, peerId: PeerId) =
-  ## Takes the peer out of the mix pool. For a peer whose delivery record says
-  ## it is no mix node (any more): it lost its Mix RLN membership, it stopped
-  ## relaying, or it is on another cluster. See `disclaimsMix`.
-  if peerStore[MixPubKeyBook].del(peerId):
-    debug "Removed the mix pub key of a peer whose record disclaims mix",
-      peer_id = $peerId
+proc setMixPubKey(peerStore: PeerStore, peerId: PeerId, key: Curve25519Key) =
+  trace "Adding mix pub key to peer store", peer_id = $peerId, mix_pub_key = $key
+  peerStore[MixPubKeyBook][peerId] = key
 
-proc admitMixRecord*(peerStore: PeerStore, peerId: PeerId, seqNo: uint64): bool =
-  ## Whether a discovered record with this sequence number may set or remove
-  ## the peer's mix key: not when a newer record did so before. A registrar
+  # The mix pool needs the libp2p key, and discovery learns the mix key
+  # before identify fills the key book. The peer id holds the key.
+  if peerStore[KeyBook][peerId].scheme != Secp256k1:
+    var libp2pPubKey: crypto.PublicKey
+    if peerId.extractPublicKey(libp2pPubKey) and libp2pPubKey.scheme == Secp256k1:
+      peerStore[KeyBook][peerId] = libp2pPubKey
+
+proc admitMixRecord*(
+    peerStore: PeerStore, peerId: PeerId, seqNo: uint64, advert: MixKeyAdvert
+): bool =
+  ## Sets or removes the peer's mix key as a discovered record with this
+  ## sequence number says, unless a newer record did so before. A registrar
   ## serves the record it was handed until that expires, so a lookup can return
   ## a record older than one seen earlier or one that rendezvous delivered, for
   ## instance the keyless record a mix node advertises until its Mix RLN
-  ## membership is usable. Every sequence number of an advert is the Unix time
-  ## of signing.
+  ## membership is usable. Every sequence number is the Unix time of signing.
   ##
-  ## Call it only for a record that carries a mix key or disclaims mix. A
-  ## record that says neither, like the one libp2p publishes under the peer id
-  ## of a mix node of our cluster, has a sequence of its own and must not outdate
-  ## the node's advert.
-  if seqNo < peerStore[MixRecordSeqBook][peerId]:
+  ## A `None` or `NoKey` record changes nothing. Such a record, like the one
+  ## libp2p publishes under a node's own peer id, has a sequence of its own and
+  ## must not outdate the node's advert.
+  ##
+  ## `PeerManager.admitMixRecord` skips a record of this node, then calls this proc.
+  if advert.kind in {MixKeyAdvertKind.None, MixKeyAdvertKind.NoKey} or
+      seqNo < peerStore[MixRecordSeqBook][peerId]:
     return false
   peerStore[MixRecordSeqBook][peerId] = seqNo
+  if advert.kind == MixKeyAdvertKind.Key:
+    peerStore.setMixPubKey(peerId, advert.key)
+  elif peerStore[MixPubKeyBook].del(peerId):
+    debug "Removed the mix pub key of a peer", peer_id = $peerId, cause = advert.kind
   return true
 
 proc addPeer*(peerStore: PeerStore, peer: RemotePeerInfo, origin = UnknownOrigin) =
   ## Storing MixPubKey even if peer is already present as this info might be new
   ## or updated.
   if peer.mixPubKey.isSome():
-    trace "adding mix pub key to peer store",
-      peer_id = $peer.peerId, mix_pub_key = $peer.mixPubKey.get()
-    peerStore[MixPubKeyBook][peer.peerId] = peer.mixPubKey.get()
-
-    # The mix pool needs the libp2p key, and discovery learns the mix key
-    # before identify fills the key book. The peer id holds the key.
-    if peerStore[KeyBook][peer.peerId].scheme != Secp256k1:
-      var libp2pPubKey: crypto.PublicKey
-      if peer.peerId.extractPublicKey(libp2pPubKey) and libp2pPubKey.scheme == Secp256k1:
-        peerStore[KeyBook][peer.peerId] = libp2pPubKey
+    peerStore.setMixPubKey(peer.peerId, peer.mixPubKey.get())
 
   let effectiveOrigin = if origin != UnknownOrigin: origin else: peer.origin
   if peer.enr.isSome() and effectiveOrigin.isDiscoveryOrigin():

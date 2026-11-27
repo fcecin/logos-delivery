@@ -257,12 +257,12 @@ suite "Waku Kademlia node advertising":
       node.publishedRecord().isSome()
     check:
       delivery notin node.publishedServices()
-      advertisedMixKey(
+      mixKeyAdvert(
         node.publishedServices().mapIt(
           DiscoveredService(id: it.id, data: it.data.get(@[]))
-        )
-      )
-        .isNone()
+        ),
+        conf.clusterId,
+      ).kind == MixKeyAdvertKind.None
       node.publishedServices().allIt(it.id != MixProtocolID)
 
   proc newHeldMixNode(

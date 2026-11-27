@@ -95,8 +95,8 @@ type ExternalServiceDiscovery* = ref object of IPeerDiscovery
   adverts: Table[string, Advert]
   interests: Table[string, bool] ## key -> taken by the plugin
   ownClusterId: uint16
-    ## The records of other clusters claim no codecs, shards or mix key, see
-    ## `advertisedServing` and `advertisedMixKey`.
+    ## The records of other clusters give no codecs, shards or mix key, see
+    ## `advertisedServing` and `mixKeyAdvert`.
   announceWanted: AsyncEvent
   announceLoop: Future[void]
   observedPeerInfo: PeerInfo
@@ -142,24 +142,16 @@ proc admitPeers(self: ExternalServiceDiscovery, peers: seq[DiscoveredPeer]) =
       debug "discarding discovered peer", reason = error
       continue
 
-    # An older record than the one that last told this peer's mix key neither
-    # sets nor removes it.
-    let disclaims = disclaimsMix(peer.services, Opt.some(self.ownClusterId))
-    let admitted =
-      (peerInfo.mixPubKey.isSome() or disclaims) and
-      peerManager.switch.peerStore.admitMixRecord(peerInfo.peerId, peer.seqNo)
-    if not admitted:
-      reset(peerInfo.mixPubKey)
+    let advert = mixKeyAdvert(peer.services, self.ownClusterId)
+    let admitted = peerManager.admitMixRecord(peerInfo.peerId, peer.seqNo, advert)
 
     peerManager.addPeer(peerInfo, PeerOrigin.Kademlia)
-    if admitted and disclaims:
-      peerManager.switch.peerStore.removeMixPubKey(peerInfo.peerId)
 
     debug "Peer added via external service discovery",
       peerId = $peerInfo.peerId,
       seqNo = peer.seqNo,
-      mixKey = peerInfo.mixPubKey.isSome(),
-      disclaimsMix = disclaims,
+      mixKeyAdvert = advert.kind,
+      mixRecordAdmitted = admitted,
       addresses = peerInfo.addrs.mapIt($it),
       protocols = peerInfo.protocols
 

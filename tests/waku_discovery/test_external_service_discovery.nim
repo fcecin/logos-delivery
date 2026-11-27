@@ -529,7 +529,7 @@ suite "ExternalServiceDiscovery":
     check (await iface.lookupRandom()).isOk()
     check (await iface.stopDiscovery()).isOk()
 
-  asyncTest "a delivery record that claims no mix removes the peer's mix key":
+  asyncTest "a delivery record that does not advertise mix removes the peer's mix key":
     ## The peer lost its Mix RLN membership and advertises as a delivery node.
     proc peersJson(caps: CapabilitiesBitfield, withKey: bool, seqNo = 7): string =
       ## Service data travels base64-encoded, and the delivery payload is
