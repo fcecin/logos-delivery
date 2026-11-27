@@ -104,26 +104,37 @@ proc discv5Rng(rng: crypto.Rng): ref HmacDrbgContext =
 
 {.pop.}
 
+proc newDiscv5Protocol(
+    rng: crypto.Rng, conf: WakuDiscoveryV5Config, record: Opt[waku_enr.Record]
+): Result[protocol.Protocol, string] =
+  ## `newProtocol` raises a Defect when it cannot sign `record` again.
+  try:
+    return ok(
+      newProtocol(
+        rng = discv5Rng(rng),
+        config = conf.discv5Config.get(protocol.defaultDiscoveryConfig),
+        bindPort = conf.port,
+        bindIp = conf.address,
+        privKey = conf.privateKey,
+        bootstrapRecords = conf.bootstrapRecords,
+        enrAutoUpdate = conf.autoupdateRecord,
+        previousRecord = record,
+        enrIp = Opt.none(IpAddress),
+        enrTcpPort = Opt.none(Port),
+        enrUdpPort = Opt.none(Port),
+      )
+    )
+  except Exception as exc:
+    return err("failed to create the discv5 protocol: " & exc.msg)
+
 proc new*(
     T: type WakuDiscoveryV5,
     rng: crypto.Rng,
     conf: WakuDiscoveryV5Config,
     record: Opt[waku_enr.Record],
     peerManager: Opt[PeerManager] = Opt.none(PeerManager),
-): T =
-  let protocol = newProtocol(
-    rng = discv5Rng(rng),
-    config = conf.discv5Config.get(protocol.defaultDiscoveryConfig),
-    bindPort = conf.port,
-    bindIp = conf.address,
-    privKey = conf.privateKey,
-    bootstrapRecords = conf.bootstrapRecords,
-    enrAutoUpdate = conf.autoupdateRecord,
-    previousRecord = record,
-    enrIp = Opt.none(IpAddress),
-    enrTcpPort = Opt.none(Port),
-    enrUdpPort = Opt.none(Port),
-  )
+): Result[T, string] =
+  let protocol = ?newDiscv5Protocol(rng, conf, record)
 
   let shardPredOp =
     if record.isSome():
@@ -131,13 +142,15 @@ proc new*(
     else:
       Opt.none(WakuDiscv5Predicate)
 
-  WakuDiscoveryV5(
-    conf: conf,
-    protocol: protocol,
-    listening: false,
-    predicate: shardPredOp,
-    peerManager: peerManager,
-    brokerCtx: globalBrokerContext(),
+  ok(
+    WakuDiscoveryV5(
+      conf: conf,
+      protocol: protocol,
+      listening: false,
+      predicate: shardPredOp,
+      peerManager: peerManager,
+      brokerCtx: globalBrokerContext(),
+    )
   )
 
 proc updateENRShards(
@@ -457,7 +470,7 @@ proc setupDiscoveryV5*(
   )
 
   return
-    ok(WakuDiscoveryV5.new(rng, discv5Conf, Opt.some(myENR), Opt.some(nodePeerManager)))
+    WakuDiscoveryV5.new(rng, discv5Conf, Opt.some(myENR), Opt.some(nodePeerManager))
 
 proc setupAndStartDiscv5*(
     myENR: enr.Record,
