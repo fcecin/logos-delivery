@@ -20,10 +20,12 @@ import
   ../testlib/[wakucore, wakunode, testasync],
   ./utils.nim
 
-proc testRecord(): enr.Record =
-  var builder = EnrBuilder.init(generateSecp256k1Key())
+proc testRecord(
+    key = generateSecp256k1Key(), seqNum: uint64 = 1, tcpPort = Port(60000)
+): enr.Record =
+  var builder = EnrBuilder.init(key, seqNum)
   builder.withIpAddressAndPorts(
-    Opt.some(parseIpAddress("127.0.0.1")), Opt.some(Port(60000)), Opt.none(Port)
+    Opt.some(parseIpAddress("127.0.0.1")), Opt.some(tcpPort), Opt.none(Port)
   )
   return builder.build().expect("valid ENR")
 
@@ -75,6 +77,45 @@ suite "Waku Peer Exchange - cache liveness":
     pong.complete(true)
     checkUntilTimeout:
       wpx.getEnrsFromCache(uint64.high) == @[record]
+
+  asyncTest "A cached peer that a walk finds again stays served":
+    let
+      wpx = WakuPeerExchange.new(PeerManager.new(newTestSwitch()))
+      record = testRecord()
+    proc answers(r: enr.Record): Future[bool] {.async: (raises: [CancelledError]).} =
+      return true
+
+    wpx.startCacheRefresh(walkOf(@[record]), answers)
+    defer:
+      await wpx.stopCacheRefresh()
+
+    checkUntilTimeout:
+      wpx.getEnrsFromCache(uint64.high) == @[record]
+
+    wpx.addToCache(@[record])
+    check:
+      wpx.getEnrsFromCache(uint64.high) == @[record]
+
+  asyncTest "A changed record is not served before it answers a new ping":
+    let
+      wpx = WakuPeerExchange.new(PeerManager.new(newTestSwitch()))
+      key = generateSecp256k1Key()
+      record = testRecord(key)
+      changed = testRecord(key, seqNum = 2, tcpPort = Port(60001))
+    proc answers(r: enr.Record): Future[bool] {.async: (raises: [CancelledError]).} =
+      return true
+
+    wpx.startCacheRefresh(walkOf(@[record]), answers)
+    defer:
+      await wpx.stopCacheRefresh()
+
+    checkUntilTimeout:
+      wpx.getEnrsFromCache(uint64.high) == @[record]
+
+    wpx.addToCache(@[changed])
+    check:
+      wpx.cacheLen() == 1
+      wpx.getEnrsFromCache(uint64.high).len == 0
 
   asyncTest "A discv5 ping answers for a running node and fails once it stops":
     lockNewGlobalBrokerContext:

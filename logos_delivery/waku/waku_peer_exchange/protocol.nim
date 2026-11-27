@@ -145,9 +145,14 @@ proc addToCache*(wpx: WakuPeerExchange, records: openArray[enr.Record]) =
     let peerInfo = record.toRemotePeerInfo().valueOr:
       continue
     # Re-insert so a rediscovered peer moves to the young end.
+    # A changed record can have a new address, so it waits for a new PONG.
+    let prev = wpx.enrCache.getOrDefault(peerInfo.peerId)
     wpx.enrCache.del(peerInfo.peerId)
-    wpx.enrCache[peerInfo.peerId] =
-      PxCacheEntry(record: record, expiresAt: now + wpx.cacheTtl)
+    wpx.enrCache[peerInfo.peerId] = PxCacheEntry(
+      record: record,
+      expiresAt: now + wpx.cacheTtl,
+      answered: prev.answered and prev.record == record,
+    )
   while wpx.enrCache.len > MaxPeersCacheSize:
     var oldest: PeerId
     for peerId in wpx.enrCache.keys:
