@@ -493,7 +493,8 @@ proc initAndStartApp(
     autoupdateRecord: false,
   )
 
-  let wakuDiscv5 = WakuDiscoveryV5.new(node.rng, discv5Conf, Opt.some(record))
+  let wakuDiscv5 = WakuDiscoveryV5.new(node.rng, discv5Conf, Opt.some(record)).valueOr:
+    return err("could not start node: " & error)
 
   try:
     wakuDiscv5.protocol.open()

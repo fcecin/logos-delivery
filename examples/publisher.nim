@@ -75,7 +75,9 @@ proc setupAndPublish(rng: crypto.Rng) {.async.} =
   # assumes behind a firewall, so not care about being discoverable
   let wakuDiscv5 = WakuDiscoveryV5.new(
     node.rng, discv5Conf, Opt.some(node.enr), Opt.some(node.peerManager)
-  )
+  ).valueOr:
+    error "failed to create discv5", error = error
+    quit(1)
 
   await node.start()
   (await node.mountRelay()).isOkOr:

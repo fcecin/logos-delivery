@@ -45,8 +45,10 @@ proc startDiscv5WithAutoPort*(
       bootstrapRecords: bootstrapRecords,
       autoupdateRecord: true,
     )
-    let wd =
-      WakuDiscoveryV5.new(node.rng, conf, Opt.some(record), Opt.some(node.peerManager))
+    let wd = WakuDiscoveryV5.new(
+      node.rng, conf, Opt.some(record), Opt.some(node.peerManager)
+    ).valueOr:
+      return err(error)
     (await wd.start()).isOkOr:
       return err(error)
     return ok(wd)

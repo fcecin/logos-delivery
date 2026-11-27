@@ -543,3 +543,28 @@ suite "Waku Discovery v5":
         not waku.node.peerManager.switch.peerStore.peers().anyIt(
           it.enr.isSome() and it.enr.get().toUri() == invalidEnr
         )
+
+    test "a record that nim-eth cannot sign again is refused":
+      let privKey = generateSecp256k1Key()
+      let key = eth_keys.PrivateKey(privKey.skkey)
+      let conf = WakuDiscoveryV5Config(
+        privateKey: key, address: parseIpAddress("0.0.0.0"), port: Port(0)
+      )
+      proc padded(seqNum: uint64, padLength: int): EnrResult[ethEnr.Record] =
+        ethEnr.Record.init(
+          seqNum, key, extraFields = [toFieldPair("pad", newSeq[byte](padLength))]
+        )
+
+      ## Given the largest records that nim-eth makes
+      var padLength = 0
+      while padded(127, padLength + 1).isOk():
+        padLength.inc()
+      # nim-eth signs the record again with the next sequence number.
+      # 127 takes as many bytes as 126, and 128 takes one more byte.
+      let record126 = padded(126, padLength).get()
+      let record127 = padded(127, padLength).get()
+
+      ## Then
+      check:
+        WakuDiscoveryV5.new(libp2p_keys.newRng(), conf, Opt.some(record126)).isOk()
+        WakuDiscoveryV5.new(libp2p_keys.newRng(), conf, Opt.some(record127)).isErr()

@@ -21,8 +21,10 @@ proc newTestDiscv5*(
     bootstrapRecords: bootstrapRecords,
   )
 
-  let discv5 = WakuDiscoveryV5.new(
-    rng = rng(), conf = config, record = Opt.some(record), peerManager = peerManager
-  )
+  let discv5 = WakuDiscoveryV5
+    .new(
+      rng = rng(), conf = config, record = Opt.some(record), peerManager = peerManager
+    )
+    .tryGet()
 
   return discv5
