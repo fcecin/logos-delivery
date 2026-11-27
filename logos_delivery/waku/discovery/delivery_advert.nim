@@ -14,6 +14,9 @@ import
   logos_delivery/waku/discovery/peer_discovery_interface,
   logos_delivery/waku/waku_enr/capabilities
 
+logScope:
+  topics = "waku discovery advert"
+
 const
   AdvertFormatVersion* = 1'u8
     ## Bumped whenever the layout changes, so a reader can refuse a payload it
@@ -95,10 +98,15 @@ func claimsMixNode(data: openArray[byte], ownClusterId: uint16): Result[bool, st
   ## An error for a payload that this version does not read.
   let caps = ?advertisedCapabilities(data)
   let (cluster, _) = ?advertisedShards(data)
-  ok(
-    cluster == ownClusterId and caps.supportsCapability(Capabilities.Relay) and
-      caps.supportsCapability(Capabilities.Mix)
-  )
+  if cluster != ownClusterId:
+    return ok(false)
+  if not caps.supportsCapability(Capabilities.Mix):
+    trace "Delivery record does not advertise Mix"
+    return ok(false)
+  if not caps.supportsCapability(Capabilities.Relay):
+    trace "Delivery record advertises Mix without Relay"
+    return ok(false)
+  ok(true)
 
 func advertisedMixKey*(
     services: openArray[DiscoveredService], ownClusterId: uint16
