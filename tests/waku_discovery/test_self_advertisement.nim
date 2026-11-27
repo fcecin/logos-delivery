@@ -127,7 +127,8 @@ suite "Self advertisement":
       ## What a reader of this record takes.
       advertisedMixKey(
         @[DiscoveredService(id: LogosDeliveryServiceId, data: kad.advertisedData[0])] &
-          kad.advertisedSecondary[0]
+          kad.advertisedSecondary[0],
+        16'u16,
       ) == Opt.some(intoCurve25519Key(mixKeyBytes()))
 
   asyncTest "a mix node that is not ready advertises as a delivery node only":

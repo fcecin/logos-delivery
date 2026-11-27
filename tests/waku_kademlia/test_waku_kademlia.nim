@@ -67,7 +67,7 @@ suite "Waku Kademlia service discovery":
 
     test "a delivery record claiming relay and mix gives its key":
       let bytes = validKeyBytes()
-      let res = advertisedMixKey(services(MixNodeCaps, MixProtocolID, bytes))
+      let res = advertisedMixKey(services(MixNodeCaps, MixProtocolID, bytes), 0'u16)
       require:
         res.isSome()
       check:
@@ -75,17 +75,19 @@ suite "Waku Kademlia service discovery":
 
     test "a mix key with no delivery service gives none":
       check advertisedMixKey(
-        @[DiscoveredService(id: MixProtocolID, data: validKeyBytes())]
+        @[DiscoveredService(id: MixProtocolID, data: validKeyBytes())], 0'u16
       )
         .isNone()
 
     test "a delivery record that does not claim mix gives none":
       let caps = CapabilitiesBitfield.init(relay = true)
-      check advertisedMixKey(services(caps, MixProtocolID, validKeyBytes())).isNone()
+      check advertisedMixKey(services(caps, MixProtocolID, validKeyBytes()), 0'u16)
+        .isNone()
 
     test "a delivery record that claims mix without relay gives none":
       let caps = CapabilitiesBitfield.init(filter = true, mix = true)
-      check advertisedMixKey(services(caps, MixProtocolID, validKeyBytes())).isNone()
+      check advertisedMixKey(services(caps, MixProtocolID, validKeyBytes()), 0'u16)
+        .isNone()
 
     test "a delivery payload of another format version gives none":
       let payload = cast[seq[byte]](base64.encode(
@@ -95,7 +97,8 @@ suite "Waku Kademlia service discovery":
         @[
           DiscoveredService(id: LogosDeliveryServiceId, data: payload),
           DiscoveredService(id: MixProtocolID, data: validKeyBytes()),
-        ]
+        ],
+        0'u16,
       )
         .isNone()
 
@@ -104,23 +107,28 @@ suite "Waku Kademlia service discovery":
         @[
           DiscoveredService(id: LogosDeliveryServiceId, data: @[0xff'u8, 0x00, 0x01]),
           DiscoveredService(id: MixProtocolID, data: validKeyBytes()),
-        ]
+        ],
+        0'u16,
       )
         .isNone()
 
     test "a key of the wrong length gives none":
-      check advertisedMixKey(services(MixNodeCaps, MixProtocolID, @[0u8, 1u8, 2u8]))
+      check advertisedMixKey(
+        services(MixNodeCaps, MixProtocolID, @[0u8, 1u8, 2u8]), 0'u16
+      )
         .isNone()
 
     test "a key under another service id gives none":
-      check advertisedMixKey(services(MixNodeCaps, "/foo/1.0.0", validKeyBytes()))
+      check advertisedMixKey(
+        services(MixNodeCaps, "/foo/1.0.0", validKeyBytes()), 0'u16
+      )
         .isNone()
 
     test "a delivery record of another cluster gives none":
       let services = services(MixNodeCaps, MixProtocolID, validKeyBytes())
       check:
-        advertisedMixKey(services, Opt.some(0'u16)).isSome()
-        advertisedMixKey(services, Opt.some(1'u16)).isNone()
+        advertisedMixKey(services, 0'u16).isSome()
+        advertisedMixKey(services, 1'u16).isNone()
 
   suite "disclaimsMix":
     proc delivery(caps: CapabilitiesBitfield): DiscoveredService =
@@ -130,35 +138,36 @@ suite "Waku Kademlia service discovery":
       DiscoveredService(id: MixProtocolID, data: newSeq[byte](Curve25519KeySize))
 
     test "a delivery record that claims no mix disclaims":
-      check disclaimsMix(@[delivery(CapabilitiesBitfield.init(relay = true))])
+      check disclaimsMix(@[delivery(CapabilitiesBitfield.init(relay = true))], 0'u16)
 
     test "a delivery record that claims mix without relay disclaims":
       check disclaimsMix(
-        @[delivery(CapabilitiesBitfield.init(filter = true, mix = true))]
+        @[delivery(CapabilitiesBitfield.init(filter = true, mix = true))], 0'u16
       )
 
     test "a delivery record claiming relay and mix with its key does not":
-      check not disclaimsMix(@[delivery(MixNodeCaps), mixKey()])
+      check not disclaimsMix(@[delivery(MixNodeCaps), mixKey()], 0'u16)
 
     test "a delivery record of another cluster disclaims":
       for services in [@[delivery(MixNodeCaps), mixKey()], @[delivery(MixNodeCaps)]]:
         check:
-          disclaimsMix(services, Opt.some(1'u16))
-          not disclaimsMix(services, Opt.some(0'u16))
+          disclaimsMix(services, 1'u16)
+          not disclaimsMix(services, 0'u16)
 
     test "a delivery record claiming relay and mix without a key does not":
       ## libp2p's own record of a mix node, as a random lookup returns it.
-      check not disclaimsMix(@[delivery(MixNodeCaps)])
+      check not disclaimsMix(@[delivery(MixNodeCaps)], 0'u16)
 
     test "a record with no delivery service does not":
       check:
-        not disclaimsMix(@[])
-        not disclaimsMix(@[DiscoveredService(id: "/other/1.0.0", data: @[1'u8])])
+        not disclaimsMix(@[], 0'u16)
+        not disclaimsMix(@[DiscoveredService(id: "/other/1.0.0", data: @[1'u8])], 0'u16)
 
     test "a delivery payload it cannot read does not":
       check:
         not disclaimsMix(
-          @[DiscoveredService(id: LogosDeliveryServiceId, data: @[0xff'u8, 0x00])]
+          @[DiscoveredService(id: LogosDeliveryServiceId, data: @[0xff'u8, 0x00])],
+          0'u16,
         )
         not disclaimsMix(
           @[
@@ -168,7 +177,8 @@ suite "Waku Kademlia service discovery":
                 @[AdvertFormatVersion + 1, 0'u8, 0'u8, 0'u8]
               )),
             )
-          ]
+          ],
+          0'u16,
         )
 
   suite "remotePeerInfoFrom":

@@ -260,7 +260,8 @@ suite "Waku Kademlia node advertising":
       advertisedMixKey(
         node.publishedServices().mapIt(
           DiscoveredService(id: it.id, data: it.data.get(@[]))
-        )
+        ),
+        conf.clusterId,
       )
         .isNone()
       node.publishedServices().allIt(it.id != MixProtocolID)

@@ -94,7 +94,7 @@ proc remotePeerInfoFrom*(
   let (codecs, shards) = advertisedServing(record.discoveredServices(), ownClusterId)
   let protocols = deduplicate(record.services.mapIt(it.id) & codecs)
 
-  let mixPubKey = advertisedMixKey(record.discoveredServices(), Opt.some(ownClusterId))
+  let mixPubKey = advertisedMixKey(record.discoveredServices(), ownClusterId)
   if mixPubKey.isSome():
     trace "Successfully extracted mix pub key",
       peerId = record.peerId, keyHex = byteutils.toHex(mixPubKey.get())
@@ -120,8 +120,7 @@ proc processRecords*(
 
     # An older record than the one that last told this peer's mix key neither
     # sets nor removes it.
-    let disclaims =
-      disclaimsMix(record.discoveredServices(), Opt.some(self.ownClusterId))
+    let disclaims = disclaimsMix(record.discoveredServices(), self.ownClusterId)
     let admitted =
       (peerInfo.mixPubKey.isSome() or disclaims) and
       self.peerManager.switch.peerStore.admitMixRecord(peerInfo.peerId, record.seqNo)

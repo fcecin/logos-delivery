@@ -90,22 +90,18 @@ func withoutMixClaim*(data: seq[byte]): seq[byte] =
   raw[3] = raw[3] and not byte(1'u8 shl ord(Capabilities.Mix))
   cast[seq[byte]](base64.encode(raw))
 
-func claimsMixNode(
-    data: openArray[byte], ownClusterId: Opt[uint16]
-): Result[bool, string] =
+func claimsMixNode(data: openArray[byte], ownClusterId: uint16): Result[bool, string] =
   ## Whether a `/logos/delivery` payload claims Relay and Mix on `ownClusterId`.
   ## An error for a payload that this version does not read.
-  ## Any cluster counts when `ownClusterId` is none.
   let caps = ?advertisedCapabilities(data)
   let (cluster, _) = ?advertisedShards(data)
   ok(
-    (ownClusterId.isNone() or ownClusterId.get() == cluster) and
-      caps.supportsCapability(Capabilities.Relay) and
+    cluster == ownClusterId and caps.supportsCapability(Capabilities.Relay) and
       caps.supportsCapability(Capabilities.Mix)
   )
 
 func advertisedMixKey*(
-    services: openArray[DiscoveredService], ownClusterId = Opt.none(uint16)
+    services: openArray[DiscoveredService], ownClusterId: uint16
 ): Opt[Curve25519Key] =
   ## The mix key of a peer whose record lists these services.
   ##
@@ -129,9 +125,7 @@ func advertisedMixKey*(
     return Opt.none(Curve25519Key)
   key
 
-func disclaimsMix*(
-    services: openArray[DiscoveredService], ownClusterId = Opt.none(uint16)
-): bool =
+func disclaimsMix*(services: openArray[DiscoveredService], ownClusterId: uint16): bool =
   ## Whether a record listing these services says that its peer is no mix
   ## node of `ownClusterId`: its delivery payload is one this version reads and
   ## claims not both Relay and Mix on that cluster. Only such a record removes

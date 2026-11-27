@@ -144,7 +144,7 @@ proc admitPeers(self: ExternalServiceDiscovery, peers: seq[DiscoveredPeer]) =
 
     # An older record than the one that last told this peer's mix key neither
     # sets nor removes it.
-    let disclaims = disclaimsMix(peer.services, Opt.some(self.ownClusterId))
+    let disclaims = disclaimsMix(peer.services, self.ownClusterId)
     let admitted =
       (peerInfo.mixPubKey.isSome() or disclaims) and
       peerManager.switch.peerStore.admitMixRecord(peerInfo.peerId, peer.seqNo)
