@@ -61,6 +61,5 @@ proc toRemotePeerInfo*(
       protocols = deduplicate(peer.services.mapIt(it.id) & codecs),
       advertisedShards = shards,
       origin = PeerOrigin.Kademlia,
-      mixPubKey = advertisedMixKey(peer.services),
     )
   )

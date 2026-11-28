@@ -529,7 +529,7 @@ suite "ExternalServiceDiscovery":
     check (await iface.lookupRandom()).isOk()
     check (await iface.stopDiscovery()).isOk()
 
-  asyncTest "a delivery record that claims no mix removes the peer's mix key":
+  asyncTest "a delivery record that does not advertise mix removes the peer's mix key":
     ## The peer lost its Mix RLN membership and advertises as a delivery node.
     proc peersJson(caps: CapabilitiesBitfield, withKey: bool, seqNo = 7): string =
       ## Service data travels base64-encoded, and the delivery payload is
@@ -586,6 +586,54 @@ suite "ExternalServiceDiscovery":
     check pid notin peerManager.switch.peerStore[MixPubKeyBook]
 
     setPeersJson(peersJson(mixNode, true, seqNo = 9))
+    check (await iface.lookupServicePeers("service:/logos/delivery", 1)).isOk()
+    check pid notin peerManager.switch.peerStore[MixPubKeyBook]
+
+    check (await iface.stopDiscovery()).isOk()
+
+  asyncTest "a delivery record of another cluster removes the peer's mix key":
+    ## The peer moves to cluster 1 and back, with the same peer id and mix key.
+    proc mixNodeJson(cluster: byte): string =
+      var raw = newSeq[byte](AdvertHeaderLen)
+      raw[0] = AdvertFormatVersion
+      raw[2] = cluster
+      raw[^1] = byte(CapabilitiesBitfield.init(relay = true, mix = true))
+      let payload = base64.encode(raw)
+      $(
+        %*[
+          {
+            "peerId": FakePeerId,
+            "seqNo": 7,
+            "addrs": ["/ip4/1.2.3.4/tcp/60000"],
+            "services": [
+              {"id": LogosDeliveryServiceId, "data": base64.encode(payload)},
+              {"id": "/mix/1.0.0", "data": base64.encode(newSeq[byte](32))},
+            ],
+          }
+        ]
+      )
+
+    let backend = ExternalServiceDiscovery.create(1)
+    let ctx = globalBrokerContext()
+    check (await SetServiceDiscoveryPlugin.request(ctx, fakePlugin())).isOk()
+    let peerManager = PeerManager.new(switch = newTestSwitch(), storage = nil)
+    discard GetNodePeerManager.reprovideIt(ctx):
+      ok(peerManager)
+    let iface: IPeerDiscovery = backend
+    check (await iface.startDiscovery()).isOk()
+    let pid = PeerId.init(FakePeerId).get()
+
+    setPeersJson(mixNodeJson(cluster = 2))
+    check:
+      (await iface.lookupServicePeers("service:/logos/delivery", 1)).isOk()
+      pid notin peerManager.switch.peerStore[MixPubKeyBook]
+      WakuRelayCodec notin peerManager.switch.peerStore[ProtoBook][pid]
+
+    setPeersJson(mixNodeJson(cluster = 1))
+    check (await iface.lookupServicePeers("service:/logos/delivery", 1)).isOk()
+    check pid in peerManager.switch.peerStore[MixPubKeyBook]
+
+    setPeersJson(mixNodeJson(cluster = 2))
     check (await iface.lookupServicePeers("service:/logos/delivery", 1)).isOk()
     check pid notin peerManager.switch.peerStore[MixPubKeyBook]
 

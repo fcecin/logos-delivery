@@ -5,16 +5,13 @@ import
   chronos,
   chronicles,
   results,
-  stew/byteutils,
   libp2p/[peerid, multiaddress, switch, extended_peer_record],
   libp2p/crypto/crypto,
   libp2p/crypto/rng,
-  libp2p/crypto/curve25519,
   libp2p/protocols/service_discovery,
   libp2p/protocols/service_discovery/types,
   libp2p/protocols/kademlia/types,
   libp2p/protocols/kademlia/key_value,
-  libp2p_mix/mix_protocol,
   brokers/broker_context
 
 import
@@ -54,8 +51,8 @@ type WakuKademlia* = ref object
   serviceLookupInterval: Duration
   servicesToDiscover: HashSet[string]
   ownClusterId: uint16
-    ## The records of other clusters claim no codecs and shards, see
-    ## `advertisedServing`.
+    ## The records of other clusters give no codecs, shards or mix key, see
+    ## `advertisedServing` and `mixKeyAdvert`.
   servicesToAdvertise: Table[string, AdvertisedService]
     ## Keyed by service id: libp2p keeps one record per service. In production
     ## the only key is `/logos/delivery`, whose record also lists the mix key.
@@ -94,11 +91,6 @@ proc remotePeerInfoFrom*(
   let (codecs, shards) = advertisedServing(record.discoveredServices(), ownClusterId)
   let protocols = deduplicate(record.services.mapIt(it.id) & codecs)
 
-  let mixPubKey = advertisedMixKey(record.discoveredServices())
-  if mixPubKey.isSome():
-    trace "Successfully extracted mix pub key",
-      peerId = record.peerId, keyHex = byteutils.toHex(mixPubKey.get())
-
   return Opt.some(
     RemotePeerInfo.init(
       record.peerId,
@@ -106,7 +98,6 @@ proc remotePeerInfoFrom*(
       protocols = protocols,
       advertisedShards = shards,
       origin = PeerOrigin.Kademlia,
-      mixPubKey = mixPubKey,
     )
   )
 
@@ -118,22 +109,20 @@ proc processRecords*(
     let peerInfo = remotePeerInfoFrom(record, self.ownClusterId).valueOr:
       continue
 
-    # An older record than the one that last told this peer's mix key neither
-    # sets nor removes it.
-    let disclaims = disclaimsMix(record.discoveredServices())
+    let advert = mixKeyAdvert(record.discoveredServices(), self.ownClusterId)
     let admitted =
-      (peerInfo.mixPubKey.isSome() or disclaims) and
-      self.peerManager.switch.peerStore.admitMixRecord(peerInfo.peerId, record.seqNo)
-    if not admitted:
-      reset(peerInfo.mixPubKey)
+      self.peerManager.admitMixRecord(peerInfo.peerId, record.seqNo, advert)
 
     self.peerManager.addPeer(peerInfo, PeerOrigin.Kademlia)
-    if admitted and disclaims:
-      self.peerManager.switch.peerStore.removeMixPubKey(peerInfo.peerId)
+    if admitted and advert.kind == MixKeyAdvertKind.Key:
+      # The caller of the lookup gets the mix key too.
+      peerInfo.mixPubKey = Opt.some(advert.key)
 
     debug "Peer added via service discovery",
       source,
       peerId = $peerInfo.peerId,
+      mixKeyAdvert = advert.kind,
+      mixRecordAdmitted = admitted,
       addresses = peerInfo.addrs.mapIt($it),
       protocols = peerInfo.protocols
 

@@ -81,13 +81,15 @@ proc requestAll*(
       continue
     # The record is signed at each registration, so it also outdates the keyless
     # record that service discovery may still return for this peer.
-    if not self.switch.peerStore.admitMixRecord(record.peerId, record.seqNo):
+    if not self.peerManager.admitMixRecord(
+      record.peerId,
+      record.seqNo,
+      MixKeyAdvert(kind: MixKeyAdvertKind.Key, key: mixPubKey),
+    ):
       continue
     trace "adding peer from rendezvous",
       peerId = record.peerId, addresses = $record.addresses, mixKey = record.mixKey
-    let rInfo = RemotePeerInfo.init(
-      record.peerId, record.addresses, mixPubKey = Opt.some(mixPubKey)
-    )
+    let rInfo = RemotePeerInfo.init(record.peerId, record.addresses)
     self.peerManager.addPeer(rInfo)
 
   trace "Waku rendezvous client request finished"
