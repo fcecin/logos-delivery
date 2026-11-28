@@ -9,13 +9,15 @@ import
   libp2p/crypto/crypto as libp2p_keys,
   eth/common/keys as eth_keys,
   eth/p2p/discoveryv5/enr as ethEnr,
-  libp2p/crypto/secp
+  libp2p/crypto/secp,
+  brokers/broker_context
 
 import
   logos_delivery/waku/[
     waku_core/codecs,
     waku_enr,
     discovery/waku_discv5,
+    discovery/discv5_peer_discovery,
     net/auto_port,
     waku_enr/capabilities,
     factory/conf_builder/conf_builder,
@@ -568,3 +570,97 @@ suite "Waku Discovery v5":
       check:
         WakuDiscoveryV5.new(libp2p_keys.newRng(), conf, Opt.some(record126)).isOk()
         WakuDiscoveryV5.new(libp2p_keys.newRng(), conf, Opt.some(record127)).isErr()
+
+    asyncTest "discv5 starts on a record with the announced host and its UDP port":
+      var confBuilder = defaultTestWakuConfBuilder()
+      confBuilder.withP2pListenAddress(parseIpAddress("0.0.0.0"))
+      confBuilder.withExtMultiAddrs(@["/ip4/203.0.113.9/tcp/60000"])
+      confBuilder.discv5Conf.withEnabled(true)
+      confBuilder.discv5Conf.withUdpPort(Port(0))
+      let conf = confBuilder.build().valueOr:
+        raiseAssert error
+      # A broker context of its own keeps this node's providers away from later tests.
+      lockNewGlobalBrokerContext:
+        let waku = (await Waku.new(conf)).valueOr:
+          raiseAssert error
+
+        # `node.start` starts discv5 before `Waku.start` rebuilds the record.
+        await waku.node.start()
+        defer:
+          discard await waku.stop()
+
+        ## Then
+        let discv5 = waku.discv5Discovery.inner
+        check not discv5.isNil()
+        if discv5.isNil():
+          return
+        let typed = discv5.protocol.localNode.record.toTyped().tryGet()
+        check:
+          typed.ip == Opt.some([203'u8, 0, 113, 9])
+          typed.udp == Opt.some(discv5.udpPort.uint16)
+
+    asyncTest "a bootstrap node holds a node on a random port after each start":
+      proc noData(
+          transp: DatagramTransport, raddr: TransportAddress
+      ): Future[void] {.async: (raises: []).} =
+        discard
+
+      var bootBuilder = defaultTestWakuConfBuilder()
+      bootBuilder.withP2pListenAddress(parseIpAddress("127.0.0.1"))
+      bootBuilder.discv5Conf.withEnabled(true)
+      bootBuilder.discv5Conf.withUdpPort(Port(0))
+      let bootConf = bootBuilder.build().valueOr:
+        raiseAssert error
+      var boot: Waku
+      # A broker context of its own keeps this node's providers away from later tests.
+      lockNewGlobalBrokerContext:
+        boot = (await Waku.new(bootConf)).valueOr:
+          raiseAssert error
+      (await boot.start()).isOkOr:
+        raiseAssert error
+      defer:
+        discard await boot.stop()
+
+      var nodeBuilder = defaultTestWakuConfBuilder()
+      nodeBuilder.withP2pListenAddress(parseIpAddress("127.0.0.1"))
+      nodeBuilder.discv5Conf.withEnabled(true)
+      nodeBuilder.discv5Conf.withUdpPort(Port(0))
+      nodeBuilder.discv5Conf.withBootstrapNodes(@[boot.node.enr.toURI()])
+      # A static node keeps the start busy after discv5 sends its first packets.
+      let bootInfo = boot.node.switch.peerInfo
+      nodeBuilder.withStaticNodes(@[$bootInfo.addrs[0] & "/p2p/" & $bootInfo.peerId])
+      let nodeConf = nodeBuilder.build().valueOr:
+        raiseAssert error
+      var node: Waku
+      lockNewGlobalBrokerContext:
+        node = (await Waku.new(nodeConf)).valueOr:
+          raiseAssert error
+
+      proc heldOnItsPort(): bool =
+        let discv5 = node.wakuDiscv5
+        let held = boot.wakuDiscv5.protocol.getNode(discv5.protocol.localNode.id)
+        held.isSome() and
+          held.get().record.toTyped().tryGet().udp == Opt.some(discv5.udpPort.uint16)
+
+      ## When the node starts, and starts again on a new random port
+      (await node.start()).isOkOr:
+        raiseAssert error
+      defer:
+        discard await node.stop()
+      checkUntilTimeoutCustom(2.seconds, 10.milliseconds):
+        heldOnItsPort()
+      let firstPort = node.wakuDiscv5.udpPort
+      (await node.stop()).isOkOr:
+        raiseAssert error
+      # The first port stays taken, so the restart must use a new one.
+      let taken =
+        newDatagramTransport(noData, local = initTAddress("127.0.0.1", firstPort))
+      defer:
+        await taken.closeWait()
+      (await node.start()).isOkOr:
+        raiseAssert error
+
+      ## Then the bootstrap node holds the node with its new port
+      check node.wakuDiscv5.udpPort != firstPort
+      checkUntilTimeoutCustom(2.seconds, 10.milliseconds):
+        heldOnItsPort()

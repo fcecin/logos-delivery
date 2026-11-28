@@ -225,6 +225,63 @@ procSuite "ENR endpoints":
       mismatched.ipOf().get() == [198'u8, 51, 100, 4]
       mismatched.tcpOf().get() == 1234'u16
 
+  test "a UDP port replaces the port of the record and keeps every other field":
+    let key = generateSecp256k1Key()
+    for host in [parseIpAddress("203.0.113.9"), parseIpAddress("2001:db8::9")]:
+      var builder = EnrBuilder.init(key)
+      builder.withIpAddressAndPorts(
+        ipAddr = Opt.some(host),
+        tcpPort = Opt.some(Port(60000)),
+        udpPort = Opt.some(Port(30000)),
+      )
+      builder.addFieldPair("pad", @[1'u8, 2, 3])
+      var record = builder.build().expect("record")
+      let seqBefore = record.seqNum
+
+      check record.updateEnrUdpPort(key, Port(50123)).isOk()
+      let typed = record.toTyped().expect("typed")
+      check:
+        typed.udp.get() == 50123'u16
+        typed.tcp.get() == 60000'u16
+        record.tryGet("pad", seq[byte]) == Opt.some(@[1'u8, 2, 3])
+        record.seqNum == seqBefore + 1
+      if host.family == IpAddressFamily.IPv4:
+        check typed.ip.get() == host.address_v4
+      else:
+        check typed.ip6.get() == host.address_v6
+
+  test "a UDP port goes into a full record in place of the last multiaddrs":
+    let key = generateSecp256k1Key()
+    let addrs = @[
+      MultiAddress.init("/ip4/203.0.113.9/tcp/60000").get(),
+      MultiAddress.init("/ip4/203.0.113.9/tcp/60001/ws").get(),
+      MultiAddress.init("/ip4/203.0.113.9/udp/60002/quic-v1").get(),
+    ]
+    let baseline = (ip: Opt.none(IpAddress), tcp: Opt.none(Port))
+
+    ## A record that holds all the multiaddrs but has no room for a UDP port.
+    var record: enr.Record
+    var full = false
+    for padLen in countdown(255, 0):
+      var builder = EnrBuilder.init(key)
+      builder.addFieldPair("pad", newSeq[byte](padLen))
+      var candidate = builder.build().valueOr:
+        continue
+      if candidate.updateEnrAddresses(key, addrs, baseline).isOk() and
+          candidate.multiaddrsOf() == addrs:
+        record = candidate
+        full = record.raw.len > 293
+        break
+    check full
+
+    ## The port takes 7 bytes, so only the last multiaddr goes.
+    check record.updateEnrUdpPort(key, Port(50123)).isOk()
+    check:
+      record.udpOf().get() == 50123'u16
+      record.ipOf().get() == [203'u8, 0, 113, 9]
+      record.multiaddrsOf() == addrs[0 ..< addrs.len - 1]
+      record.tryGet("pad", seq[byte]).isSome()
+
   asyncTest "a wildcard-bound node stays dialable once discv5 learns its host":
     ## End to end over the production refresh, not the writer alone.
     let key = generateSecp256k1Key()
