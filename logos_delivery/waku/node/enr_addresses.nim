@@ -67,6 +67,21 @@ proc rebuild(
   record = rebuilt
   return ok()
 
+proc fitAddresses(
+    record: var enr.Record,
+    pk: keys.PrivateKey,
+    scalars: Scalars,
+    addrs: seq[MultiAddress],
+): Result[void, string] =
+  ## Dropping tail entries only helps when the record is too large.
+  for retained in countdown(addrs.len, 0):
+    let fields =
+      @[toFieldPair(MultiaddrEnrField, encodeMultiaddrs(addrs[0 ..< retained]))]
+    if record.rebuild(pk, scalars, fields).isOk():
+      debug "ENR addresses updated", retained = retained, total = addrs.len
+      return ok()
+  return err("failed to update ENR addresses at every prefix")
+
 proc hasDialableAddress*(record: enr.Record): bool =
   let typed = record.toTyped().valueOr:
     return false
@@ -113,11 +128,29 @@ proc updateEnrAddresses*(
 
   let sorted =
     usable.filterIt(it.isCircuitRelayMA()) & usable.filterIt(not it.isCircuitRelayMA())
-  ## Dropping tail entries only helps when the record is too large.
-  for retained in countdown(sorted.len, 0):
-    let fields =
-      @[toFieldPair(MultiaddrEnrField, encodeMultiaddrs(sorted[0 ..< retained]))]
-    if record.rebuild(pk, scalars, fields).isOk():
-      debug "ENR addresses updated", retained = retained, total = sorted.len
-      return ok()
-  return err("failed to update ENR addresses at every prefix")
+  return record.fitAddresses(pk, scalars, sorted)
+
+proc updateEnrUdpPort*(
+    record: var enr.Record, key: crypto.PrivateKey, port: Port
+): Result[void, string] =
+  ## Write `port` as the `udp` of `record`, next to the `ip` and `tcp` it has.
+  ## When the record is too large, this drops multiaddrs from the end of the list.
+  let pk = ?key.toEnrKey()
+  let typed = record.toTyped().valueOr:
+    return err("failed to read the record: " & $error)
+  let host =
+    if typed.ip.isSome():
+      Opt.some(IpAddress(family: IpAddressFamily.IPv4, address_v4: typed.ip.get()))
+    elif typed.ip6.isSome():
+      Opt.some(IpAddress(family: IpAddressFamily.IPv6, address_v6: typed.ip6.get()))
+    else:
+      Opt.none(IpAddress)
+  let tcp =
+    if typed.tcp.isSome():
+      Opt.some(Port(typed.tcp.get()))
+    else:
+      Opt.none(Port)
+  let scalars: Scalars = (ip: host, tcp: tcp, udp: Opt.some(port))
+  let addrs = typed.multiaddrs().valueOr:
+    return record.rebuild(pk, scalars, @[])
+  return record.fitAddresses(pk, scalars, addrs)

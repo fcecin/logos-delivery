@@ -17,6 +17,7 @@ import brokers/[event_broker, broker_context]
 import
   logos_delivery/waku/[
     net/auto_port,
+    node/enr_addresses,
     node/peer_manager/peer_manager,
     waku_core,
     waku_enr,
@@ -483,13 +484,17 @@ proc setupAndStartDiscv5*(
 ): Future[Result[WakuDiscoveryV5, string]] {.async: (raises: []).} =
   ## Construct and start a `WakuDiscoveryV5` instance, handling auto-port
   ## retry when the caller asks for `udpPort == 0`.
+  ## Each attempt starts discv5 on `myENR` with the UDP port of the attempt.
   proc attempt(
       port: Port
   ): Future[Result[WakuDiscoveryV5, string]] {.async: (raises: []).} =
     var c = conf
     c.udpPort = port
+    var record = myENR
+    record.updateEnrUdpPort(key, port).isOkOr:
+      return err("failed to write the discv5 port into the ENR: " & error)
     let wd = setupDiscoveryV5(
-      myENR, nodePeerManager, c, dynamicBootstrapNodes, rng, key, p2pListenAddress
+      record, nodePeerManager, c, dynamicBootstrapNodes, rng, key, p2pListenAddress
     ).valueOr:
       return err(error)
     let startRes = await wd.start()
